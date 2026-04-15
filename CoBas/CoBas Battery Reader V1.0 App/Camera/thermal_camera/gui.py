@@ -101,7 +101,7 @@ class _PreviewRendererMixin:
         marker_font,
         expanded,
     ):
-        """Draw changing MIN/MAX pointers on a fixed Celsius reference."""
+        """Draw changing MIN/MAX pointers on the selected Celsius scale."""
         if extrema is None or celsius_range is None:
             return
 
@@ -217,7 +217,7 @@ class _PreviewRendererMixin:
             bar_left = panel_left + (16 if expanded else 10)
         else:
             # Reserve the left side for live MIN/MAX labels while retaining
-            # enough room on the right for the fixed Celsius tick labels.
+            # enough room on the right for the selected Celsius tick labels.
             bar_left = panel_left + (82 if expanded else 48)
         bar_right = bar_left + (34 if expanded else 18)
         bar_top = panel_top + (66 if expanded else 38)
@@ -361,7 +361,7 @@ class ColoredThermalRenderer(
     BackendColoredThermalRenderer,
     _PreviewRendererMixin,
 ):
-    """Use the fixed Hardware Celsius colors in the CoBas presentation."""
+    """Use the complete Hardware color spectrum in the CoBas presentation."""
 
     def __init__(self, min_celsius=None, max_celsius=None):
         BackendColoredThermalRenderer.__init__(
@@ -373,10 +373,9 @@ class ColoredThermalRenderer(
 
     def temperature_legend_title(self):
         min_celsius, max_celsius = self.legend_celsius_range()
-        color_resolution = self.COLOR_RESOLUTION_CELSIUS
         return (
-            f"0–60 °C · {color_resolution:.2f} °C COLORS\n"
-            f"DISPLAYING {min_celsius:g}–{max_celsius:g} °C"
+            "FULL COLOR SPECTRUM\n"
+            f"{min_celsius:g}–{max_celsius:g} °C SCALE"
         )
 
 

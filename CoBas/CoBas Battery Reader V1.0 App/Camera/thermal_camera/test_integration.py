@@ -56,7 +56,7 @@ class CoBasThermalCameraIntegrationTests(unittest.TestCase):
         self.assertEqual(len(heat_map.mapping), 1201)
         self.assertEqual(len(set(heat_map.mapping.values())), 1201)
 
-    def test_range_change_and_preview_use_fixed_celsius_colors(self):
+    def test_range_change_assigns_full_unchanged_spectrum(self):
         self.assertTrue(self.camera.set_temperature_range(15, 30))
         frame = [
             750 + index % 51
@@ -66,11 +66,47 @@ class CoBasThermalCameraIntegrationTests(unittest.TestCase):
             self.camera.latest_frame = frame
 
         preview = self.camera.get_preview_image(640, 480)
-        colors = self.camera.rgb_renderer.frame_colors([750, 753, 755])
+        heat_map = CelsiusHeatMap()
+        spectrum_positions = range(len(heat_map.COLOR_STOPS))
+        expected_spectrum = [
+            heat_map.COLOR_STOPS[index]
+            for index in spectrum_positions
+        ]
+        selected_spectrum = [
+            self.camera.rgb_renderer.scale_color(
+                index / (len(heat_map.COLOR_STOPS) - 1)
+            )
+            for index in spectrum_positions
+        ]
 
         self.assertEqual(preview.size, (640, 480))
         self.assertEqual(self.camera.get_temperature_range(), (15.0, 30.0))
-        self.assertEqual(len(colors), len(set(colors)))
+        self.assertEqual(selected_spectrum, expected_spectrum)
+
+    def test_color_mapping_subtracts_absolute_frame_minimum(self):
+        self.assertTrue(self.camera.set_temperature_range(0, 15))
+        frame = [750, 750, 1125, 1500, 1800]
+
+        colors = self.camera.rgb_renderer.frame_colors(frame)
+
+        self.assertEqual(
+            self.camera.rgb_renderer.last_frame_min_celsius,
+            15.0,
+        )
+        self.assertEqual(
+            colors,
+            [
+                "#000030",
+                "#000030",
+                "#00f596",
+                "#ffffff",
+                "#ffffff",
+            ],
+        )
+        self.assertEqual(
+            self.camera.rgb_renderer.legend_extrema_celsius(frame),
+            (15.0, 36.0),
+        )
 
     def test_colored_and_grayscale_modes_share_selected_range(self):
         self.camera.set_temperature_range(12.5, 28.75)

@@ -232,9 +232,9 @@ class ThermalRenderer:
     DEFAULT_MAX_CELSIUS = CelsiusHeatMap.DEFAULT_DISPLAY_MAX_CELSIUS
 
     def __init__(self, min_celsius=None, max_celsius=None):
-        # The heat map always owns the physical 0–60 °C color associations. A
-        # renderer's selected range only crops that scale and clamps pixels
-        # outside the visible interval to its endpoint colors.
+        # The heat map owns the complete ordered spectrum. A renderer assigns
+        # its selected minimum and maximum to the spectrum endpoints and clamps
+        # pixels outside that temperature interval to those endpoint colors.
         self.heat_map = CelsiusHeatMap()
         if min_celsius is None:
             min_celsius = self.DEFAULT_MIN_CELSIUS
@@ -263,6 +263,9 @@ class ThermalRenderer:
 
         self.min_celsius = min_celsius
         self.max_celsius = max_celsius
+        # Keep the absolute baseline used for the most recently generated
+        # color map. Mapped pixels themselves are relative to this value.
+        self.last_frame_min_celsius = None
         # Coordinate maps depend only on output dimensions, so cache them across
         # frames and avoid repeating bilinear setup at recording frame rate.
         self._maps = {}
@@ -283,7 +286,7 @@ class ThermalRenderer:
         )
 
     def legend_celsius_range(self, frame=None):
-        """Return the selected endpoints cropped from the fixed color scale."""
+        """Return the temperatures assigned to the full spectrum endpoints."""
         return self.min_celsius, self.max_celsius
 
     def legend_extrema_celsius(self, frame=None):
@@ -335,22 +338,38 @@ class ThermalRenderer:
         return x_map, y_map
 
     def _color(self, value, min_value, max_value, color_cache):
-        # Clamp to the selected window, then look up that physical temperature
-        # on the fixed 0–60 °C map. For example, 15–30 °C uses palette colors
-        # 15 through 30 rather than remapping navy through white.
+        # Clamp to the selected window, then normalize that complete window
+        # across the unchanged 0–60 palette. For example, a 15–30 °C selection
+        # maps 15 °C to palette position 0 and 30 °C to palette position 60.
         temperature = max(self.min_celsius, min(self.max_celsius, value))
         cached = color_cache.get(temperature)
         if cached is not None:
             return cached
 
-        color = self.heat_map.rgb_for_celsius(temperature)
+        normalized = (
+            (temperature - self.min_celsius)
+            / (self.max_celsius - self.min_celsius)
+        )
+        palette_temperature = self.COLOR_SCALE_MIN_CELSIUS + normalized * (
+            self.COLOR_SCALE_MAX_CELSIUS - self.COLOR_SCALE_MIN_CELSIUS
+        )
+        color = self.heat_map.rgb_for_celsius(palette_temperature)
         color_cache[temperature] = color
         return color
 
-    def frame_colors(self, frame):
-        # Convert raw sensor values first, then assign the RGB color associated
-        # with each pixel's physical temperature.
+    def _relative_frame_celsius(self, frame):
+        """Convert a frame to Celsius values relative to its coldest pixel."""
         temperatures = frame_to_celsius(frame)
+        self.last_frame_min_celsius = min(temperatures)
+        return [
+            temperature - self.last_frame_min_celsius
+            for temperature in temperatures
+        ]
+
+    def frame_colors(self, frame):
+        # Convert raw values to Celsius, subtract this frame's coldest Celsius
+        # pixel, then assign colors from the resulting relative temperatures.
+        temperatures = self._relative_frame_celsius(frame)
         min_value = min(temperatures)
         max_value = max(temperatures)
         color_cache = {}
@@ -368,11 +387,11 @@ class ThermalRenderer:
         return colors
 
     def render_rgb(self, frame, width, height):
-        # Build the 32x24 thermal vision first: raw value -> Celsius -> RGB.
-        # The completed RGB pixels are then enlarged for video output.
+        # Build the 32x24 thermal vision first: raw value -> Celsius -> subtract
+        # the frame minimum -> RGB. The completed pixels are then enlarged.
         width = max(1, int(width))
         height = max(1, int(height))
-        temperatures = frame_to_celsius(frame)
+        temperatures = self._relative_frame_celsius(frame)
         min_value = min(temperatures)
         max_value = max(temperatures)
         color_cache = {}
@@ -390,8 +409,8 @@ class ThermalRenderer:
 
             for x0, x1, x_weight in x_map:
                 # Bilinearly expand the already colorized source pixels. This
-                # preserves the fixed Celsius-to-color association before the
-                # low-resolution sensor image becomes a dense RGB image.
+                # preserves the selected range's spectrum association before
+                # the low-resolution sensor image becomes a dense RGB image.
                 top_left = source_colors[row0 + x0]
                 top_right = source_colors[row0 + x1]
                 bottom_left = source_colors[row1 + x0]

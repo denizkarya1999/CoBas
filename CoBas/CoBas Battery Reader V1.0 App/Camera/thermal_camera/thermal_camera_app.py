@@ -94,10 +94,11 @@ class TemperatureRangeDialog(simpledialog.Dialog):
         ttk.Label(
             parent,
             text=(
-                "Choose the displayed portion of the fixed 0–60 °C color "
-                f"map. Each {color_resolution:.2f} °C interval has a unique "
-                "color; temperatures outside the displayed range use its "
-                "endpoint colors."
+                "Choose the temperatures assigned to the endpoints of the "
+                "complete color spectrum. The spectrum's colors remain "
+                "unchanged; temperatures outside the selected range use its "
+                f"endpoint colors. The palette has {color_resolution:.2f} °C "
+                "base intervals."
             ),
             wraplength=360,
             justify="left",
@@ -389,10 +390,9 @@ class ThermalCameraApp(tk.Tk):
     def _temperature_legend_title(self):
         """Describe the endpoints of the regular thermal palette."""
         min_celsius, max_celsius = self.renderer.legend_celsius_range()
-        color_resolution = self.renderer.COLOR_RESOLUTION_CELSIUS
         return (
-            f"0–60 °C · {color_resolution:.2f} °C COLORS\n"
-            f"DISPLAYING {min_celsius:g}–{max_celsius:g} °C"
+            "FULL COLOR SPECTRUM\n"
+            f"{min_celsius:g}–{max_celsius:g} °C SCALE"
         )
 
     def _create_temperature_legend(self):
@@ -610,7 +610,7 @@ class ThermalCameraApp(tk.Tk):
         )
 
         # Hot/max is at the top and cold/min is at the bottom, matching the
-        # renderer's physical Celsius-to-color mapping.
+        # selected temperature range's assignment across the full spectrum.
         # Leave room to the left of the bar for live MIN/MAX pointer labels.
         bar_left = panel_left + 68
         bar_right = bar_left + 32

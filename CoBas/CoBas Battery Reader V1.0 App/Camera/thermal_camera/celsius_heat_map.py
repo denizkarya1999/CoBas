@@ -102,9 +102,9 @@ class CelsiusHeatMap:
     SENSOR_NETD_CELSIUS = 0.065
     COLOR_RESOLUTION_CELSIUS = 0.05
 
-    # Every whole Celsius degree owns one RGB color. Selecting a narrower
-    # display range must crop this scale, not stretch all colors over the
-    # selected endpoints.
+    # Every whole position on the base 0–60 scale owns one RGB color. Renderers
+    # may assign a user-selected temperature range across this complete scale,
+    # but the palette values and their ordering remain immutable.
     ANCHOR_COLORS_BY_CELSIUS = MappingProxyType(
         {
             # Palette stops 0–7: very dark navy blue to dark blue.
