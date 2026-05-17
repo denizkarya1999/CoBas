@@ -49,7 +49,7 @@ os.makedirs(output_dir, exist_ok=True)
 
 input_audio = (
     "/home/denizkaryaacikbas/Projects/CoBas/"
-    "Organized Code/Data Acquisition/Inputs/"
+    "Organized Code/Data Acquisition/Sound Acquisition/Inputs/"
     "5_15sPause_BeaconProtocol.wav"
 )
 
