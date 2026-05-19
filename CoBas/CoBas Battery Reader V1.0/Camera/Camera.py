@@ -9,6 +9,8 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
+from Inference.ComputerVision import ComputerVision
+
 
 class Camera:
     """
@@ -26,7 +28,7 @@ class Camera:
     - Video/audio merging with FFmpeg
     """
 
-    def __init__(self, camera_index="/dev/video0", output_dir="captures"):
+    def __init__(self, camera_index="/dev/video0", output_dir="Captures"):
         self.camera_index = camera_index
         self.output_dir = output_dir
 
@@ -64,6 +66,10 @@ class Camera:
         self.final_video_path = None
 
         os.makedirs(self.output_dir, exist_ok=True)
+
+        # Computer vision / PyTorch inference placeholder.
+        # This loads OpenCV and PyTorch on CPU and logs their status.
+        self.computer_vision = ComputerVision()
 
     # --------------------------------------------------
     # Camera Source Handling
@@ -179,9 +185,9 @@ class Camera:
 
         frame = self.apply_zoom(frame)
 
-        # Future ML inference can be added here.
-        # Example:
-        # frame = self.run_battery_inference(frame)
+        # Trigger ComputerVision placeholder.
+        # Currently, this returns the frame unchanged.
+        frame = self.computer_vision.run_inference(frame)
 
         return frame
 

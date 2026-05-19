@@ -4,7 +4,7 @@ from tkinter import ttk
 # --------------------------------------------------
 # Window Settings
 # --------------------------------------------------
-
+# Fixed size of the main application window.
 WINDOW = {
     "width": 980,
     "height": 620
@@ -14,49 +14,88 @@ WINDOW = {
 # --------------------------------------------------
 # Preview Settings
 # --------------------------------------------------
-
+# Display size of the camera preview inside the GUI.
 PREVIEW = {
-    "width": 690,
-    "height": 420
+    "width": 660,
+    "height": 380
 }
 
 
 # --------------------------------------------------
 # Colors
 # --------------------------------------------------
-
+# Central color palette used across the application.
 COLORS = {
-    "main_bg": "#0f172a",
+    # Main backgrounds
+    "main_bg": "#0b1120",
     "toolbar_bg": "#020617",
     "panel_bg": "#111827",
+    "panel_bg_light": "#1f2937",
     "preview_bg": "#020617",
 
+    # Text colors
     "text": "#f8fafc",
     "muted_text": "#94a3b8",
     "panel_text": "#cbd5e1",
     "info_text": "#e5e7eb",
 
+    # Status colors
     "accent": "#38bdf8",
-    "error": "#f87171"
+    "success": "#22c55e",
+    "warning": "#facc15",
+    "error": "#f87171",
+    "idle": "#94a3b8",
+    "record": "#ef4444",
+
+    # General button colors
+    "primary": "#2563eb",
+    "primary_hover": "#1d4ed8",
+    "danger": "#dc2626",
+    "danger_hover": "#b91c1c",
+    "tool": "#1f2937",
+    "tool_hover": "#2563eb",
+
+    # Start / Stop Tracking colors
+    "start": "#16a34a",
+    "start_hover": "#15803d",
+    "stop": "#dc2626",
+    "stop_hover": "#b91c1c",
+
+    # Camera switch button colors
+    "camera": "#0891b2",
+    "camera_hover": "#0e7490",
+
+    # Photo and video capture colors
+    "capture": "#16a34a",
+    "capture_hover": "#15803d",
+
+    # Stop recording colors
+    "video_stop": "#dc2626",
+    "video_stop_hover": "#b91c1c",
+
+    # Zoom button colors
+    "zoom": "#475569",
+    "zoom_hover": "#334155",
+
+    # Toolbar button colors
+    "settings": "#4f46e5",
+    "settings_hover": "#4338ca"
 }
 
 
 # --------------------------------------------------
 # Fonts
 # --------------------------------------------------
-
+# Central font settings.
 FONTS = {
-    "header": ("Arial", 18, "bold"),
-    "subheader": ("Arial", 9),
-
-    "toolbar_title": ("Arial", 11, "bold"),
+    "toolbar_title": ("Arial", 12, "bold"),
     "toolbar_text": ("Arial", 8),
 
-    "panel_title": ("Arial", 11, "bold"),
-    "panel_text": ("Arial", 8),
+    "panel_title": ("Arial", 10, "bold"),
+    "panel_text": ("Arial", 7),
 
-    "status": ("Arial", 9, "bold"),
-    "info": ("Arial", 8),
+    "status": ("Arial", 8, "bold"),
+    "info": ("Arial", 7),
 
     "button": ("Arial", 8),
     "button_bold": ("Arial", 8, "bold"),
@@ -68,13 +107,13 @@ FONTS = {
 # --------------------------------------------------
 # Spacing
 # --------------------------------------------------
-
+# Central spacing values used by the GUI.
 SPACING = {
-    "main_padx": 10,
-    "main_pady": 8,
+    "main_padx": 8,
+    "main_pady": 6,
 
-    "panel_padx": 10,
-    "panel_pady": 6,
+    "panel_padx": 9,
+    "panel_pady": 4,
 
     "toolbar_padx": 10,
     "toolbar_pady": 4,
@@ -91,19 +130,25 @@ def apply_styles(root):
     """
     Apply all Tkinter/ttk styles.
 
-    This file works like a CSS file for the Tkinter app.
+    This file works like a CSS-style configuration file
+    for the Tkinter app.
     """
 
     style = ttk.Style()
 
+    # The "clam" theme allows better color customization for ttk widgets.
     try:
         style.theme_use("clam")
     except Exception:
         pass
 
+    # Set main root background.
     root.configure(bg=COLORS["main_bg"])
 
-    # Frames.
+    # --------------------------------------------------
+    # Frames
+    # --------------------------------------------------
+
     style.configure(
         "Main.TFrame",
         background=COLORS["main_bg"]
@@ -119,20 +164,14 @@ def apply_styles(root):
         background=COLORS["panel_bg"]
     )
 
-    # Labels.
     style.configure(
-        "Header.TLabel",
-        background=COLORS["main_bg"],
-        foreground=COLORS["text"],
-        font=FONTS["header"]
+        "SoftPanel.TFrame",
+        background=COLORS["panel_bg_light"]
     )
 
-    style.configure(
-        "SubHeader.TLabel",
-        background=COLORS["main_bg"],
-        foreground=COLORS["muted_text"],
-        font=FONTS["subheader"]
-    )
+    # --------------------------------------------------
+    # Labels
+    # --------------------------------------------------
 
     style.configure(
         "ToolbarTitle.TLabel",
@@ -163,45 +202,158 @@ def apply_styles(root):
     )
 
     style.configure(
-        "Status.TLabel",
-        background=COLORS["panel_bg"],
-        foreground=COLORS["accent"],
-        font=FONTS["status"]
-    )
-
-    style.configure(
         "Info.TLabel",
         background=COLORS["panel_bg"],
         foreground=COLORS["info_text"],
         font=FONTS["info"]
     )
 
-    # Buttons.
-    style.configure(
-        "Primary.TButton",
-        font=FONTS["button_bold"],
-        padding=5
+    # --------------------------------------------------
+    # Helper Function for Colored Buttons
+    # --------------------------------------------------
+
+    def configure_colored_button(style_name, normal_color, hover_color, bold=False):
+        """
+        Create a colored ttk button style.
+
+        Parameters:
+            style_name:
+                Name of the ttk style.
+
+            normal_color:
+                Default button color.
+
+            hover_color:
+                Button color when active or pressed.
+
+            bold:
+                Whether to use bold button font.
+        """
+
+        style.configure(
+            style_name,
+            font=FONTS["button_bold"] if bold else FONTS["button"],
+            padding=(6, 4),
+            foreground=COLORS["text"],
+            background=normal_color,
+            borderwidth=0,
+            focusthickness=0
+        )
+
+        style.map(
+            style_name,
+            foreground=[
+                ("active", COLORS["text"]),
+                ("pressed", COLORS["text"])
+            ],
+            background=[
+                ("active", hover_color),
+                ("pressed", hover_color)
+            ]
+        )
+
+    # --------------------------------------------------
+    # Tracking Button Styles
+    # --------------------------------------------------
+
+    # Green Start Tracking button.
+    configure_colored_button(
+        "Start.TButton",
+        COLORS["start"],
+        COLORS["start_hover"],
+        bold=True
     )
 
-    style.configure(
-        "Danger.TButton",
-        font=FONTS["button_bold"],
-        padding=5
+    # Red Stop Tracking button.
+    configure_colored_button(
+        "Stop.TButton",
+        COLORS["stop"],
+        COLORS["stop_hover"],
+        bold=True
     )
 
-    style.configure(
+    # --------------------------------------------------
+    # General Button Styles
+    # --------------------------------------------------
+
+    # Normal dark/blue tool button.
+    configure_colored_button(
         "Tool.TButton",
-        font=FONTS["button"],
-        padding=4
+        COLORS["tool"],
+        COLORS["tool_hover"]
     )
 
-    style.configure(
+    # Restart Camera uses the same normal tool button style.
+    configure_colored_button(
+        "Restart.TButton",
+        COLORS["tool"],
+        COLORS["tool_hover"]
+    )
+
+    # Cyan camera-switch button.
+    configure_colored_button(
+        "Camera.TButton",
+        COLORS["camera"],
+        COLORS["camera_hover"]
+    )
+
+    # Green photo/video capture buttons.
+    configure_colored_button(
+        "Capture.TButton",
+        COLORS["capture"],
+        COLORS["capture_hover"],
+        bold=True
+    )
+
+    # Red stop-recording button.
+    configure_colored_button(
+        "VideoStop.TButton",
+        COLORS["video_stop"],
+        COLORS["video_stop_hover"],
+        bold=True
+    )
+
+    # Gray zoom/reset buttons.
+    configure_colored_button(
+        "Zoom.TButton",
+        COLORS["zoom"],
+        COLORS["zoom_hover"]
+    )
+
+    # Indigo settings/about toolbar buttons.
+    configure_colored_button(
+        "Settings.TButton",
+        COLORS["settings"],
+        COLORS["settings_hover"]
+    )
+
+    # Optional general primary button.
+    configure_colored_button(
+        "Primary.TButton",
+        COLORS["primary"],
+        COLORS["primary_hover"],
+        bold=True
+    )
+
+    # Optional general danger button.
+    configure_colored_button(
+        "Danger.TButton",
+        COLORS["danger"],
+        COLORS["danger_hover"],
+        bold=True
+    )
+
+    # Optional toolbar fallback button.
+    configure_colored_button(
         "Toolbar.TButton",
-        font=FONTS["button"],
-        padding=4
+        COLORS["tool"],
+        COLORS["tool_hover"]
     )
 
-    # Combobox.
+    # --------------------------------------------------
+    # Combobox
+    # --------------------------------------------------
+
     style.configure(
         "TCombobox",
         padding=3

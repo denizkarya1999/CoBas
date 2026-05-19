@@ -19,18 +19,21 @@ class SettingsWindow:
         self.app = app
 
         self.window = tk.Toplevel(parent)
-        self.window.title("CoBas_V1 Settings")
-        self.window.geometry("460x470")
+        self.window.title("Settings")
+        self.window.geometry("460x390")
         self.window.resizable(False, False)
         self.window.configure(bg=COLORS["main_bg"])
 
+        # Keep Settings window above the main window.
         self.window.transient(parent)
         self.window.grab_set()
 
+        # Current camera source.
         self.selected_camera_source = tk.StringVar(
             value=str(self.app.camera.camera_index)
         )
 
+        # Load available microphones from Camera.py.
         self.microphones = self.app.camera.get_input_microphones()
 
         self.microphone_display_values = []
@@ -49,9 +52,13 @@ class SettingsWindow:
 
         self.build_window()
 
+    # --------------------------------------------------
+    # Helper Methods
+    # --------------------------------------------------
+
     def _build_microphone_display_name(self, mic):
         """
-        Create a readable dropdown label.
+        Create a readable microphone dropdown label.
         """
 
         if mic["id"] is None:
@@ -61,7 +68,7 @@ class SettingsWindow:
 
     def _get_current_microphone_display(self):
         """
-        Find the dropdown label matching the current selected microphone.
+        Find the dropdown label matching the selected microphone.
         """
 
         current_id = self.app.camera.microphone_device_id
@@ -72,28 +79,45 @@ class SettingsWindow:
 
         return "System Default Microphone"
 
+    # --------------------------------------------------
+    # GUI Layout
+    # --------------------------------------------------
+
     def build_window(self):
+        """
+        Build the Settings window UI.
+        """
+
         settings_frame = ttk.Frame(self.window, style="Panel.TFrame")
-        settings_frame.pack(fill="both", expand=True, padx=14, pady=14)
+        settings_frame.pack(fill="both", expand=True, padx=16, pady=16)
+
+        # --------------------------------------------------
+        # Description
+        # --------------------------------------------------
 
         ttk.Label(
             settings_frame,
-            text="Settings",
-            style="PanelTitle.TLabel"
-        ).pack(anchor="w", pady=(0, 10))
+            text="Select the camera and microphone sources used by CoBas.",
+            style="PanelText.TLabel",
+            wraplength=420,
+            justify="left"
+        ).pack(anchor="w", pady=(0, 16))
 
         # --------------------------------------------------
         # Camera Source Selection
         # --------------------------------------------------
 
+        camera_section = ttk.Frame(settings_frame, style="Panel.TFrame")
+        camera_section.pack(fill="x", pady=(0, 14))
+
         ttk.Label(
-            settings_frame,
+            camera_section,
             text="Camera Source",
-            style="PanelText.TLabel"
-        ).pack(anchor="w", pady=(0, 4))
+            style="PanelTitle.TLabel"
+        ).pack(anchor="w", pady=(0, 5))
 
         self.camera_source_combo = ttk.Combobox(
-            settings_frame,
+            camera_section,
             textvariable=self.selected_camera_source,
             values=[
                 "/dev/video0",
@@ -103,76 +127,83 @@ class SettingsWindow:
             ],
             state="readonly"
         )
-        self.camera_source_combo.pack(fill="x", pady=(0, 10))
+        self.camera_source_combo.pack(fill="x", pady=(0, 7))
 
         ttk.Button(
-            settings_frame,
+            camera_section,
             text="Apply Camera Source",
             style="Primary.TButton",
             command=self.apply_camera_source
-        ).pack(fill="x", pady=(0, 14))
+        ).pack(fill="x")
 
         # --------------------------------------------------
         # Microphone Source Selection
         # --------------------------------------------------
 
+        microphone_section = ttk.Frame(settings_frame, style="Panel.TFrame")
+        microphone_section.pack(fill="x", pady=(0, 14))
+
         ttk.Label(
-            settings_frame,
+            microphone_section,
             text="Microphone Source",
-            style="PanelText.TLabel"
-        ).pack(anchor="w", pady=(0, 4))
+            style="PanelTitle.TLabel"
+        ).pack(anchor="w", pady=(0, 5))
 
         self.microphone_source_combo = ttk.Combobox(
-            settings_frame,
+            microphone_section,
             textvariable=self.selected_microphone_source,
             values=self.microphone_display_values,
             state="readonly"
         )
-        self.microphone_source_combo.pack(fill="x", pady=(0, 10))
+        self.microphone_source_combo.pack(fill="x", pady=(0, 7))
 
         ttk.Button(
-            settings_frame,
+            microphone_section,
             text="Apply Microphone Source",
             style="Primary.TButton",
             command=self.apply_microphone_source
-        ).pack(fill="x", pady=(0, 14))
+        ).pack(fill="x")
 
         # --------------------------------------------------
-        # Current App Information
+        # Current Configuration
         # --------------------------------------------------
+
+        info_section = ttk.Frame(settings_frame, style="Panel.TFrame")
+        info_section.pack(fill="both", expand=True)
 
         ttk.Label(
-            settings_frame,
+            info_section,
             text="Current Configuration",
             style="PanelTitle.TLabel"
-        ).pack(anchor="w", pady=(4, 8))
+        ).pack(anchor="w", pady=(0, 6))
 
         info_text = (
-            f"Active Camera: {self.app.camera.camera_index}\n"
-            f"Active Microphone: {self.app.camera.microphone_device_name}\n"
-            f"Current Zoom: {self.app.camera.zoom_factor}x\n"
+            f"Camera: {self.app.camera.camera_index}\n"
+            f"Microphone: {self.app.camera.microphone_device_name}\n"
+            f"Zoom: {self.app.camera.zoom_factor}x\n"
             f"Recording FPS: {self.app.camera.record_fps}\n"
             f"Audio Sample Rate: {self.app.camera.audio_sample_rate} Hz\n"
             f"Output Folder: {self.app.camera.output_dir}\n\n"
-            "Tip: If an external mic does not appear, reconnect it and reopen Settings."
+            "Tip: If an external microphone does not appear, reconnect it and reopen Settings."
         )
 
         ttk.Label(
-            settings_frame,
+            info_section,
             text=info_text,
             style="PanelText.TLabel",
             wraplength=420,
             justify="left"
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w")
 
-        ttk.Button(
-            settings_frame,
-            text="Close",
-            style="Tool.TButton",
-            command=self.window.destroy
-        ).pack(fill="x", pady=(8, 0))
+    # --------------------------------------------------
+    # Apply Methods
+    # --------------------------------------------------
 
     def apply_camera_source(self):
+        """
+        Apply selected camera source and close Settings.
+        """
+
         selected_source = self.selected_camera_source.get()
 
         self.app.apply_camera_source_from_settings(selected_source)
@@ -180,6 +211,10 @@ class SettingsWindow:
         self.window.destroy()
 
     def apply_microphone_source(self):
+        """
+        Apply selected microphone source and close Settings.
+        """
+
         selected_display_name = self.selected_microphone_source.get()
 
         selected_mic = self.microphone_lookup.get(selected_display_name)

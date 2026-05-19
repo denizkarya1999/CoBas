@@ -1,9 +1,10 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
+import os
 import cv2
 
-from Camera import Camera
+from Camera.Camera import Camera
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
 from Settings import SettingsWindow
 from About import show_about_window
@@ -11,31 +12,34 @@ from About import show_about_window
 
 class CoBasV1App:
     """
-    Main GUI application for CoBas_V1.
+    Main GUI application for CoBas Battery Reader V1.0.
 
     This file handles:
-    - Main app window
+    - Main application window
     - Toolbar
     - Camera preview
-    - Tracking controls
+    - Start/Stop tracking
+    - Restart camera
     - Front/back camera switching
-    - Capture controls
+    - Photo capture
+    - Video/audio recording
     - Zoom controls
-    - Status messages
-    - Microphone status display
-
-    Separated files:
-    - Camera.py handles camera and microphone operations
-    - Style.py handles GUI styling
-    - Settings.py handles camera and microphone source selection
-    - About.py handles the About popup
+    - Status display
+    - Dynamic status icon color
     """
 
     def __init__(self, root):
-        self.root = root
-        self.root.title("CoBas_V1")
+        """
+        Initialize the main GUI application.
+        """
 
-        # Fixed window size from Style.py.
+        self.root = root
+        self.root.title("CoBas Battery Reader V1.0")
+
+        # Load application icon before building the UI.
+        self.set_app_icon()
+
+        # Use fixed window size from Style.py.
         self.window_width = WINDOW["width"]
         self.window_height = WINDOW["height"]
 
@@ -44,23 +48,27 @@ class CoBasV1App:
         self.root.minsize(self.window_width, self.window_height)
         self.root.maxsize(self.window_width, self.window_height)
 
-        # Restore app if minimized.
+        # Used to prevent app from staying minimized.
         self.is_closing = False
         self.root.bind("<Unmap>", self.prevent_minimize)
 
         # Camera backend.
-        # The camera backend also stores the selected microphone.
         self.camera = Camera(camera_index="/dev/video0")
 
-        # App state.
+        # Stores path of the current video file.
         self.current_video_path = None
+
+        # Preview loop state.
         self.preview_loop_running = False
+        self.preview_after_id = None
+
+        # Stores Tkinter image reference for preview.
         self.preview_photo = None
 
-        # Apply external GUI style.
+        # Apply styles from Style.py.
         self.style = apply_styles(self.root)
 
-        # Build GUI.
+        # Build all GUI components.
         self.build_gui()
 
         # Start camera automatically after GUI loads.
@@ -73,6 +81,9 @@ class CoBasV1App:
     def prevent_minimize(self, event):
         """
         Restore the window if minimized.
+
+        Tkinter cannot always remove the minimize button cleanly
+        on Linux, so this restores the window if it becomes minimized.
         """
 
         if self.is_closing:
@@ -84,13 +95,47 @@ class CoBasV1App:
         except tk.TclError:
             pass
 
+    def set_app_icon(self):
+        """
+        Set application window and taskbar icon.
+
+        Expected path:
+            Assets/icon.png
+        """
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        icon_path = os.path.join(
+            base_dir,
+            "Assets",
+            "icon.png"
+        )
+
+        if os.path.exists(icon_path):
+            icon_image = tk.PhotoImage(file=icon_path)
+
+            # Sets title-bar/taskbar icon where supported.
+            self.root.iconphoto(True, icon_image)
+
+            # Keep reference so Python does not garbage collect the image.
+            self.root.icon_image = icon_image
+
+            print(f"[INFO] App icon loaded: {icon_path}")
+        else:
+            print(f"[WARNING] Icon file not found: {icon_path}")
+
     # --------------------------------------------------
     # GUI Layout
     # --------------------------------------------------
 
     def build_gui(self):
         """
-        Build the compact dashboard layout.
+        Build the main dashboard layout.
+
+        The UI contains:
+        - Toolbar at the top
+        - Camera preview on the left
+        - Control panel on the right
         """
 
         outer_frame = ttk.Frame(self.root, style="Main.TFrame")
@@ -106,28 +151,15 @@ class CoBasV1App:
             pady=SPACING["main_pady"]
         )
 
-        # Header.
-        header_frame = ttk.Frame(main_frame, style="Main.TFrame")
-        header_frame.pack(fill="x", pady=(0, 6))
-
-        ttk.Label(
-            header_frame,
-            text="CoBas_V1",
-            style="Header.TLabel"
-        ).pack(anchor="w")
-
-        ttk.Label(
-            header_frame,
-            text="Camera-based battery reader prototype",
-            style="SubHeader.TLabel"
-        ).pack(anchor="w")
-
-        # Main content.
         content_frame = ttk.Frame(main_frame, style="Main.TFrame")
         content_frame.pack(fill="both", expand=True)
 
-        content_frame.columnconfigure(0, weight=3)
+        # Left side gets more space because it contains the camera preview.
+        content_frame.columnconfigure(0, weight=4)
+
+        # Right side contains compact controls.
         content_frame.columnconfigure(1, weight=1)
+
         content_frame.rowconfigure(0, weight=1)
 
         preview_panel = ttk.Frame(content_frame, style="Panel.TFrame")
@@ -141,11 +173,9 @@ class CoBasV1App:
 
     def build_toolbar(self, parent):
         """
-        Build top toolbar.
+        Build the top toolbar.
 
-        Settings and About are opened from separate files:
-        - Settings.py
-        - About.py
+        The toolbar only includes Settings and About.
         """
 
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame")
@@ -158,68 +188,46 @@ class CoBasV1App:
             pady=SPACING["toolbar_pady"]
         )
 
-        ttk.Label(
-            left_toolbar,
-            text="CoBas_V1",
-            style="ToolbarTitle.TLabel"
-        ).pack(side="left")
-
-        ttk.Label(
-            left_toolbar,
-            text=" | Battery Camera Reader",
-            style="ToolbarText.TLabel"
-        ).pack(side="left")
-
-        right_toolbar = ttk.Frame(toolbar, style="Toolbar.TFrame")
-        right_toolbar.pack(
-            side="right",
-            padx=SPACING["toolbar_padx"],
-            pady=SPACING["toolbar_pady"]
-        )
-
         ttk.Button(
-            right_toolbar,
+            left_toolbar,
             text="Settings",
-            style="Toolbar.TButton",
+            style="Settings.TButton",
             command=self.open_settings
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=(0, 4))
 
         ttk.Button(
-            right_toolbar,
+            left_toolbar,
             text="About",
-            style="Toolbar.TButton",
+            style="Settings.TButton",
             command=self.open_about
-        ).pack(side="left", padx=3)
-
-        ttk.Button(
-            right_toolbar,
-            text="Exit",
-            style="Toolbar.TButton",
-            command=self.on_close
-        ).pack(side="left", padx=3)
+        ).pack(side="left", padx=4)
 
     def build_preview_panel(self, parent):
         """
-        Build compact camera preview panel.
+        Build the left camera preview panel.
         """
 
         preview_header = ttk.Frame(parent, style="Panel.TFrame")
         preview_header.pack(
             fill="x",
             padx=SPACING["panel_padx"],
-            pady=(10, 5)
+            pady=(8, 4)
         )
 
         ttk.Label(
             preview_header,
-            text="Live Camera Preview",
+            text="Live Camera",
             style="PanelTitle.TLabel"
         ).pack(side="left")
 
-        self.live_indicator_label = ttk.Label(
+        # Dynamic status icon.
+        # This is tk.Label instead of ttk.Label because we change fg color.
+        self.live_indicator_label = tk.Label(
             preview_header,
             text="● STARTING",
-            style="Status.TLabel"
+            bg=COLORS["panel_bg"],
+            fg=COLORS["warning"],
+            font=FONTS["status"]
         )
         self.live_indicator_label.pack(side="right")
 
@@ -237,14 +245,14 @@ class CoBasV1App:
             fill="both",
             expand=True,
             padx=SPACING["panel_padx"],
-            pady=(0, 8)
+            pady=(0, 6)
         )
 
         bottom_bar = ttk.Frame(parent, style="Panel.TFrame")
         bottom_bar.pack(
             fill="x",
             padx=SPACING["panel_padx"],
-            pady=(0, 10)
+            pady=(0, 8)
         )
 
         self.status_label = ttk.Label(
@@ -263,9 +271,7 @@ class CoBasV1App:
 
     def build_control_panel(self, parent):
         """
-        Build compact right control panel.
-
-        Camera source and microphone source selection are handled inside Settings.py.
+        Build the right control panel.
         """
 
         # --------------------------------------------------
@@ -276,33 +282,36 @@ class CoBasV1App:
         controls_section.pack(
             fill="x",
             padx=SPACING["panel_padx"],
-            pady=(10, 6)
+            pady=(8, 4)
         )
 
         ttk.Label(
             controls_section,
             text="Tracking",
             style="PanelTitle.TLabel"
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 3))
 
+        # Start Tracking is green.
+        # When camera is active, this button changes to red Stop Tracking.
         self.track_button = ttk.Button(
             controls_section,
-            text="Restart Tracking",
-            style="Primary.TButton",
-            command=self.track_battery
+            text="Start Tracking",
+            style="Start.TButton",
+            command=self.toggle_tracking
         )
         self.track_button.pack(
             fill="x",
             pady=SPACING["button_pady"]
         )
 
-        self.stop_button = ttk.Button(
+        # Restart Camera uses the normal dark/blue tool color.
+        self.restart_button = ttk.Button(
             controls_section,
-            text="Stop Tracking",
-            style="Danger.TButton",
-            command=self.stop_tracking
+            text="Restart Camera",
+            style="Restart.TButton",
+            command=self.restart_camera
         )
-        self.stop_button.pack(
+        self.restart_button.pack(
             fill="x",
             pady=SPACING["button_pady"]
         )
@@ -320,14 +329,15 @@ class CoBasV1App:
 
         ttk.Label(
             switch_section,
-            text="Camera Direction",
+            text="Camera",
             style="PanelTitle.TLabel"
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 3))
 
+        # Switch Camera is cyan.
         self.switch_camera_button = ttk.Button(
             switch_section,
-            text="Switch Front/Back Camera",
-            style="Tool.TButton",
+            text="Switch Camera",
+            style="Camera.TButton",
             command=self.switch_front_back_camera
         )
         self.switch_camera_button.pack(
@@ -350,12 +360,13 @@ class CoBasV1App:
             capture_section,
             text="Capture",
             style="PanelTitle.TLabel"
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 3))
 
+        # Take Photo is green.
         self.photo_button = ttk.Button(
             capture_section,
             text="Take Photo",
-            style="Tool.TButton",
+            style="Capture.TButton",
             command=self.take_photo
         )
         self.photo_button.pack(
@@ -363,10 +374,12 @@ class CoBasV1App:
             pady=SPACING["button_pady"]
         )
 
+        # Capture Video is green.
+        # When recording starts, this changes to red Stop Recording.
         self.record_button = ttk.Button(
             capture_section,
-            text="Record Video",
-            style="Tool.TButton",
+            text="Capture Video",
+            style="Capture.TButton",
             command=self.toggle_recording
         )
         self.record_button.pack(
@@ -389,38 +402,38 @@ class CoBasV1App:
             zoom_section,
             text="Zoom",
             style="PanelTitle.TLabel"
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 3))
 
         zoom_buttons_frame = ttk.Frame(zoom_section, style="Panel.TFrame")
         zoom_buttons_frame.pack(fill="x")
 
         ttk.Button(
             zoom_buttons_frame,
-            text="Out",
-            style="Tool.TButton",
+            text="-",
+            style="Zoom.TButton",
             command=self.zoom_out
         ).pack(side="left", fill="x", expand=True, padx=(0, 3))
 
         ttk.Button(
             zoom_buttons_frame,
-            text="In",
-            style="Tool.TButton",
+            text="+",
+            style="Zoom.TButton",
             command=self.zoom_in
         ).pack(side="left", fill="x", expand=True, padx=(3, 0))
 
         ttk.Button(
             zoom_section,
-            text="Reset Zoom",
-            style="Tool.TButton",
+            text="Reset",
+            style="Zoom.TButton",
             command=self.reset_zoom
-        ).pack(fill="x", pady=(5, 0))
+        ).pack(fill="x", pady=(4, 0))
 
         self.zoom_label = ttk.Label(
             zoom_section,
             text="Zoom: 1.0x",
             style="PanelText.TLabel"
         )
-        self.zoom_label.pack(anchor="center", pady=(5, 0))
+        self.zoom_label.pack(anchor="center", pady=(4, 0))
 
         # --------------------------------------------------
         # System info
@@ -431,72 +444,166 @@ class CoBasV1App:
             fill="both",
             expand=True,
             padx=SPACING["panel_padx"],
-            pady=(6, 10)
+            pady=(4, 8)
         )
 
         ttk.Label(
             info_section,
-            text="System Info",
+            text="System",
             style="PanelTitle.TLabel"
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(anchor="w", pady=(0, 3))
 
         self.camera_info_label = ttk.Label(
             info_section,
             text="Camera: /dev/video0",
             style="PanelText.TLabel",
-            wraplength=190
+            wraplength=180
         )
-        self.camera_info_label.pack(anchor="w", pady=1)
+        self.camera_info_label.pack(anchor="w", pady=0)
 
         self.microphone_info_label = ttk.Label(
             info_section,
-            text="Microphone: System Default Microphone",
+            text="Mic: Default",
             style="PanelText.TLabel",
-            wraplength=190
+            wraplength=180
         )
-        self.microphone_info_label.pack(anchor="w", pady=1)
+        self.microphone_info_label.pack(anchor="w", pady=0)
 
         self.output_info_label = ttk.Label(
             info_section,
             text="Output: captures/",
             style="PanelText.TLabel",
-            wraplength=190
+            wraplength=180
         )
-        self.output_info_label.pack(anchor="w", pady=1)
+        self.output_info_label.pack(anchor="w", pady=0)
 
         self.fps_info_label = ttk.Label(
             info_section,
-            text="Recording FPS: 20",
+            text="FPS: 20",
             style="PanelText.TLabel",
-            wraplength=190
+            wraplength=180
         )
-        self.fps_info_label.pack(anchor="w", pady=1)
+        self.fps_info_label.pack(anchor="w", pady=0)
 
         self.camera_direction_label = ttk.Label(
             info_section,
-            text="Switching: /dev/video0 ↔ /dev/video1",
+            text="Switch: /dev/video0 ↔ /dev/video1",
             style="PanelText.TLabel",
-            wraplength=190
+            wraplength=180
         )
-        self.camera_direction_label.pack(anchor="w", pady=1)
+        self.camera_direction_label.pack(anchor="w", pady=0)
 
     # --------------------------------------------------
     # Helper Methods
     # --------------------------------------------------
 
+    def cancel_preview_loop(self):
+        """
+        Cancel the scheduled camera preview loop.
+
+        This prevents multiple root.after() loops from stacking when:
+        - Start Tracking is clicked repeatedly
+        - Stop Tracking is clicked
+        - Restart Camera is clicked
+        - Switch Camera is clicked
+        """
+
+        if self.preview_after_id is not None:
+            try:
+                self.root.after_cancel(self.preview_after_id)
+            except tk.TclError:
+                pass
+
+            self.preview_after_id = None
+
+        self.preview_loop_running = False
+
+    def get_indicator_color(self, indicator_text):
+        """
+        Return a color for the live status icon based on indicator text.
+        """
+
+        if indicator_text is None:
+            return COLORS["accent"]
+
+        if "LIVE" in indicator_text:
+            return COLORS["success"]
+
+        if "REC" in indicator_text:
+            return COLORS["record"]
+
+        if "ERROR" in indicator_text:
+            return COLORS["error"]
+
+        if "WARNING" in indicator_text:
+            return COLORS["warning"]
+
+        if "STARTING" in indicator_text:
+            return COLORS["warning"]
+
+        if "RESTARTING" in indicator_text:
+            return COLORS["warning"]
+
+        if "SWITCHING" in indicator_text:
+            return COLORS["warning"]
+
+        if "IDLE" in indicator_text:
+            return COLORS["idle"]
+
+        if "READY" in indicator_text:
+            return COLORS["accent"]
+
+        return COLORS["accent"]
+
+    def update_tracking_button(self):
+        """
+        Update tracking button text and color depending on camera state.
+
+        Camera inactive:
+            Start Tracking = green
+
+        Camera active:
+            Stop Tracking = red
+        """
+
+        if self.camera.is_tracking:
+            self.track_button.config(
+                text="Stop Tracking",
+                style="Stop.TButton"
+            )
+        else:
+            self.track_button.config(
+                text="Start Tracking",
+                style="Start.TButton"
+            )
+
     def update_status(self, message, indicator_text=None):
         """
         Update bottom status label and live indicator.
+
+        Status color examples:
+        - LIVE: green
+        - REC: red
+        - ERROR: red
+        - WARNING: yellow
+        - STARTING: yellow
+        - RESTARTING: yellow
+        - SWITCHING: yellow
+        - IDLE: gray
+        - READY: blue
         """
 
         self.status_label.config(text=message)
 
         if indicator_text is not None:
-            self.live_indicator_label.config(text=indicator_text)
+            self.live_indicator_label.config(
+                text=indicator_text,
+                fg=self.get_indicator_color(indicator_text)
+            )
 
     def refresh_info_panel(self):
         """
-        Refresh system information labels.
+        Refresh all system information labels.
         """
 
         self.camera_info_label.config(
@@ -504,7 +611,7 @@ class CoBasV1App:
         )
 
         self.microphone_info_label.config(
-            text=f"Microphone: {self.camera.microphone_device_name}"
+            text=f"Mic: {self.camera.microphone_device_name}"
         )
 
         self.output_info_label.config(
@@ -512,7 +619,7 @@ class CoBasV1App:
         )
 
         self.fps_info_label.config(
-            text=f"Recording FPS: {self.camera.record_fps}"
+            text=f"FPS: {self.camera.record_fps}"
         )
 
         self.zoom_label.config(
@@ -521,10 +628,10 @@ class CoBasV1App:
 
     def auto_start_camera(self):
         """
-        Start camera automatically.
+        Start camera automatically after the GUI is visible.
         """
 
-        self.track_battery()
+        self.start_tracking()
 
     # --------------------------------------------------
     # External Windows
@@ -553,16 +660,20 @@ class CoBasV1App:
         Called by Settings.py when the user applies a new camera source.
         """
 
+        # Convert numeric string camera indexes to integers.
         if selected_source in ["0", "1"]:
             selected_source = int(selected_source)
 
+        # If tracking is active, stop it before changing camera source.
         was_tracking = self.camera.is_tracking
 
         if was_tracking:
             self.stop_tracking()
 
+        # Set selected camera source.
         self.camera.set_camera_source(selected_source)
 
+        # Update camera info label immediately.
         self.camera_info_label.config(
             text=f"Camera: {self.camera.camera_index}"
         )
@@ -573,7 +684,7 @@ class CoBasV1App:
         )
 
         # Restart automatically with the new camera source.
-        self.root.after(300, self.track_battery)
+        self.root.after(300, self.start_tracking)
 
     def apply_microphone_source_from_settings(
         self,
@@ -584,6 +695,7 @@ class CoBasV1App:
         Called by Settings.py when the user applies a new microphone source.
         """
 
+        # Do not allow microphone changes during active recording.
         if self.camera.is_recording:
             messagebox.showwarning(
                 "Recording Active",
@@ -591,6 +703,7 @@ class CoBasV1App:
             )
             return
 
+        # Store selected microphone in the camera backend.
         self.camera.set_microphone_device(
             microphone_device_id,
             microphone_device_name
@@ -604,25 +717,41 @@ class CoBasV1App:
         )
 
     # --------------------------------------------------
-    # Camera Actions
+    # Tracking Actions
     # --------------------------------------------------
 
-    def track_battery(self):
+    def toggle_tracking(self):
         """
-        Start or restart camera preview.
-        """
+        Toggle camera tracking.
 
-        print("Track Battery / Restart Tracking clicked")
+        If tracking is off:
+            start tracking.
+
+        If tracking is on:
+            stop tracking.
+        """
 
         if self.camera.is_tracking:
-            self.camera.stop_camera()
-            self.preview_loop_running = False
+            self.stop_tracking()
+        else:
+            self.start_tracking()
+
+    def start_tracking(self):
+        """
+        Start camera preview safely.
+        """
+
+        print("Start Tracking clicked")
+
+        # Prevent duplicate preview loops before starting.
+        self.cancel_preview_loop()
 
         self.update_status(
             "Status: Starting camera...",
             "● STARTING"
         )
 
+        # Open camera through the camera backend.
         started = self.camera.start_camera()
 
         if started:
@@ -633,11 +762,19 @@ class CoBasV1App:
                 "● LIVE"
             )
 
-            if not self.preview_loop_running:
-                self.preview_loop_running = True
-                self.update_camera_feed()
+            # Mark preview loop active.
+            self.preview_loop_running = True
+
+            # Change Start Tracking button into Stop Tracking.
+            self.update_tracking_button()
+
+            # Start refreshing frames.
+            self.update_camera_feed()
 
         else:
+            # Keep button as Start Tracking if camera failed.
+            self.update_tracking_button()
+
             self.update_status(
                 "Status: Camera failed to open",
                 "● ERROR"
@@ -663,21 +800,29 @@ class CoBasV1App:
 
     def stop_tracking(self):
         """
-        Stop camera preview.
+        Stop camera preview safely.
         """
 
-        self.camera.stop_camera()
-        self.preview_loop_running = False
+        # Cancel preview update loop first.
+        self.cancel_preview_loop()
 
+        # Release camera through backend.
+        self.camera.stop_camera()
+
+        # Reset preview display.
         self.video_label.config(
             image="",
-            text="Tracking stopped.\n\nClick 'Restart Tracking' to start again.",
+            text="Tracking stopped.\n\nClick 'Start Tracking' to start again.",
             bg=COLORS["preview_bg"],
             fg=COLORS["muted_text"]
         )
         self.video_label.image = None
 
-        self.record_button.config(text="Record Video")
+        # Reset record button and timer.
+        self.record_button.config(
+            text="Capture Video",
+            style="Capture.TButton"
+        )
         self.record_timer_label.config(text="Recording: 0 second")
 
         self.update_status(
@@ -687,32 +832,85 @@ class CoBasV1App:
 
         self.refresh_info_panel()
 
+        # Change Stop Tracking button back into Start Tracking.
+        self.update_tracking_button()
+
+    def restart_camera(self):
+        """
+        Restart the camera safely.
+        """
+
+        print("Restart Camera clicked")
+
+        # Restarting while recording would corrupt or interrupt recording.
+        if self.camera.is_recording:
+            messagebox.showwarning(
+                "Recording Active",
+                "Stop recording before restarting the camera."
+            )
+            return
+
+        # Cancel preview loop.
+        self.cancel_preview_loop()
+
+        # Release active camera if needed.
+        if self.camera.is_tracking:
+            self.camera.stop_camera()
+
+        # Update preview text.
+        self.video_label.config(
+            image="",
+            text="Restarting camera...\n\nPlease wait.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"]
+        )
+        self.video_label.image = None
+
+        self.update_status(
+            "Status: Restarting camera...",
+            "● RESTARTING"
+        )
+
+        # Restart after short delay to let camera fully release.
+        self.root.after(300, self.start_tracking)
+
     def update_camera_feed(self):
         """
         Continuously update live camera preview.
         """
 
+        # Stop preview loop if the camera is no longer tracking.
         if not self.camera.is_tracking:
-            self.preview_loop_running = False
+            self.cancel_preview_loop()
+            self.update_tracking_button()
             return
 
+        # Read one frame from the camera backend.
         frame = self.camera.read_frame()
 
         if frame is not None:
+            # Save frame to video if recording is active.
             self.camera.write_video_frame(frame)
 
+            # Convert OpenCV BGR image to RGB for Tkinter/PIL.
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # Convert NumPy frame to PIL image.
             image = Image.fromarray(frame_rgb)
 
+            # Resize preview to fit GUI.
             image = image.resize((PREVIEW["width"], PREVIEW["height"]))
 
+            # Convert PIL image to Tkinter image.
             self.preview_photo = ImageTk.PhotoImage(image=image)
 
+            # Display the frame in the preview label.
             self.video_label.config(
                 image=self.preview_photo,
                 text=""
             )
 
+            # Keep reference so Tkinter does not remove the image.
             self.video_label.image = self.preview_photo
 
         else:
@@ -721,22 +919,25 @@ class CoBasV1App:
                 "● WARNING"
             )
 
+        # Update recording timer while recording.
         if self.camera.is_recording:
             seconds = self.camera.get_recording_seconds()
             self.record_timer_label.config(
                 text=f"Recording: {seconds} second(s)"
             )
 
-        self.root.after(30, self.update_camera_feed)
+        # Schedule next frame update.
+        self.preview_after_id = self.root.after(30, self.update_camera_feed)
 
     def switch_front_back_camera(self):
         """
         Switch between /dev/video0 and /dev/video1.
 
-        This is intended for Android Webcam mode, where one device node
-        may represent the front camera and the other may represent the back camera.
+        In Android Webcam mode, these device nodes may represent
+        different camera streams, such as front and back cameras.
         """
 
+        # Do not switch camera while recording.
         if self.camera.is_recording:
             messagebox.showwarning(
                 "Recording Active",
@@ -751,17 +952,18 @@ class CoBasV1App:
 
         # Stop current camera first.
         if self.camera.is_tracking:
+            self.cancel_preview_loop()
             self.camera.stop_camera()
-            self.preview_loop_running = False
 
-        # Toggle camera source.
+        # Toggle camera source in backend.
         new_source = self.camera.switch_camera_source()
 
+        # Show new source immediately.
         self.camera_info_label.config(
             text=f"Camera: {new_source}"
         )
 
-        # Start camera again.
+        # Start the newly selected camera.
         started = self.camera.start_camera()
 
         if started:
@@ -772,11 +974,13 @@ class CoBasV1App:
                 "● LIVE"
             )
 
-            if not self.preview_loop_running:
-                self.preview_loop_running = True
-                self.update_camera_feed()
+            self.preview_loop_running = True
+            self.update_tracking_button()
+            self.update_camera_feed()
 
         else:
+            self.update_tracking_button()
+
             self.update_status(
                 f"Status: Failed to switch to {new_source}",
                 "● ERROR"
@@ -794,9 +998,10 @@ class CoBasV1App:
 
     def take_photo(self):
         """
-        Take one photo.
+        Take one photo from the current camera frame.
         """
 
+        # Camera must be active to take a photo.
         if not self.camera.is_tracking:
             messagebox.showwarning(
                 "Camera Not Active",
@@ -804,6 +1009,7 @@ class CoBasV1App:
             )
             return
 
+        # Capture photo through camera backend.
         filepath = self.camera.take_photo()
 
         if filepath:
@@ -822,6 +1028,7 @@ class CoBasV1App:
         Start or stop video recording with audio.
         """
 
+        # Camera must be active before recording.
         if not self.camera.is_tracking:
             messagebox.showwarning(
                 "Camera Not Active",
@@ -834,7 +1041,10 @@ class CoBasV1App:
             self.current_video_path = self.camera.start_recording()
 
             if self.current_video_path:
-                self.record_button.config(text="Stop Recording")
+                self.record_button.config(
+                    text="Stop Recording",
+                    style="VideoStop.TButton"
+                )
 
                 self.update_status(
                     f"Status: Recording video/audio to {self.current_video_path}",
@@ -850,7 +1060,11 @@ class CoBasV1App:
         else:
             saved_video_path = self.camera.stop_recording()
 
-            self.record_button.config(text="Record Video")
+            self.record_button.config(
+                text="Capture Video",
+                style="Capture.TButton"
+            )
+
             self.record_timer_label.config(text="Recording: 0 second")
 
             if saved_video_path:
@@ -872,7 +1086,7 @@ class CoBasV1App:
 
     def zoom_in(self):
         """
-        Zoom in.
+        Increase digital zoom.
         """
 
         self.camera.zoom_in()
@@ -885,7 +1099,7 @@ class CoBasV1App:
 
     def zoom_out(self):
         """
-        Zoom out.
+        Decrease digital zoom.
         """
 
         self.camera.zoom_out()
@@ -898,7 +1112,7 @@ class CoBasV1App:
 
     def reset_zoom(self):
         """
-        Reset zoom.
+        Reset digital zoom to normal.
         """
 
         self.camera.reset_zoom()
@@ -919,15 +1133,26 @@ class CoBasV1App:
         """
 
         self.is_closing = True
+
+        # Stop scheduled preview loop.
+        self.cancel_preview_loop()
+
+        # Release camera and recording resources.
         self.camera.stop_camera()
-        self.preview_loop_running = False
+
+        # Close Tkinter window.
         self.root.destroy()
 
 
 if __name__ == "__main__":
+    # Create main Tkinter window.
     root = tk.Tk()
+
+    # Create CoBas app instance.
     app = CoBasV1App(root)
 
+    # Make sure camera resources are released when the user closes the app.
     root.protocol("WM_DELETE_WINDOW", app.on_close)
 
+    # Start Tkinter event loop.
     root.mainloop()
