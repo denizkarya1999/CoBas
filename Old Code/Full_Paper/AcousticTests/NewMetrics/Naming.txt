@@ -1,0 +1,12 @@
+Mother Folder Naming:
+- Type_RecordingDevice_Round
+- Example: train_phone_000
+- Example: test_phone_000
+- Example: val_phone_000
+- Example: train_pi_000
+- Example: test_pi_000
+- Example: val_pi_000
+
+Child Folder Naming:
+- Round_0_50_100_SamplesPerDataset_CyclesPerSample
+- Example: 000_t_f_t_1_30

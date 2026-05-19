@@ -1,0 +1,58 @@
+{
+  "n_frames": 81,
+  "roi": null,
+  "metrics": {
+    "mean_spearman_rho": 0.8688941766192289,
+    "mean_pearson_r": 0.8738129963314577,
+    "mean_intensity_curve_corr": 0.2670350253215052,
+    "max_intensity_curve_corr": -0.25372017932541185,
+    "hot_pixel_fraction_curve_corr": -0.04955096993716764,
+    "mean_hotspot_error_px": 9.490634935131272,
+    "temporal_delta_curve_corr": 0.2789054443927035,
+    "lag_adjusted_best_lag_frames": 25,
+    "lag_adjusted_mean_intensity_curve_corr": 0.4911793246273029,
+    "lag_adjusted_max_intensity_curve_corr": -0.18352874875795136,
+    "lag_adjusted_hot_pixel_fraction_curve_corr": -0.12519032142817238,
+    "lag_adjusted_temporal_delta_curve_corr": -0.10002830631826437,
+    "lag_adjusted_mean_spearman_rho": 0.8496697086188937,
+    "lag_adjusted_mean_pearson_r": 0.852683807381528,
+    "lag_adjusted_mean_hotspot_error_px": 8.14359783648613
+  },
+  "threshold_interpretation": {
+    "mean_spearman_rho": "strong",
+    "mean_pearson_r": "strong",
+    "mean_intensity_curve_corr": "weak",
+    "max_intensity_curve_corr": "weak",
+    "mean_hotspot_error_px": "strong",
+    "temporal_delta_curve_corr": "weak",
+    "lag_adjusted_mean_intensity_curve_corr": "weak",
+    "lag_adjusted_max_intensity_curve_corr": "weak",
+    "lag_adjusted_mean_hotspot_error_px": "strong",
+    "lag_adjusted_temporal_delta_curve_corr": "weak"
+  },
+  "lag_sweep": {
+    "lag_max": 30,
+    "lag_min_overlap": 20,
+    "best_by_mean_curve": {
+      "lag": 25,
+      "corr": 0.4911793246273029,
+      "overlap": 56
+    },
+    "best_by_max_curve": {
+      "lag": -20,
+      "corr": 0.3289461889942168,
+      "overlap": 61
+    },
+    "best_by_temporal_delta": {
+      "lag": 0,
+      "corr": 0.2789054443927035,
+      "overlap": 80
+    },
+    "lag_adjusted_overlap_counts": {
+      "mean": 56,
+      "max": 56,
+      "hot_fraction": 56,
+      "delta": 55
+    }
+  }
+}

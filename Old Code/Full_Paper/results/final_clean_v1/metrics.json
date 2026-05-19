@@ -1,0 +1,94 @@
+{
+  "best_checkpoint": "epoch_0010",
+  "training_epochs": 20,
+  "image_size": 256,
+  "dataset": {
+    "total_frames": 407,
+    "train_frames": 326,
+    "test_frames": 81,
+    "test_ratio": 0.2,
+    "seed": 42
+  },
+  "best_metrics": {
+    "checkpoint": "epoch_0010",
+    "n_test": 81,
+    "MAE_mean": 0.03036569003705625,
+    "MSE_mean": 0.0036135425260807904,
+    "RMSE_mean": 0.057435589883745475,
+    "PSNR_mean": 25.336015413087022,
+    "PSNR_std": 3.1980171944166016,
+    "SSIM_mean": 0.840263119450322,
+    "SSIM_std": 0.03501381517338365,
+    "elapsed_sec": 108.26640510559082,
+    "throughput_img_s": 0.7481545168235867
+  },
+  "all_checkpoints": {
+    "epoch_0005": {
+      "checkpoint": "epoch_0005",
+      "n_test": 81,
+      "MAE_mean": 0.03583665985476087,
+      "MSE_mean": 0.004293800047081377,
+      "RMSE_mean": 0.06406912680424517,
+      "PSNR_mean": 24.081655900301215,
+      "PSNR_std": 1.9726190312870484,
+      "SSIM_mean": 0.7869326442848017,
+      "SSIM_std": 0.022064819355383705,
+      "elapsed_sec": 245.38675093650818,
+      "throughput_img_s": 0.33009117114459896
+    },
+    "epoch_0010": {
+      "checkpoint": "epoch_0010",
+      "n_test": 81,
+      "MAE_mean": 0.03036569003705625,
+      "MSE_mean": 0.0036135425260807904,
+      "RMSE_mean": 0.057435589883745475,
+      "PSNR_mean": 25.336015413087022,
+      "PSNR_std": 3.1980171944166016,
+      "SSIM_mean": 0.840263119450322,
+      "SSIM_std": 0.03501381517338365,
+      "elapsed_sec": 108.26640510559082,
+      "throughput_img_s": 0.7481545168235867
+    },
+    "epoch_0015": {
+      "checkpoint": "epoch_0015",
+      "n_test": 81,
+      "MAE_mean": 0.039005895156735255,
+      "MSE_mean": 0.004689580552498408,
+      "RMSE_mean": 0.06687479376463094,
+      "PSNR_mean": 23.740792991596965,
+      "PSNR_std": 2.149657574780043,
+      "SSIM_mean": 0.8226419966897847,
+      "SSIM_std": 0.029750590683603185,
+      "elapsed_sec": 107.0956859588623,
+      "throughput_img_s": 0.7563329864763535
+    },
+    "epoch_0020": {
+      "checkpoint": "epoch_0020",
+      "n_test": 81,
+      "MAE_mean": 0.03739154858537662,
+      "MSE_mean": 0.00502199043640522,
+      "RMSE_mean": 0.06831117436139404,
+      "PSNR_mean": 23.742727954109842,
+      "PSNR_std": 2.940619496840691,
+      "SSIM_mean": 0.8307096884574419,
+      "SSIM_std": 0.03778615940986327,
+      "elapsed_sec": 98.77038836479187,
+      "throughput_img_s": 0.8200838463937196
+    }
+  },
+  "comparison": {
+    "old_epoch_0040": {
+      "PSNR": 25.1,
+      "SSIM": 0.827,
+      "data": "old frames",
+      "hud_removed": false
+    },
+    "clean_v1": {
+      "PSNR": 25.336015413087022,
+      "SSIM": 0.840263119450322,
+      "data": "cleaned crops",
+      "hud_removed": true,
+      "checkpoint": "epoch_0010"
+    }
+  }
+}
