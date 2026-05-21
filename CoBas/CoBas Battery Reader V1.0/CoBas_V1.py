@@ -13,6 +13,11 @@ from Settings import SettingsWindow
 from About import show_about_window
 
 
+APP_TITLE = "CoBas Battery Reader V1.0"
+APP_WM_CLASS = "cobas_battery_reader_v1"
+ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+
 class CoBasV1App:
     """
     Main GUI application for CoBas Battery Reader V1.0.
@@ -37,7 +42,8 @@ class CoBasV1App:
         """
 
         self.root = root
-        self.root.title("CoBas Battery Reader V1.0")
+        self.root.title(APP_TITLE)
+        self.root.iconname(APP_TITLE)
 
         # Load application icon before building the UI.
         self.set_app_icon()
@@ -120,13 +126,36 @@ class CoBasV1App:
         )
 
         if os.path.exists(icon_path):
-            icon_image = tk.PhotoImage(file=icon_path)
+            icon_images = []
 
-            # Sets title-bar/taskbar icon where supported.
-            self.root.iconphoto(True, icon_image)
+            try:
+                source_image = Image.open(icon_path).convert("RGBA")
+                resample_filter = Image.Resampling.LANCZOS
 
-            # Keep reference so Python does not garbage collect the image.
-            self.root.icon_image = icon_image
+                for size in ICON_SIZES:
+                    resized_icon = source_image.resize(
+                        (size, size),
+                        resample_filter
+                    )
+
+                    icon_images.append(ImageTk.PhotoImage(resized_icon))
+
+            except Exception as e:
+                print(f"[WARNING] Could not build resized app icons: {e}")
+                icon_images = [tk.PhotoImage(file=icon_path)]
+
+            # Sets title-bar/taskbar icon where supported by the window manager.
+            self.root.iconphoto(True, *icon_images)
+
+            # Reapply after the window is mapped; some Linux window managers
+            # ignore the first icon request if it happens too early.
+            self.root.after(
+                200,
+                lambda: self.root.iconphoto(True, *icon_images)
+            )
+
+            # Keep references so Python does not garbage collect the images.
+            self.root.icon_images = icon_images
 
             print(f"[INFO] App icon loaded: {icon_path}")
         else:
@@ -1296,7 +1325,7 @@ class CoBasV1App:
 
 if __name__ == "__main__":
     # Create main Tkinter window.
-    root = tk.Tk()
+    root = tk.Tk(className=APP_WM_CLASS)
 
     # Create CoBas app instance.
     app = CoBasV1App(root)
