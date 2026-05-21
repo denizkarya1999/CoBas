@@ -3,6 +3,9 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 import os
 import cv2
+import sys
+import threading
+import subprocess
 
 from Camera.Camera import Camera
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
@@ -58,6 +61,9 @@ class CoBasV1App:
         # Stores path of the current video file.
         self.current_video_path = None
 
+        # Stores last processed video path to avoid processing the same video twice.
+        self.last_processed_video_path = None
+
         # Preview loop state.
         self.preview_loop_running = False
         self.preview_after_id = None
@@ -71,8 +77,10 @@ class CoBasV1App:
         # Build all GUI components.
         self.build_gui()
 
-        # Start camera automatically after GUI loads.
-        self.root.after(700, self.auto_start_camera)
+        self.update_status(
+            "Status: Ready. Click 'Start Tracking' to begin.",
+            "● READY"
+        )
 
     # --------------------------------------------------
     # Window Behavior
@@ -224,16 +232,16 @@ class CoBasV1App:
         # This is tk.Label instead of ttk.Label because we change fg color.
         self.live_indicator_label = tk.Label(
             preview_header,
-            text="● STARTING",
+            text="● READY",
             bg=COLORS["panel_bg"],
-            fg=COLORS["warning"],
+            fg=COLORS["accent"],
             font=FONTS["status"]
         )
         self.live_indicator_label.pack(side="right")
 
         self.video_label = tk.Label(
             parent,
-            text="Initializing camera...\n\nPlease wait.",
+            text="Camera is ready.\n\nClick 'Start Tracking' to begin.",
             bg=COLORS["preview_bg"],
             fg=COLORS["muted_text"],
             font=FONTS["preview_text"],
@@ -257,7 +265,7 @@ class CoBasV1App:
 
         self.status_label = ttk.Label(
             bottom_bar,
-            text="Status: Initializing camera...",
+            text="Status: Ready. Click 'Start Tracking' to begin.",
             style="Info.TLabel"
         )
         self.status_label.pack(side="left")
@@ -626,12 +634,101 @@ class CoBasV1App:
             text=f"Zoom: {self.camera.zoom_factor}x"
         )
 
-    def auto_start_camera(self):
+    def process_last_video_with_separator(self, video_path):
         """
-        Start camera automatically after the GUI is visible.
+        Run Inference/Tools/VideoSoundSeperator.py on the last saved video file.
+
+        This runs after tracking is stopped.
+        A background thread is used so the Tkinter GUI does not freeze.
         """
 
-        self.start_tracking()
+        if video_path is None:
+            print("[INFO] No video path available for processing.")
+            return
+
+        if not os.path.exists(video_path):
+            print(f"[WARNING] Video file does not exist: {video_path}")
+            return
+
+        if self.last_processed_video_path == video_path:
+            print(f"[INFO] Video already processed: {video_path}")
+            return
+
+        self.last_processed_video_path = video_path
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+        separator_script = os.path.join(
+            base_dir,
+            "Inference",
+            "Tools",
+            "VideoSoundSeperator.py"
+        )
+
+        if not os.path.exists(separator_script):
+            print(f"[ERROR] VideoSoundSeperator.py not found: {separator_script}")
+
+            self.update_status(
+                "Status: VideoSoundSeperator.py not found",
+                "● WARNING"
+            )
+            return
+
+        output_folder = os.path.join(
+            base_dir,
+            "Captures",
+            "Separated_Output"
+        )
+
+        command = [
+            sys.executable,
+            separator_script,
+            video_path,
+            "--output-folder",
+            output_folder,
+            "--cut-seconds",
+            "2"
+        ]
+
+        def worker():
+            print(f"[INFO] Processing stopped tracking video: {video_path}")
+
+            self.root.after(
+                0,
+                lambda: self.update_status(
+                    "Status: Processing last video/audio...",
+                    "● WARNING"
+                )
+            )
+
+            try:
+                subprocess.run(command, check=True)
+
+                print("[INFO] Video/audio separation finished.")
+
+                self.root.after(
+                    0,
+                    lambda: self.update_status(
+                        "Status: Last video processed successfully",
+                        "● IDLE"
+                    )
+                )
+
+            except Exception as e:
+                print(f"[ERROR] Video/audio separation failed: {e}")
+
+                self.root.after(
+                    0,
+                    lambda: self.update_status(
+                        "Status: Video/audio processing failed",
+                        "● WARNING"
+                    )
+                )
+
+        threading.Thread(
+            target=worker,
+            daemon=True
+        ).start()
 
     # --------------------------------------------------
     # External Windows
@@ -683,8 +780,9 @@ class CoBasV1App:
             "● READY"
         )
 
-        # Restart automatically with the new camera source.
-        self.root.after(300, self.start_tracking)
+        # Restart only if tracking was active before the source changed.
+        if was_tracking:
+            self.root.after(300, self.start_tracking)
 
     def apply_microphone_source_from_settings(
         self,
@@ -771,6 +869,30 @@ class CoBasV1App:
             # Start refreshing frames.
             self.update_camera_feed()
 
+            # Automatically start recording video with audio.
+            self.current_video_path = self.camera.start_recording()
+
+            if self.current_video_path:
+                self.record_button.config(
+                    text="Stop Recording",
+                    style="VideoStop.TButton"
+                )
+
+                self.update_status(
+                    f"Status: Recording video/audio to {self.current_video_path}",
+                    "● REC"
+                )
+            else:
+                print("[WARNING] Could not start automatic video recording.")
+                self.record_button.config(
+                    text="Capture Video",
+                    style="Capture.TButton"
+                )
+                self.update_status(
+                    "Status: Failed to start automatic recording",
+                    "● WARNING"
+                )
+
         else:
             # Keep button as Start Tracking if camera failed.
             self.update_tracking_button()
@@ -801,10 +923,25 @@ class CoBasV1App:
     def stop_tracking(self):
         """
         Stop camera preview safely.
+
+        If video recording is active, stop it first.
+        Then process the last saved video with Inference/Tools/VideoSoundSeperator.py.
         """
 
         # Cancel preview update loop first.
         self.cancel_preview_loop()
+
+        saved_video_path = None
+
+        # --------------------------------------------------
+        # Stop recording first if it is active.
+        # This gives us the final saved video path.
+        # --------------------------------------------------
+        if self.camera.is_recording:
+            saved_video_path = self.camera.stop_recording()
+
+            if saved_video_path:
+                self.current_video_path = saved_video_path
 
         # Release camera through backend.
         self.camera.stop_camera()
@@ -834,6 +971,18 @@ class CoBasV1App:
 
         # Change Stop Tracking button back into Start Tracking.
         self.update_tracking_button()
+
+        # --------------------------------------------------
+        # Process the last available recorded video.
+        # --------------------------------------------------
+        if saved_video_path:
+            self.process_last_video_with_separator(saved_video_path)
+
+        elif self.current_video_path and os.path.exists(self.current_video_path):
+            self.process_last_video_with_separator(self.current_video_path)
+
+        else:
+            print("[INFO] Tracking stopped, but no saved video was found to process.")
 
     def restart_camera(self):
         """
@@ -922,8 +1071,9 @@ class CoBasV1App:
         # Update recording timer while recording.
         if self.camera.is_recording:
             seconds = self.camera.get_recording_seconds()
+            second_text = "second" if seconds == 1 else "seconds"
             self.record_timer_label.config(
-                text=f"Recording: {seconds} second(s)"
+                text=f"Recording: {seconds} {second_text}"
             )
 
         # Schedule next frame update.

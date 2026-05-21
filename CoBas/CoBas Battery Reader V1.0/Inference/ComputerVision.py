@@ -1,5 +1,9 @@
 import cv2
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 
 class ComputerVision:
@@ -17,7 +21,7 @@ class ComputerVision:
         Initialize the computer vision module and log library status.
         """
 
-        self.device = torch.device("cpu")
+        self.device = torch.device("cpu") if torch is not None else "cpu"
         self.model = None
 
         self.log_library_status()
@@ -34,11 +38,14 @@ class ComputerVision:
         print("[INFO] OpenCV library loaded successfully.")
         print(f"[INFO] OpenCV version: {cv2.__version__}")
 
-        print("[INFO] PyTorch library loaded successfully.")
-        print(f"[INFO] PyTorch version: {torch.__version__}")
-
-        print("[INFO] PyTorch device forced to CPU.")
-        print(f"[INFO] Active device: {self.device}")
+        if torch is not None:
+            print("[INFO] PyTorch library loaded successfully.")
+            print(f"[INFO] PyTorch version: {torch.__version__}")
+            print("[INFO] PyTorch device forced to CPU.")
+            print(f"[INFO] Active device: {self.device}")
+        else:
+            print("[WARNING] PyTorch is not installed. Inference is disabled.")
+            print("[INFO] Camera preview will continue without ML processing.")
 
         print("========================================")
 
