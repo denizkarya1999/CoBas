@@ -32,7 +32,7 @@ active_secs = 60.0
 # SAVE INTO INPUTS FOLDER
 # ==========================================================
 
-input_dir = "Inputs"
+input_dir = "Output"
 os.makedirs(input_dir, exist_ok=True)
 
 output_file = f"{cycles_total}_15sPause_BeaconProtocol.wav"

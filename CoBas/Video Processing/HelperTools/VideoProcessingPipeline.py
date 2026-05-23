@@ -4,7 +4,7 @@ import sys
 
 PIPELINE_STEPS = [
     ("2-second segmentation", "2S_Segmentation.py"),
-    ("video/audio separation", "VideoSoundSeperator.py"),
+    ("full audio extraction", "VideoSoundSeperator.py"),
     ("frame slicing", "VideoFrameSlicer.py"),
 ]
 

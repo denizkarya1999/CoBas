@@ -9,7 +9,7 @@ FINAL_OUTPUT_FOLDER = f"{INPUT_VIDEO.stem}_Image_and_Video"
 
 PIPELINE_STEPS = [
     ("2-second segmentation", Path("HelperTools") / "2S_Segmentation.py"),
-    ("video/audio separation", Path("HelperTools") / "VideoSoundSeperator.py"),
+    ("full audio extraction", Path("HelperTools") / "VideoSoundSeperator.py"),
     ("frame slicing", Path("HelperTools") / "VideoFrameSlicer.py"),
     ("frames and voices only", Path("HelperTools") / "FramesAndVideosOnly.py"),
 ]
@@ -59,7 +59,7 @@ def main():
 
     print("\nPipeline finished successfully.")
     print(f"Frames saved in: {FINAL_OUTPUT_FOLDER}/Frames")
-    print(f"Voices saved in: {FINAL_OUTPUT_FOLDER}/Voices")
+    print(f"Unsegmented voice saved in: {FINAL_OUTPUT_FOLDER}/Voices")
 
 
 if __name__ == "__main__":

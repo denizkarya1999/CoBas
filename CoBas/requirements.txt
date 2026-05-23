@@ -1,0 +1,24 @@
+# Core numerical/computer-vision dependencies
+numpy
+opencv-python
+Pillow
+
+# Audio capture and processing
+sounddevice
+soundfile
+librosa
+scipy
+
+# Machine learning
+torch
+torchaudio
+torchvision
+scikit-learn
+
+# Plotting and notebook analysis
+matplotlib
+seaborn
+tqdm
+
+# Note: some video/audio preprocessing code also requires ffmpeg to be
+# installed on the system PATH. ffmpeg is not installed through pip here.

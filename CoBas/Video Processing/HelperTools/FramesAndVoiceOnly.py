@@ -116,13 +116,14 @@ def segment_video(input_video_path, segment_folder, cut_seconds):
     return True
 
 
-def save_voice(segment_path, voice_folder):
-    output_voice_path = voice_folder / f"{segment_path.stem}_voice.wav"
+def save_voice(input_video_path, voice_folder):
+    input_video_path = Path(input_video_path)
+    output_voice_path = voice_folder / f"{input_video_path.stem}.wav"
 
     command = [
         "ffmpeg",
         "-y",
-        "-i", str(segment_path),
+        "-i", str(input_video_path),
         "-map", "0:a:0",
         "-vn",
         "-acodec", "pcm_s24le",
@@ -133,7 +134,7 @@ def save_voice(segment_path, voice_folder):
         print(f"Voice saved: {output_voice_path}")
         return True
 
-    print(f"Voice extraction failed: {segment_path}")
+    print(f"Voice extraction failed: {input_video_path}")
     return False
 
 
@@ -162,6 +163,8 @@ def save_frames_and_voice_only():
     clean_generated_folders()
     frames_folder, voice_folder = prepare_output_folders()
 
+    voice_success = save_voice(INPUT_VIDEO, voice_folder)
+
     if not segment_video(INPUT_VIDEO, TEMP_SEGMENT_FOLDER, CUT_SECONDS):
         return False
 
@@ -174,22 +177,22 @@ def save_frames_and_voice_only():
     success_count = 0
 
     for segment_path in segment_paths:
-        voice_success = save_voice(segment_path, voice_folder)
         frames_success = save_frames(segment_path, frames_folder)
 
-        if voice_success and frames_success:
+        if frames_success:
             success_count += 1
 
     delete_folder(TEMP_SEGMENT_FOLDER)
 
     print(
-        f"\nFinished saving frames and voice for "
+        f"\nFinished saving frames for "
         f"{success_count}/{len(segment_paths)} segments."
     )
+    print("Voice was saved once from the full input video.")
     print(f"Final output folder: {FINAL_OUTPUT_FOLDER}")
     print(f"Original video kept: {INPUT_VIDEO}")
 
-    return success_count == len(segment_paths)
+    return voice_success and success_count == len(segment_paths)
 
 
 def main():

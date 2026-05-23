@@ -303,6 +303,25 @@ class CoBasV1App:
         )
         self.status_label.pack(side="left")
 
+        self.processing_indicator_frame = ttk.Frame(
+            bottom_bar,
+            style="Panel.TFrame"
+        )
+
+        self.processing_indicator_label = ttk.Label(
+            self.processing_indicator_frame,
+            text="Processing...",
+            style="Info.TLabel"
+        )
+        self.processing_indicator_label.pack(side="left", padx=(12, 6))
+
+        self.processing_progress_bar = ttk.Progressbar(
+            self.processing_indicator_frame,
+            mode="indeterminate",
+            length=130
+        )
+        self.processing_progress_bar.pack(side="left")
+
         self.record_timer_label = ttk.Label(
             bottom_bar,
             text="Recording: 0 second",
@@ -642,6 +661,21 @@ class CoBasV1App:
                 fg=self.get_indicator_color(indicator_text)
             )
 
+    def set_processing_indicator(self, is_processing):
+        """
+        Show or hide the post-capture processing progress indicator.
+        """
+
+        if is_processing:
+            if not self.processing_indicator_frame.winfo_ismapped():
+                self.processing_indicator_frame.pack(side="left")
+            self.processing_progress_bar.start(10)
+            return
+
+        self.processing_progress_bar.stop()
+        if self.processing_indicator_frame.winfo_ismapped():
+            self.processing_indicator_frame.pack_forget()
+
     def refresh_info_panel(self):
         """
         Refresh all system information labels.
@@ -676,9 +710,10 @@ class CoBasV1App:
 
         Pipeline:
         1. Segment captured video every 2 seconds.
-        2. Extract 48 kHz mono voice WAV files with segment intervals.
+        2. Extract one unsegmented 48 kHz mono voice WAV from the full video.
         3. Extract one frame every 2 seconds.
-        4. Save final Frames and Voices output under Captures.
+        4. Run beacon voice preprocessing and STFT spectrogram preparation.
+        5. Save final raw video, Frames, Voices, and <voice_name>_Spectogram output under Captures.
         """
 
         if video_path is None:
@@ -724,9 +759,12 @@ class CoBasV1App:
 
             self.root.after(
                 0,
-                lambda: self.update_status(
-                    "Status: Processing video frames and voices...",
-                    "● WARNING"
+                lambda: (
+                    self.update_status(
+                        "Status: Processing video, voice, and STFT...",
+                        "● WARNING"
+                    ),
+                    self.set_processing_indicator(True)
                 )
             )
 
@@ -738,9 +776,12 @@ class CoBasV1App:
 
                 self.root.after(
                     0,
-                    lambda: self.update_status(
-                        "Status: Last video pipeline finished",
-                        "● IDLE"
+                    lambda: (
+                        self.set_processing_indicator(False),
+                        self.update_status(
+                            "Status: Last video pipeline finished",
+                            "● IDLE"
+                        )
                     )
                 )
 
@@ -750,9 +791,12 @@ class CoBasV1App:
 
                 self.root.after(
                     0,
-                    lambda: self.update_status(
-                        "Status: Video pipeline failed",
-                        "● WARNING"
+                    lambda: (
+                        self.set_processing_indicator(False),
+                        self.update_status(
+                            "Status: Video pipeline failed",
+                            "● WARNING"
+                        )
                     )
                 )
 
@@ -763,19 +807,19 @@ class CoBasV1App:
 
     def cleanup_video_processing_work_folder(self):
         """
-        Delete temporary video-processing work files from Captures.
+        Delete temporary video/voice-processing work files from Captures.
         """
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        work_folder = os.path.join(
-            base_dir,
-            "Captures",
-            "_Video_Processing_Work"
-        )
+        work_folders = [
+            os.path.join(base_dir, "Captures", "_Video_Processing_Work"),
+            os.path.join(base_dir, "Captures", "_Voice_Processing_Work"),
+        ]
 
-        if os.path.isdir(work_folder):
-            shutil.rmtree(work_folder)
-            print(f"[INFO] Deleted video processing work folder: {work_folder}")
+        for work_folder in work_folders:
+            if os.path.isdir(work_folder):
+                shutil.rmtree(work_folder)
+                print(f"[INFO] Deleted processing work folder: {work_folder}")
 
     def start_pulse_protocol_generation(self):
         """

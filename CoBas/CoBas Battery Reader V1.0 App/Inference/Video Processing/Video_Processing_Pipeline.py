@@ -78,6 +78,11 @@ def process_video(input_video):
     frames_folder.mkdir(parents=True, exist_ok=True)
     voices_folder.mkdir(parents=True, exist_ok=True)
 
+    voice_pipeline_script = get_app_root() / "Inference" / "Voice Processing" / "Voice_Processing_Pipeline.py"
+    voice_file = voices_folder / f"{input_video_path.stem}.wav"
+    voice_stft_folder = output_folder / f"{voice_file.stem}_Spectogram"
+    voice_stft_folder.mkdir(parents=True, exist_ok=True)
+
     steps = [
         (
             "2-second segmentation",
@@ -92,11 +97,11 @@ def process_video(input_video):
             ]
         ),
         (
-            "audio extraction",
+            "full audio extraction",
             [
                 sys.executable,
                 str(helper_folder / "VideoSoundSeperator.py"),
-                str(segment_folder),
+                str(input_video_path),
                 "--output-folder",
                 str(voices_folder)
             ]
@@ -122,6 +127,16 @@ def process_video(input_video):
                 str(work_folder)
             ]
         ),
+        (
+            "voice STFT preprocessing",
+            [
+                sys.executable,
+                str(voice_pipeline_script),
+                str(voice_file),
+                "--output-folder",
+                str(voice_stft_folder)
+            ]
+        ),
     ]
 
     for label, command in steps:
@@ -132,7 +147,8 @@ def process_video(input_video):
 
     print("\nPipeline finished successfully.")
     print(f"Frames saved in: {output_folder / 'Frames'}")
-    print(f"Voices saved in: {output_folder / 'Voices'}")
+    print(f"Voice saved in: {voices_folder}")
+    print(f"Spectrograms saved in: {voice_stft_folder}")
     return True
 
 
