@@ -6,6 +6,7 @@ import cv2
 import sys
 import threading
 import subprocess
+import shutil
 
 from Camera.Camera import Camera
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
@@ -69,6 +70,9 @@ class CoBasV1App:
 
         # Stores last processed video path to avoid processing the same video twice.
         self.last_processed_video_path = None
+
+        # Background pulse protocol generation process.
+        self.pulse_process = None
 
         # Preview loop state.
         self.preview_loop_running = False
@@ -663,12 +667,18 @@ class CoBasV1App:
             text=f"Zoom: {self.camera.zoom_factor}x"
         )
 
-    def process_last_video_with_separator(self, video_path):
+    def process_last_video_with_pipeline(self, video_path):
         """
-        Run Inference/Tools/VideoSoundSeperator.py on the last saved video file.
+        Run the post-capture processing pipeline on the last saved video file.
 
         This runs after tracking is stopped.
         A background thread is used so the Tkinter GUI does not freeze.
+
+        Pipeline:
+        1. Segment captured video every 2 seconds.
+        2. Extract 48 kHz mono voice WAV files with segment intervals.
+        3. Extract one frame every 2 seconds.
+        4. Save final Frames and Voices output under Captures.
         """
 
         if video_path is None:
@@ -687,69 +697,61 @@ class CoBasV1App:
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
 
-        separator_script = os.path.join(
+        pipeline_script = os.path.join(
             base_dir,
             "Inference",
-            "Tools",
-            "VideoSoundSeperator.py"
+            "Video Processing",
+            "Video_Processing_Pipeline.py"
         )
 
-        if not os.path.exists(separator_script):
-            print(f"[ERROR] VideoSoundSeperator.py not found: {separator_script}")
+        if not os.path.exists(pipeline_script):
+            print(f"[ERROR] Pipeline script not found: {pipeline_script}")
 
             self.update_status(
-                "Status: VideoSoundSeperator.py not found",
+                "Status: Video pipeline script not found",
                 "● WARNING"
             )
             return
 
-        output_folder = os.path.join(
-            base_dir,
-            "Captures",
-            "Separated_Output"
-        )
-
-        command = [
+        pipeline_command = [
             sys.executable,
-            separator_script,
-            video_path,
-            "--output-folder",
-            output_folder,
-            "--cut-seconds",
-            "2"
+            pipeline_script,
+            video_path
         ]
 
         def worker():
-            print(f"[INFO] Processing stopped tracking video: {video_path}")
+            print(f"[INFO] Processing stopped tracking video through pipeline: {video_path}")
 
             self.root.after(
                 0,
                 lambda: self.update_status(
-                    "Status: Processing last video/audio...",
+                    "Status: Processing video frames and voices...",
                     "● WARNING"
                 )
             )
 
             try:
-                subprocess.run(command, check=True)
+                subprocess.run(pipeline_command, check=True)
+                self.cleanup_video_processing_work_folder()
 
-                print("[INFO] Video/audio separation finished.")
+                print("[INFO] Video pipeline finished.")
 
                 self.root.after(
                     0,
                     lambda: self.update_status(
-                        "Status: Last video processed successfully",
+                        "Status: Last video pipeline finished",
                         "● IDLE"
                     )
                 )
 
             except Exception as e:
-                print(f"[ERROR] Video/audio separation failed: {e}")
+                self.cleanup_video_processing_work_folder()
+                print(f"[ERROR] Video pipeline failed: {e}")
 
                 self.root.after(
                     0,
                     lambda: self.update_status(
-                        "Status: Video/audio processing failed",
+                        "Status: Video pipeline failed",
                         "● WARNING"
                     )
                 )
@@ -758,6 +760,87 @@ class CoBasV1App:
             target=worker,
             daemon=True
         ).start()
+
+    def cleanup_video_processing_work_folder(self):
+        """
+        Delete temporary video-processing work files from Captures.
+        """
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        work_folder = os.path.join(
+            base_dir,
+            "Captures",
+            "_Video_Processing_Work"
+        )
+
+        if os.path.isdir(work_folder):
+            shutil.rmtree(work_folder)
+            print(f"[INFO] Deleted video processing work folder: {work_folder}")
+
+    def start_pulse_protocol_generation(self):
+        """
+        Start pulse protocol generation when tracking starts.
+        """
+
+        if self.pulse_process is not None and self.pulse_process.poll() is None:
+            print("[INFO] Pulse protocol generation is already running.")
+            return
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        pulse_folder = os.path.join(
+            base_dir,
+            "Inference",
+            "Pulse Generation"
+        )
+        pulse_script = os.path.join(
+            pulse_folder,
+            "pulse_protocol_generator.py"
+        )
+
+        if not os.path.exists(pulse_script):
+            print(f"[WARNING] Pulse protocol generator not found: {pulse_script}")
+            return
+
+        try:
+            self.pulse_process = subprocess.Popen(
+                [sys.executable, pulse_script],
+                cwd=pulse_folder,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            print("[INFO] Pulse protocol generation started.")
+
+        except Exception as e:
+            self.pulse_process = None
+            print(f"[WARNING] Could not start pulse protocol generation: {e}")
+
+    def stop_pulse_protocol_generation(self):
+        """
+        Stop pulse protocol generation if it is still running.
+        """
+
+        if self.pulse_process is None:
+            return
+
+        if self.pulse_process.poll() is not None:
+            self.pulse_process = None
+            return
+
+        try:
+            self.pulse_process.terminate()
+            self.pulse_process.wait(timeout=2)
+            print("[INFO] Pulse protocol generation stopped.")
+
+        except subprocess.TimeoutExpired:
+            self.pulse_process.kill()
+            self.pulse_process.wait(timeout=2)
+            print("[INFO] Pulse protocol generation killed.")
+
+        except Exception as e:
+            print(f"[WARNING] Could not stop pulse protocol generation: {e}")
+
+        finally:
+            self.pulse_process = None
 
     # --------------------------------------------------
     # External Windows
@@ -898,6 +981,9 @@ class CoBasV1App:
             # Start refreshing frames.
             self.update_camera_feed()
 
+            # Start pulse protocol generation alongside tracking.
+            self.start_pulse_protocol_generation()
+
             # Automatically start recording video with audio.
             self.current_video_path = self.camera.start_recording()
 
@@ -954,11 +1040,15 @@ class CoBasV1App:
         Stop camera preview safely.
 
         If video recording is active, stop it first.
-        Then process the last saved video with Inference/Tools/VideoSoundSeperator.py.
+        Then process the last saved video with the segmentation, separation,
+        and frame-slicing pipeline.
         """
 
         # Cancel preview update loop first.
         self.cancel_preview_loop()
+
+        # Stop pulse protocol generation alongside recording/tracking.
+        self.stop_pulse_protocol_generation()
 
         saved_video_path = None
 
@@ -1005,10 +1095,10 @@ class CoBasV1App:
         # Process the last available recorded video.
         # --------------------------------------------------
         if saved_video_path:
-            self.process_last_video_with_separator(saved_video_path)
+            self.process_last_video_with_pipeline(saved_video_path)
 
         elif self.current_video_path and os.path.exists(self.current_video_path):
-            self.process_last_video_with_separator(self.current_video_path)
+            self.process_last_video_with_pipeline(self.current_video_path)
 
         else:
             print("[INFO] Tracking stopped, but no saved video was found to process.")
@@ -1315,6 +1405,9 @@ class CoBasV1App:
 
         # Stop scheduled preview loop.
         self.cancel_preview_loop()
+
+        # Stop pulse generation if app closes while tracking.
+        self.stop_pulse_protocol_generation()
 
         # Release camera and recording resources.
         self.camera.stop_camera()
