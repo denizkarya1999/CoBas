@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 
-INPUT_VIDEO = Path("Jeniffer_Lopez_Play_Live.mp4")
+INPUT_VIDEO = Path("0p_2m2.mov")
 FINAL_OUTPUT_FOLDER = f"{INPUT_VIDEO.stem}_Image_and_Video"
 
 PIPELINE_STEPS = [
