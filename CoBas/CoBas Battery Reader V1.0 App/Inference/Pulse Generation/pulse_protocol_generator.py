@@ -1,7 +1,9 @@
+import argparse
 import os
+import wave
+
 import numpy as np
 import sounddevice as sd
-import wave
 from tqdm import tqdm
 
 
@@ -66,95 +68,133 @@ def apply_fade(x, fade_ms):
     return x * w
 
 
-# ==========================================================
-# BUILD SIGNAL
-# ==========================================================
+def build_signal():
+    with tqdm(total=7, desc="Generating Protocol") as pbar:
+        beacon_tone = apply_fade(tone(beacon_freq, beacon_duration_sec), fade_ms)
+        pbar.update(1)
 
-with tqdm(total=7, desc="Generating Protocol") as pbar:
+        ns_pulse = int(round(sample_rate * pulse_duration))
+        t = np.arange(ns_pulse, dtype=np.float32) / sample_rate
 
-    beacon_tone = apply_fade(tone(beacon_freq, beacon_duration_sec), fade_ms)
-    pbar.update(1)
+        k = (end_freq - start_freq) / pulse_duration
+        phase = 2.0 * np.pi * (start_freq * t + 0.5 * k * t * t)
 
-    Ns_pulse = int(round(sample_rate * pulse_duration))
-    t = np.arange(Ns_pulse, dtype=np.float32) / sample_rate
+        pulse = (amplitude * np.sin(phase)).astype(np.float32)
+        pulse = apply_fade(pulse, fade_ms)
+        pbar.update(1)
 
-    k = (end_freq - start_freq) / pulse_duration
-    phase = 2.0 * np.pi * (start_freq * t + 0.5 * k * t * t)
+        gap = silence(gap_duration)
+        small_cycle = np.concatenate([pulse, gap])
+        pbar.update(1)
 
-    pulse = (amplitude * np.sin(phase)).astype(np.float32)
-    pulse = apply_fade(pulse, fade_ms)
-    pbar.update(1)
+        ns_active = int(round(active_secs * sample_rate))
+        cycles_in_block = ns_active // small_cycle.size
+        residual = ns_active - cycles_in_block * small_cycle.size
 
-    gap = silence(gap_duration)
-    small_cycle = np.concatenate([pulse, gap])
-    pbar.update(1)
+        active_block = np.concatenate(
+            [small_cycle] * cycles_in_block +
+            ([small_cycle[:residual]] if residual else [])
+        )
+        pbar.update(1)
 
-    Ns_active = int(round(active_secs * sample_rate))
-    cycles_in_block = Ns_active // small_cycle.size
-    residual = Ns_active - cycles_in_block * small_cycle.size
+        chirps = np.concatenate([active_block] * cycles_total)
+        pbar.update(1)
 
-    active_block = np.concatenate(
-        [small_cycle] * cycles_in_block +
-        ([small_cycle[:residual]] if residual else [])
+        full_signal = np.concatenate([
+            silence(initial_silence_sec),
+            beacon_tone,
+            silence(guard_silence_sec),
+            chirps,
+            silence(guard_silence_sec),
+            beacon_tone,
+            silence(tail_silence_sec)
+        ])
+        pbar.update(1)
+
+        pcm = np.rint(
+            np.clip(full_signal, -1.0, 1.0) * 32767.0
+        ).astype(np.int16)
+        pbar.update(1)
+
+    return full_signal, pcm
+
+
+def write_wav(pcm):
+    with wave.open(output_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+
+
+def read_wav(path):
+    with wave.open(path, "rb") as wf:
+        channels = wf.getnchannels()
+        rate = wf.getframerate()
+        frames = wf.readframes(wf.getnframes())
+
+    signal = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
+    if channels > 1:
+        signal = signal.reshape(-1, channels)
+
+    return signal, rate
+
+
+def generate_protocol():
+    full_signal, pcm = build_signal()
+    write_wav(pcm)
+
+    total_duration = full_signal.size / sample_rate
+
+    print(f"Wrote: {output_path}")
+    print(f"Total duration: {total_duration:.2f} s ({total_duration / 60:.2f} min)")
+
+    return full_signal
+
+
+def play_protocol(signal=None, rate=sample_rate):
+    if signal is None:
+        signal, rate = read_wav(output_path)
+
+    print("Playing pulse protocol...")
+    print("PLAYBACK_STARTED", flush=True)
+
+    try:
+        sd.play(signal, samplerate=rate, blocking=True)
+        sd.stop()
+        print("Pulse protocol playback finished.")
+
+    except KeyboardInterrupt:
+        sd.stop()
+        print("Pulse protocol playback stopped.")
+
+    except Exception as e:
+        sd.stop()
+        print(f"Pulse protocol playback failed: {e}")
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate and play pulse protocol audio.")
+    parser.add_argument(
+        "--mode",
+        choices=["generate-and-play", "generate-only", "play-existing"],
+        default="generate-and-play"
     )
-    pbar.update(1)
+    args = parser.parse_args()
 
-    chirps = np.concatenate([active_block] * cycles_total)
-    pbar.update(1)
+    if args.mode == "generate-only":
+        generate_protocol()
+        return
 
-    full_signal = np.concatenate([
-        silence(initial_silence_sec),
-        beacon_tone,
-        silence(guard_silence_sec),
-        chirps,
-        silence(guard_silence_sec),
-        beacon_tone,
-        silence(tail_silence_sec)
-    ])
-    pbar.update(1)
+    if args.mode == "play-existing":
+        play_protocol()
+        return
 
-    pcm = np.rint(
-        np.clip(full_signal, -1.0, 1.0) * 32767.0
-    ).astype(np.int16)
-    pbar.update(1)
+    signal = generate_protocol()
+    play_protocol(signal)
 
 
-# ==========================================================
-# WRITE WAV INTO INPUTS FOLDER
-# ==========================================================
-
-with wave.open(output_path, "wb") as wf:
-    wf.setnchannels(1)
-    wf.setsampwidth(2)
-    wf.setframerate(sample_rate)
-    wf.writeframes(pcm.tobytes())
-
-
-# ==========================================================
-# REPORT
-# ==========================================================
-
-total_duration = full_signal.size / sample_rate
-
-print(f"Wrote: {output_path}")
-print(f"Total duration: {total_duration:.2f} s ({total_duration / 60:.2f} min)")
-
-
-# ==========================================================
-# PLAY PROTOCOL WHILE TRACKING IS ACTIVE
-# ==========================================================
-
-print("Playing pulse protocol...")
-
-try:
-    sd.play(full_signal, samplerate=sample_rate, blocking=True)
-    sd.stop()
-    print("Pulse protocol playback finished.")
-
-except KeyboardInterrupt:
-    sd.stop()
-    print("Pulse protocol playback stopped.")
-
-except Exception as e:
-    sd.stop()
-    print(f"Pulse protocol playback failed: {e}")
+if __name__ == "__main__":
+    main()

@@ -7,6 +7,8 @@ import sys
 import threading
 import subprocess
 import shutil
+import time
+import wave
 
 from Camera.Camera import Camera
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
@@ -73,6 +75,9 @@ class CoBasV1App:
 
         # Background pulse protocol generation process.
         self.pulse_process = None
+        self.is_preparing_tracking = False
+        self.tracking_start_token = 0
+        self.pulse_playback_end_time = None
 
         # Preview loop state.
         self.preview_loop_running = False
@@ -821,14 +826,10 @@ class CoBasV1App:
                 shutil.rmtree(work_folder)
                 print(f"[INFO] Deleted processing work folder: {work_folder}")
 
-    def start_pulse_protocol_generation(self):
+    def get_pulse_protocol_command(self, mode):
         """
-        Start pulse protocol generation when tracking starts.
+        Return pulse protocol command and working folder for the given mode.
         """
-
-        if self.pulse_process is not None and self.pulse_process.poll() is None:
-            print("[INFO] Pulse protocol generation is already running.")
-            return
 
         base_dir = os.path.dirname(os.path.abspath(__file__))
         pulse_folder = os.path.join(
@@ -843,20 +844,255 @@ class CoBasV1App:
 
         if not os.path.exists(pulse_script):
             print(f"[WARNING] Pulse protocol generator not found: {pulse_script}")
-            return
+            return None, None
+
+        return [sys.executable, pulse_script, "--mode", mode], pulse_folder
+
+    def get_pulse_protocol_audio_path(self):
+        """
+        Return the generated pulse protocol WAV path.
+        """
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(
+            base_dir,
+            "Inference",
+            "Pulse Generation",
+            "Inputs",
+            "5_15sPause_BeaconProtocol.wav"
+        )
+
+    def get_pulse_protocol_duration_seconds(self):
+        """
+        Return the generated pulse protocol audio duration in seconds.
+        """
+
+        audio_path = self.get_pulse_protocol_audio_path()
+
+        if not os.path.exists(audio_path):
+            return None
+
+        try:
+            with wave.open(audio_path, "rb") as wf:
+                return wf.getnframes() / wf.getframerate()
+
+        except Exception as e:
+            print(f"[WARNING] Could not read pulse protocol duration: {e}")
+            return None
+
+    def generate_pulse_protocol_audio(self):
+        """
+        Generate pulse protocol audio before tracking starts.
+        """
+
+        command, pulse_folder = self.get_pulse_protocol_command("generate-only")
+
+        if command is None:
+            return False
+
+        try:
+            subprocess.run(
+                command,
+                cwd=pulse_folder,
+                check=True
+            )
+            print("[INFO] Pulse protocol audio generated.")
+            return True
+
+        except Exception as e:
+            print(f"[WARNING] Could not generate pulse protocol audio: {e}")
+            return False
+
+    def start_pulse_protocol_playback(self):
+        """
+        Start playback for the already generated pulse protocol audio.
+        """
+
+        if self.pulse_process is not None and self.pulse_process.poll() is None:
+            print("[INFO] Pulse protocol playback is already running.")
+            return self.pulse_process
+
+        command, pulse_folder = self.get_pulse_protocol_command("play-existing")
+
+        if command is None:
+            return None
 
         try:
             self.pulse_process = subprocess.Popen(
-                [sys.executable, pulse_script],
+                command,
                 cwd=pulse_folder,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1
             )
-            print("[INFO] Pulse protocol generation started.")
+            print("[INFO] Pulse protocol playback started.")
+            return self.pulse_process
 
         except Exception as e:
             self.pulse_process = None
-            print(f"[WARNING] Could not start pulse protocol generation: {e}")
+            print(f"[WARNING] Could not start pulse protocol playback: {e}")
+            return None
+
+    def start_tracking_after_pulse_generation(self, start_token):
+        """
+        Generate audio first, then play it and start tracking as playback begins.
+        """
+
+        def worker():
+            generated = self.generate_pulse_protocol_audio()
+
+            self.root.after(
+                0,
+                lambda: self.start_pulse_playback_and_tracking(
+                    generated,
+                    start_token
+                )
+            )
+
+        threading.Thread(
+            target=worker,
+            daemon=True
+        ).start()
+
+    def start_pulse_playback_and_tracking(self, generated, start_token):
+        """
+        Start pulse playback, then wait for playback start before tracking.
+        """
+
+        self.is_preparing_tracking = False
+
+        if start_token != self.tracking_start_token:
+            return
+
+        if not generated:
+            self.track_button.config(state="normal")
+            self.update_tracking_button()
+            self.update_status(
+                "Status: Pulse protocol could not be generated",
+                "● WARNING"
+            )
+            return
+
+        self.update_status(
+            "Status: Pulse audio generated. Starting playback...",
+            "● STARTING"
+        )
+
+        pulse_process = self.start_pulse_protocol_playback()
+
+        if pulse_process is None:
+            self.track_button.config(state="normal")
+            self.update_tracking_button()
+            self.update_status(
+                "Status: Pulse protocol could not start; tracking not started",
+                "● WARNING"
+            )
+            return
+
+        def worker():
+            playback_started = False
+
+            for line in pulse_process.stdout:
+                if "PLAYBACK_STARTED" in line:
+                    playback_started = True
+                    self.root.after(
+                        0,
+                        lambda: self.begin_tracking_capture(
+                            pulse_process,
+                            start_token
+                        )
+                    )
+                    break
+
+            if not playback_started:
+                self.root.after(
+                    0,
+                    lambda: self.handle_pulse_playback_start_failed(pulse_process)
+                )
+                return
+
+            pulse_process.wait()
+            self.root.after(
+                0,
+                lambda: self.handle_pulse_playback_finished(pulse_process)
+            )
+
+        threading.Thread(
+            target=worker,
+            daemon=True
+        ).start()
+
+    def handle_pulse_playback_start_failed(self, pulse_process):
+        """
+        Reset UI if playback exits before confirming it started.
+        """
+
+        if self.pulse_process is not pulse_process:
+            return
+
+        self.pulse_process = None
+        self.track_button.config(state="normal")
+        self.update_tracking_button()
+        self.update_status(
+            "Status: Pulse playback failed before tracking started",
+            "● WARNING"
+        )
+
+    def handle_pulse_playback_finished(self, pulse_process):
+        """
+        Stop automatic recording and tracking after pulse playback ends.
+        """
+
+        if self.pulse_process is not pulse_process:
+            return
+
+        self.pulse_process = None
+        self.pulse_playback_end_time = None
+
+        if not self.camera.is_tracking:
+            return
+
+        self.cancel_preview_loop()
+
+        saved_video_path = None
+
+        if self.camera.is_recording:
+            saved_video_path = self.camera.stop_recording()
+
+            if saved_video_path:
+                self.current_video_path = saved_video_path
+
+        self.camera.stop_camera()
+
+        self.video_label.config(
+            image="",
+            text="Timed recording complete.\n\nClick 'Start Tracking' to start again.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"]
+        )
+        self.video_label.image = None
+
+        self.record_button.config(
+            text="Capture Video",
+            style="Capture.TButton"
+        )
+        self.record_timer_label.config(text="Recording: 0 second")
+        self.track_button.config(state="normal")
+        self.update_tracking_button()
+        self.refresh_info_panel()
+
+        if saved_video_path:
+            self.update_status(
+                f"Status: Timed recording complete. Video saved to {saved_video_path}",
+                "● IDLE"
+            )
+            self.process_last_video_with_pipeline(saved_video_path)
+        else:
+            self.update_status(
+                "Status: Timed recording complete",
+                "● IDLE"
+            )
 
     def stop_pulse_protocol_generation(self):
         """
@@ -985,6 +1221,9 @@ class CoBasV1App:
             stop tracking.
         """
 
+        if self.is_preparing_tracking:
+            return
+
         if self.camera.is_tracking:
             self.stop_tracking()
         else:
@@ -1000,8 +1239,52 @@ class CoBasV1App:
         # Prevent duplicate preview loops before starting.
         self.cancel_preview_loop()
 
+        self.is_preparing_tracking = True
+        self.tracking_start_token += 1
+        start_token = self.tracking_start_token
+
+        self.track_button.config(
+            text="Preparing...",
+            style="Start.TButton",
+            state="disabled"
+        )
+
+        self.video_label.config(
+            image="",
+            text="Generating pulse audio...\n\nTracking will start when playback starts.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"]
+        )
+        self.video_label.image = None
+
         self.update_status(
-            "Status: Starting camera...",
+            "Status: Generating pulse audio before tracking...",
+            "● STARTING"
+        )
+
+        self.start_tracking_after_pulse_generation(start_token)
+
+    def begin_tracking_capture(self, pulse_process, start_token):
+        """
+        Start camera tracking and recording after pulse playback starts.
+        """
+
+        if start_token != self.tracking_start_token:
+            return
+
+        if self.pulse_process is not pulse_process:
+            return
+
+        self.track_button.config(state="normal")
+        pulse_duration_seconds = self.get_pulse_protocol_duration_seconds()
+
+        if pulse_duration_seconds is not None:
+            self.pulse_playback_end_time = time.time() + pulse_duration_seconds
+        else:
+            self.pulse_playback_end_time = None
+
+        self.update_status(
+            "Status: Pulse playback started. Starting camera...",
             "● STARTING"
         )
 
@@ -1022,13 +1305,7 @@ class CoBasV1App:
             # Change Start Tracking button into Stop Tracking.
             self.update_tracking_button()
 
-            # Start refreshing frames.
-            self.update_camera_feed()
-
-            # Start pulse protocol generation alongside tracking.
-            self.start_pulse_protocol_generation()
-
-            # Automatically start recording video with audio.
+            # Automatically start recording video with audio during playback.
             self.current_video_path = self.camera.start_recording()
 
             if self.current_video_path:
@@ -1036,9 +1313,8 @@ class CoBasV1App:
                     text="Stop Recording",
                     style="VideoStop.TButton"
                 )
-
                 self.update_status(
-                    f"Status: Recording video/audio to {self.current_video_path}",
+                    f"Status: Recording during pulse playback to {self.current_video_path}",
                     "● REC"
                 )
             else:
@@ -1048,11 +1324,16 @@ class CoBasV1App:
                     style="Capture.TButton"
                 )
                 self.update_status(
-                    "Status: Failed to start automatic recording",
+                    "Status: Failed to start recording during pulse playback",
                     "● WARNING"
                 )
 
+            # Start refreshing frames after recording is initialized.
+            self.update_camera_feed()
+
         else:
+            self.stop_pulse_protocol_generation()
+
             # Keep button as Start Tracking if camera failed.
             self.update_tracking_button()
 
@@ -1087,6 +1368,11 @@ class CoBasV1App:
         Then process the last saved video with the segmentation, separation,
         and frame-slicing pipeline.
         """
+
+        self.is_preparing_tracking = False
+        self.tracking_start_token += 1
+        self.pulse_playback_end_time = None
+        self.track_button.config(state="normal")
 
         # Cancel preview update loop first.
         self.cancel_preview_loop()
@@ -1233,11 +1519,21 @@ class CoBasV1App:
 
         # Update recording timer while recording.
         if self.camera.is_recording:
-            seconds = self.camera.get_recording_seconds()
-            second_text = "second" if seconds == 1 else "seconds"
-            self.record_timer_label.config(
-                text=f"Recording: {seconds} {second_text}"
-            )
+            if self.pulse_playback_end_time is not None:
+                remaining = max(
+                    0,
+                    int(self.pulse_playback_end_time - time.time() + 0.999)
+                )
+                second_text = "second" if remaining == 1 else "seconds"
+                self.record_timer_label.config(
+                    text=f"Pulse remaining: {remaining} {second_text}"
+                )
+            else:
+                seconds = self.camera.get_recording_seconds()
+                second_text = "second" if seconds == 1 else "seconds"
+                self.record_timer_label.config(
+                    text=f"Recording: {seconds} {second_text}"
+                )
 
         # Schedule next frame update.
         self.preview_after_id = self.root.after(30, self.update_camera_feed)
