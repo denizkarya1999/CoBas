@@ -9,8 +9,6 @@ import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
-from Inference.ComputerVision import ComputerVision
-
 
 class Camera:
     """
@@ -66,10 +64,6 @@ class Camera:
         self.final_video_path = None
 
         os.makedirs(self.output_dir, exist_ok=True)
-
-        # Computer vision / PyTorch inference placeholder.
-        # This loads OpenCV and PyTorch on CPU and logs their status.
-        self.computer_vision = ComputerVision()
 
     # --------------------------------------------------
     # Camera Source Handling
@@ -184,10 +178,6 @@ class Camera:
             return None
 
         frame = self.apply_zoom(frame)
-
-        # Trigger ComputerVision placeholder.
-        # Currently, this returns the frame unchanged.
-        frame = self.computer_vision.run_inference(frame)
 
         return frame
 
@@ -518,10 +508,3 @@ class Camera:
             return 0
 
         return int(time.time() - self.record_start_time)
-
-    # --------------------------------------------------
-    # Future ML Placeholder
-    # --------------------------------------------------
-
-    def run_battery_inference(self, frame):
-        return frame

@@ -11,6 +11,7 @@ import time
 import wave
 
 from Camera.Camera import Camera
+from Inference.BatteryInference import BatteryPercentagePredictor
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
 from Settings import SettingsWindow
 from About import show_about_window
@@ -66,6 +67,8 @@ class CoBasV1App:
 
         # Camera backend.
         self.camera = Camera(camera_index="/dev/video0")
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.battery_predictor = BatteryPercentagePredictor(self.base_dir)
 
         # Stores path of the current video file.
         self.current_video_path = None
@@ -666,12 +669,13 @@ class CoBasV1App:
                 fg=self.get_indicator_color(indicator_text)
             )
 
-    def set_processing_indicator(self, is_processing):
+    def set_processing_indicator(self, is_processing, message="Processing..."):
         """
         Show or hide the post-capture processing progress indicator.
         """
 
         if is_processing:
+            self.processing_indicator_label.config(text=message)
             if not self.processing_indicator_frame.winfo_ismapped():
                 self.processing_indicator_frame.pack(side="left")
             self.processing_progress_bar.start(10)
@@ -735,10 +739,8 @@ class CoBasV1App:
 
         self.last_processed_video_path = video_path
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
         pipeline_script = os.path.join(
-            base_dir,
+            self.base_dir,
             "Inference",
             "Video Processing",
             "Video_Processing_Pipeline.py"
@@ -769,7 +771,7 @@ class CoBasV1App:
                         "Status: Processing video, voice, and STFT...",
                         "● WARNING"
                     ),
-                    self.set_processing_indicator(True)
+                    self.set_processing_indicator(True, "Processing...")
                 )
             )
 
@@ -782,24 +784,35 @@ class CoBasV1App:
                 self.root.after(
                     0,
                     lambda: (
-                        self.set_processing_indicator(False),
                         self.update_status(
-                            "Status: Last video pipeline finished",
-                            "● IDLE"
-                        )
+                            "Status: Running battery percentage inference...",
+                            "● WARNING"
+                        ),
+                        self.set_processing_indicator(True, "Running inference...")
                     )
+                )
+
+                prediction = self.battery_predictor.predict_from_video(video_path)
+                print(
+                    "[INFO] Battery inference finished: "
+                    f"{prediction.label} ({prediction.segment_count} segments)"
+                )
+
+                self.root.after(
+                    0,
+                    lambda: self.handle_battery_inference_finished(prediction)
                 )
 
             except Exception as e:
                 self.cleanup_video_processing_work_folder()
-                print(f"[ERROR] Video pipeline failed: {e}")
+                print(f"[ERROR] Processing or inference failed: {e}")
 
                 self.root.after(
                     0,
                     lambda: (
                         self.set_processing_indicator(False),
                         self.update_status(
-                            "Status: Video pipeline failed",
+                            "Status: Processing or inference failed",
                             "● WARNING"
                         )
                     )
@@ -810,15 +823,68 @@ class CoBasV1App:
             daemon=True
         ).start()
 
+    def handle_battery_inference_finished(self, prediction):
+        """
+        Show the final battery prediction and leave tracking stopped.
+        """
+
+        self.set_processing_indicator(False)
+        self.cancel_preview_loop()
+
+        if self.camera.is_tracking:
+            self.camera.stop_camera()
+
+        self.update_tracking_button()
+        self.refresh_info_panel()
+
+        result_message = f"Predicted Battery Percentage = {prediction.label}"
+        self.update_status(
+            f"Status: {result_message}",
+            "● IDLE"
+        )
+        messagebox.showinfo(
+            "Battery Percentage Prediction",
+            self.format_prediction_message(prediction)
+        )
+
+    def format_prediction_message(self, prediction):
+        """
+        Build the result popup text with every class confidence.
+        """
+
+        lines = [
+            f"Predicted Battery Percentage = {prediction.label}",
+            "",
+            "Prediction Confidence:",
+        ]
+
+        for label, confidence in prediction.class_confidences:
+            lines.append(
+                f"{label} Battery ({self.format_confidence(confidence)} Confidence)"
+            )
+
+        return "\n".join(lines)
+
+    def format_confidence(self, confidence):
+        """
+        Format a model probability without rounding tiny values to 0.0%.
+        """
+
+        percent = confidence * 100
+
+        if 0 < percent < 0.01:
+            return "<0.01%"
+
+        return f"{percent:.2f}%"
+
     def cleanup_video_processing_work_folder(self):
         """
         Delete temporary video/voice-processing work files from Captures.
         """
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         work_folders = [
-            os.path.join(base_dir, "Captures", "_Video_Processing_Work"),
-            os.path.join(base_dir, "Captures", "_Voice_Processing_Work"),
+            os.path.join(self.base_dir, "Captures", "_Video_Processing_Work"),
+            os.path.join(self.base_dir, "Captures", "_Voice_Processing_Work"),
         ]
 
         for work_folder in work_folders:
@@ -831,9 +897,8 @@ class CoBasV1App:
         Return pulse protocol command and working folder for the given mode.
         """
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         pulse_folder = os.path.join(
-            base_dir,
+            self.base_dir,
             "Inference",
             "Pulse Generation"
         )
@@ -853,9 +918,8 @@ class CoBasV1App:
         Return the generated pulse protocol WAV path.
         """
 
-        base_dir = os.path.dirname(os.path.abspath(__file__))
         return os.path.join(
-            base_dir,
+            self.base_dir,
             "Inference",
             "Pulse Generation",
             "Inputs",
