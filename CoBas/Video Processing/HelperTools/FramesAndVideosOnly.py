@@ -1,3 +1,4 @@
+import argparse
 import shutil
 from pathlib import Path
 
@@ -66,8 +67,8 @@ def clean_intermediate_folders():
         delete_folder(folder)
 
 
-def keep_frames_and_voices_only():
-    output_folder = Path(OUTPUT_FOLDER)
+def keep_frames_and_voices_only(output_folder=OUTPUT_FOLDER):
+    output_folder = Path(output_folder)
     output_frames_folder = output_folder / "Frames"
     output_voices_folder = output_folder / "Voices"
 
@@ -81,13 +82,17 @@ def keep_frames_and_voices_only():
 
     clean_intermediate_folders()
 
-    print(f"\nFinal output saved in {OUTPUT_FOLDER} folder.")
+    print(f"\nFinal output saved in {output_folder} folder.")
     print("Original video remains beside Video_Processing_Pipeline.py.")
     return True
 
 
 def main():
-    if not keep_frames_and_voices_only():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-folder", default=OUTPUT_FOLDER)
+    args = parser.parse_args()
+
+    if not keep_frames_and_voices_only(args.output_folder):
         raise SystemExit(1)
 
 

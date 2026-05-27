@@ -5,9 +5,6 @@ import sys
 from pathlib import Path
 
 
-CUT_SECONDS = 2
-
-
 def get_app_root():
     return Path(__file__).resolve().parents[2]
 
@@ -40,7 +37,8 @@ def build_pipeline_paths(input_video_path):
     output_folder = captures_folder / f"{video_name}_Image_and_Video"
     work_root_folder = captures_folder / "_Video_Processing_Work"
     work_folder = work_root_folder / video_name
-    segment_folder = work_folder / "2S_Segmentation"
+    segment_folder = work_folder / "Beacon_Segmentation"
+    silent_video_folder = work_folder / "Silent_Videos"
     frames_folder = output_folder / "Frames"
     voices_folder = output_folder / "Voices"
 
@@ -49,6 +47,7 @@ def build_pipeline_paths(input_video_path):
         work_root_folder,
         work_folder,
         segment_folder,
+        silent_video_folder,
         frames_folder,
         voices_folder
     )
@@ -69,51 +68,30 @@ def process_video(input_video):
         work_root_folder,
         work_folder,
         segment_folder,
+        silent_video_folder,
         frames_folder,
         voices_folder
     ) = build_pipeline_paths(input_video_path)
 
     delete_folder(output_folder)
     delete_folder(work_folder)
+    silent_video_folder.mkdir(parents=True, exist_ok=True)
     frames_folder.mkdir(parents=True, exist_ok=True)
     voices_folder.mkdir(parents=True, exist_ok=True)
 
     voice_pipeline_script = get_app_root() / "Inference" / "Voice Processing" / "Voice_Processing_Pipeline.py"
-    voice_file = voices_folder / f"{input_video_path.stem}.wav"
-    voice_stft_folder = output_folder / f"{voice_file.stem}_Spectogram"
+    voice_stft_folder = output_folder / f"{input_video_path.stem}_Spectogram"
     voice_stft_folder.mkdir(parents=True, exist_ok=True)
 
     steps = [
         (
-            "2-second segmentation",
+            "beacon video segmentation",
             [
                 sys.executable,
-                str(helper_folder / "2S_Segmentation.py"),
+                str(helper_folder / "Beacon_Video_Segmentation.py"),
                 str(input_video_path),
                 "--output-folder",
-                str(segment_folder),
-                "--cut-seconds",
-                str(CUT_SECONDS)
-            ]
-        ),
-        (
-            "full audio extraction",
-            [
-                sys.executable,
-                str(helper_folder / "VideoSoundSeperator.py"),
-                str(input_video_path),
-                "--output-folder",
-                str(voices_folder)
-            ]
-        ),
-        (
-            "frame extraction",
-            [
-                sys.executable,
-                str(helper_folder / "VideoFrameSlicer.py"),
-                str(input_video_path),
-                "--output-folder",
-                str(frames_folder)
+                str(segment_folder)
             ]
         ),
         (
@@ -132,14 +110,52 @@ def process_video(input_video):
             [
                 sys.executable,
                 str(voice_pipeline_script),
-                str(voice_file),
+                str(voices_folder),
                 "--output-folder",
-                str(voice_stft_folder)
+                str(voice_stft_folder),
+                "--already-cropped"
             ]
         ),
     ]
 
-    for label, command in steps:
+    if not run_step(steps[0][0], steps[0][1]):
+        return False
+
+    segment_paths = sorted(segment_folder.glob("*.mp4"))
+    if not segment_paths:
+        print(f"Pipeline stopped: no beacon video segments found in {segment_folder}.")
+        return False
+
+    for segment_path in segment_paths:
+        split_command = [
+            sys.executable,
+            str(helper_folder / "VideoSoundSeperator.py"),
+            str(segment_path),
+            "--output-folder",
+            str(voices_folder),
+            "--silent-video-folder",
+            str(silent_video_folder),
+        ]
+        if not run_step(f"voice/silent-video split for {segment_path.name}", split_command):
+            return False
+
+    silent_video_paths = sorted(silent_video_folder.glob("*.mp4"))
+    if not silent_video_paths:
+        print(f"Pipeline stopped: no silent videos found in {silent_video_folder}.")
+        return False
+
+    for silent_video_path in silent_video_paths:
+        frame_command = [
+            sys.executable,
+            str(helper_folder / "VideoFrameSlicer.py"),
+            str(silent_video_path),
+            "--output-folder",
+            str(frames_folder),
+        ]
+        if not run_step(f"frame extraction for {silent_video_path.name}", frame_command):
+            return False
+
+    for label, command in steps[1:]:
         if not run_step(label, command):
             return False
 

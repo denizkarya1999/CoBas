@@ -1,4 +1,5 @@
 import subprocess
+import argparse
 from pathlib import Path
 
 
@@ -57,7 +58,12 @@ def slice_video_frames(
 
 
 def main():
-    if not slice_video_frames():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input_video", nargs="?", default=INPUT_VIDEO)
+    parser.add_argument("--output-folder", default=SLICED_FRAME_FOLDER)
+    args = parser.parse_args()
+
+    if not slice_video_frames(args.input_video, args.output_folder):
         raise SystemExit(1)
 
 
