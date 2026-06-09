@@ -4,6 +4,8 @@ set -Eeuo pipefail
 APP_NAME="MLX90642 Thermal Camera"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 APP_FILE="${SCRIPT_DIR}/thermal_camera_app.py"
+DRIVER_LIB="/usr/local/lib/libmlx90642.so"
+LAUNCHER="/usr/local/bin/cobas-thermal-camera"
 BOOT_CONFIG=""
 REAL_USER="${SUDO_USER:-${USER:-}}"
 NEEDS_REBOOT=0
@@ -71,6 +73,46 @@ install_packages() {
         python3 \
         python3-tk \
         python3-venv
+}
+
+install_driver_library() {
+    if [[ ! -f "$APP_FILE" ]]; then
+        warn "Could not find ${APP_FILE}; skipping driver library installation."
+        return
+    fi
+
+    log "Building and installing ${APP_NAME} driver library"
+
+    local build_dir
+    local build_output
+    build_dir="$(mktemp -d /tmp/cobas-mlx90642.XXXXXX)"
+    build_output="${build_dir}/libmlx90642.so"
+
+    if [[ "${REAL_USER}" != "root" ]]; then
+        chown "$REAL_USER:$REAL_USER" "$build_dir"
+    fi
+
+    run_as_target_user env MLX90642_SHARED_LIB="$build_output" python3 "$APP_FILE" --build-only
+    install -m 0755 "$build_output" "$DRIVER_LIB"
+    rm -rf "$build_dir"
+    ldconfig
+
+    log "Installed ${DRIVER_LIB}"
+}
+
+install_launcher() {
+    log "Installing application launcher"
+
+cat > "$LAUNCHER" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+cd "${SCRIPT_DIR}"
+exec python3 "${APP_FILE}" "\$@"
+EOF
+
+    chmod 0755 "$LAUNCHER"
+    log "Installed ${LAUNCHER}"
 }
 
 choose_boot_config() {
@@ -172,16 +214,6 @@ print("tkinter OK")
 PY
 }
 
-verify_app_build() {
-    if [[ ! -f "$APP_FILE" ]]; then
-        warn "Could not find ${APP_FILE}; skipping app build check."
-        return
-    fi
-
-    log "Building ${APP_NAME} driver library"
-    run_as_target_user python3 "$APP_FILE" --build-only
-}
-
 print_i2c_status() {
     log "Checking I2C device nodes"
 
@@ -209,10 +241,12 @@ print_next_steps() {
     printf '\nAfter reboot, test the bus:\n'
     printf '  i2cdetect -y 1\n'
     printf '\nRun the desktop camera app:\n'
+    printf '  cobas-thermal-camera\n'
+    printf '\nOr from the source directory:\n'
     printf '  cd %q\n' "$SCRIPT_DIR"
     printf '  python3 thermal_camera_app.py\n'
     printf '\nIf the sensor is on a different bus:\n'
-    printf '  MLX90642_I2C_BUS=/dev/i2c-0 python3 thermal_camera_app.py\n'
+    printf '  MLX90642_I2C_BUS=/dev/i2c-0 cobas-thermal-camera\n'
 }
 
 main() {
@@ -223,8 +257,9 @@ main() {
     enable_i2c_boot_overlay
     enable_i2c_kernel_modules
     configure_i2c_permissions
+    install_driver_library
+    install_launcher
     verify_tools
-    verify_app_build
     print_i2c_status
     print_next_steps
 }
