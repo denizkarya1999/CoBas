@@ -97,7 +97,7 @@ class SettingsWindow:
 
         ttk.Label(
             settings_frame,
-            text="Select the camera and microphone sources used by CoBas.",
+            text="Select the regular camera and microphone sources used by CoBas.",
             style="PanelText.TLabel",
             wraplength=420,
             justify="left"
@@ -178,7 +178,8 @@ class SettingsWindow:
         ).pack(anchor="w", pady=(0, 6))
 
         info_text = (
-            f"Camera: {self.app.camera.camera_index}\n"
+            f"Regular Camera: {self.app.camera.camera_index}\n"
+            f"Thermal Camera: {self.app.thermal_camera.status}\n"
             f"Microphone: {self.app.camera.microphone_device_name}\n"
             f"Zoom: {self.app.camera.zoom_factor}x\n"
             f"Recording FPS: {self.app.camera.record_fps}\n"

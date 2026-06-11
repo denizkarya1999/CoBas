@@ -9,8 +9,10 @@ import subprocess
 import shutil
 import time
 import wave
+from datetime import datetime
 
 from Camera.Camera import Camera
+from Camera.ThermalCamera import ThermalCamera, extract_thermal_images
 from Inference.BatteryInference import BatteryPercentagePredictor
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
 from Settings import SettingsWindow
@@ -65,16 +67,24 @@ class CoBasV1App:
         self.is_closing = False
         self.root.bind("<Unmap>", self.prevent_minimize)
 
-        # Camera backend.
-        self.camera = Camera(camera_index="/dev/video0")
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.captures_dir = os.path.join(self.base_dir, "Captures")
+
+        # Camera backends.
+        self.camera = Camera(
+            camera_index="/dev/video0",
+            output_dir=self.captures_dir
+        )
+        self.thermal_camera = ThermalCamera(output_dir=self.captures_dir)
         self.battery_predictor = BatteryPercentagePredictor(self.base_dir)
 
         # Stores path of the current video file.
         self.current_video_path = None
+        self.current_thermal_video_path = None
 
         # Stores last processed video path to avoid processing the same video twice.
         self.last_processed_video_path = None
+        self.last_processed_thermal_video_path = None
 
         # Background pulse protocol generation process.
         self.pulse_process = None
@@ -85,9 +95,11 @@ class CoBasV1App:
         # Preview loop state.
         self.preview_loop_running = False
         self.preview_after_id = None
+        self.thermal_preview_after_id = None
 
         # Stores Tkinter image reference for preview.
         self.preview_photo = None
+        self.thermal_preview_photo = None
 
         # Apply styles from Style.py.
         self.style = apply_styles(self.root)
@@ -265,7 +277,7 @@ class CoBasV1App:
 
         ttk.Label(
             preview_header,
-            text="Live Camera",
+            text="Live Cameras",
             style="PanelTitle.TLabel"
         ).pack(side="left")
 
@@ -280,8 +292,57 @@ class CoBasV1App:
         )
         self.live_indicator_label.pack(side="right")
 
+        self.preview_area = ttk.Frame(parent, style="Panel.TFrame")
+        self.preview_area.pack(
+            fill="both",
+            expand=True,
+            padx=SPACING["panel_padx"],
+            pady=(0, 6)
+        )
+        self.preview_area.columnconfigure(0, weight=1, uniform="camera_preview")
+        self.preview_area.columnconfigure(1, weight=1, uniform="camera_preview")
+        self.preview_area.rowconfigure(0, weight=1)
+
+        regular_preview_frame = ttk.Frame(
+            self.preview_area,
+            style="Panel.TFrame"
+        )
+        thermal_preview_frame = ttk.Frame(
+            self.preview_area,
+            style="Panel.TFrame"
+        )
+
+        regular_preview_frame.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, 4)
+        )
+        thermal_preview_frame.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=(4, 0)
+        )
+        regular_preview_frame.rowconfigure(1, weight=1)
+        regular_preview_frame.columnconfigure(0, weight=1)
+        thermal_preview_frame.rowconfigure(1, weight=1)
+        thermal_preview_frame.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            regular_preview_frame,
+            text="Regular Camera",
+            style="PanelText.TLabel"
+        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+
+        ttk.Label(
+            thermal_preview_frame,
+            text="Thermal Camera",
+            style="PanelText.TLabel"
+        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+
         self.video_label = tk.Label(
-            parent,
+            regular_preview_frame,
             text="Camera is ready.\n\nClick 'Start Tracking' to begin.",
             bg=COLORS["preview_bg"],
             fg=COLORS["muted_text"],
@@ -290,11 +351,26 @@ class CoBasV1App:
             relief="flat"
         )
 
-        self.video_label.pack(
-            fill="both",
-            expand=True,
-            padx=SPACING["panel_padx"],
-            pady=(0, 6)
+        self.video_label.grid(
+            row=1,
+            column=0,
+            sticky="nsew"
+        )
+
+        self.thermal_video_label = tk.Label(
+            thermal_preview_frame,
+            text="Thermal camera is ready.\n\nClick 'Start Tracking' to begin.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"],
+            font=FONTS["preview_text"],
+            bd=0,
+            relief="flat"
+        )
+
+        self.thermal_video_label.grid(
+            row=1,
+            column=0,
+            sticky="nsew"
         )
 
         bottom_bar = ttk.Frame(parent, style="Panel.TFrame")
@@ -529,6 +605,14 @@ class CoBasV1App:
         )
         self.camera_info_label.pack(anchor="w", pady=0)
 
+        self.thermal_info_label = ttk.Label(
+            info_section,
+            text="Thermal: idle",
+            style="PanelText.TLabel",
+            wraplength=180
+        )
+        self.thermal_info_label.pack(anchor="w", pady=0)
+
         self.microphone_info_label = ttk.Label(
             info_section,
             text="Mic: Default",
@@ -565,6 +649,22 @@ class CoBasV1App:
     # Helper Methods
     # --------------------------------------------------
 
+    def get_preview_dimensions(self, label):
+        """
+        Return the current display size for one side of the split preview.
+        """
+
+        width = label.winfo_width()
+        height = label.winfo_height()
+
+        if width <= 1:
+            width = max(1, (PREVIEW["width"] // 2) - 8)
+
+        if height <= 1:
+            height = PREVIEW["height"]
+
+        return width, height
+
     def cancel_preview_loop(self):
         """
         Cancel the scheduled camera preview loop.
@@ -585,6 +685,110 @@ class CoBasV1App:
             self.preview_after_id = None
 
         self.preview_loop_running = False
+
+    def cancel_thermal_preview_loop(self):
+        """
+        Cancel the scheduled thermal preview loop.
+        """
+
+        if self.thermal_preview_after_id is not None:
+            try:
+                self.root.after_cancel(self.thermal_preview_after_id)
+            except tk.TclError:
+                pass
+
+            self.thermal_preview_after_id = None
+
+    def start_thermal_camera_feed(self):
+        """
+        Start the thermal camera worker and its lightweight preview loop.
+        """
+
+        self.thermal_camera.start_camera()
+
+        if self.thermal_preview_after_id is None:
+            self.update_thermal_feed()
+
+    def update_thermal_feed(self):
+        """
+        Refresh the thermal preview at a lower rate than the regular camera.
+        """
+
+        self.thermal_preview_after_id = None
+        events = self.thermal_camera.poll_events()
+
+        for event in events:
+            if event[0] == "error":
+                print(f"[WARNING] Thermal camera error: {event[1]}")
+                self.thermal_video_label.config(
+                    image="",
+                    text=f"Thermal camera unavailable.\n\n{event[1]}",
+                    bg=COLORS["preview_bg"],
+                    fg=COLORS["warning"]
+                )
+                self.thermal_video_label.image = None
+
+        preview_width, preview_height = self.get_preview_dimensions(
+            self.thermal_video_label
+        )
+        preview_image = self.thermal_camera.get_preview_image(
+            preview_width,
+            preview_height
+        )
+
+        if preview_image is not None:
+            self.thermal_preview_photo = ImageTk.PhotoImage(image=preview_image)
+            self.thermal_video_label.config(
+                image=self.thermal_preview_photo,
+                text=""
+            )
+            self.thermal_video_label.image = self.thermal_preview_photo
+        elif self.thermal_camera.error is None:
+            self.thermal_video_label.config(
+                image="",
+                text=f"{self.thermal_camera.status}...",
+                bg=COLORS["preview_bg"],
+                fg=COLORS["muted_text"]
+            )
+            self.thermal_video_label.image = None
+
+        self.refresh_info_panel()
+
+        if self.thermal_camera.is_tracking:
+            self.thermal_preview_after_id = self.root.after(
+                150,
+                self.update_thermal_feed
+            )
+
+    def stop_active_recordings(self):
+        """
+        Stop regular and thermal recorders, reusing the single captured WAV.
+        """
+
+        saved_video_path = None
+        saved_thermal_video_path = None
+        audio_path = None
+
+        if self.camera.is_recording:
+            saved_video_path = self.camera.stop_recording(keep_audio=True)
+
+            if saved_video_path:
+                self.current_video_path = saved_video_path
+
+            if self.camera.temp_audio_path and os.path.exists(self.camera.temp_audio_path):
+                audio_path = self.camera.temp_audio_path
+
+        if self.thermal_camera.is_recording:
+            saved_thermal_video_path = self.thermal_camera.stop_recording(
+                audio_path=audio_path
+            )
+
+            if saved_thermal_video_path:
+                self.current_thermal_video_path = saved_thermal_video_path
+
+        self.camera.cleanup_temp_audio()
+
+        return saved_video_path, saved_thermal_video_path
 
     def get_indicator_color(self, indicator_text):
         """
@@ -694,6 +898,16 @@ class CoBasV1App:
             text=f"Camera: {self.camera.camera_index}"
         )
 
+        thermal_status = self.thermal_camera.status
+        if self.thermal_camera.is_recording:
+            thermal_status = f"Recording @ {self.thermal_camera.record_fps} FPS"
+        elif self.thermal_camera.error:
+            thermal_status = "unavailable"
+
+        self.thermal_info_label.config(
+            text=f"Thermal: {thermal_status}"
+        )
+
         self.microphone_info_label.config(
             text=f"Mic: {self.camera.microphone_device_name}"
         )
@@ -710,7 +924,7 @@ class CoBasV1App:
             text=f"Zoom: {self.camera.zoom_factor}x"
         )
 
-    def process_last_video_with_pipeline(self, video_path):
+    def process_last_video_with_pipeline(self, video_path, thermal_video_path=None):
         """
         Run the post-capture processing pipeline on the last saved video file.
 
@@ -723,6 +937,7 @@ class CoBasV1App:
         3. Extract one frame every 2 seconds.
         4. Run beacon voice preprocessing and STFT spectrogram preparation.
         5. Save final raw video, Frames, Voices, and <voice_name>_Spectogram output under Captures.
+        6. Export thermal images beside the output as Thermal_Images for review only.
         """
 
         if video_path is None:
@@ -798,9 +1013,17 @@ class CoBasV1App:
                     f"{prediction.label} ({prediction.segment_count} segments)"
                 )
 
+                thermal_images_folder = self.extract_thermal_images_for_capture(
+                    video_path,
+                    thermal_video_path
+                )
+
                 self.root.after(
                     0,
-                    lambda: self.handle_battery_inference_finished(prediction)
+                    lambda: self.handle_battery_inference_finished(
+                        prediction,
+                        thermal_images_folder
+                    )
                 )
 
             except Exception as e:
@@ -823,16 +1046,50 @@ class CoBasV1App:
             daemon=True
         ).start()
 
-    def handle_battery_inference_finished(self, prediction):
+    def extract_thermal_images_for_capture(self, regular_video_path, thermal_video_path):
+        """
+        Save thermal video frames alongside regular processing output.
+        """
+
+        if thermal_video_path is None:
+            return None
+
+        if self.last_processed_thermal_video_path == thermal_video_path:
+            print(f"[INFO] Thermal video already processed: {thermal_video_path}")
+            return None
+
+        if not os.path.exists(thermal_video_path):
+            print(f"[WARNING] Thermal video file does not exist: {thermal_video_path}")
+            return None
+
+        regular_video_path = os.path.abspath(regular_video_path)
+        video_stem = os.path.splitext(os.path.basename(regular_video_path))[0]
+        output_folder = os.path.join(
+            self.base_dir,
+            "Captures",
+            f"{video_stem}_Image_and_Video"
+        )
+        thermal_images_folder = extract_thermal_images(
+            thermal_video_path,
+            output_folder
+        )
+        self.last_processed_thermal_video_path = thermal_video_path
+        return thermal_images_folder
+
+    def handle_battery_inference_finished(self, prediction, thermal_images_folder=None):
         """
         Show the final battery prediction and leave tracking stopped.
         """
 
         self.set_processing_indicator(False)
         self.cancel_preview_loop()
+        self.cancel_thermal_preview_loop()
 
         if self.camera.is_tracking:
             self.camera.stop_camera()
+
+        if self.thermal_camera.is_tracking:
+            self.thermal_camera.stop_camera()
 
         self.update_tracking_button()
         self.refresh_info_panel()
@@ -844,10 +1101,10 @@ class CoBasV1App:
         )
         messagebox.showinfo(
             "Battery Percentage Prediction",
-            self.format_prediction_message(prediction)
+            self.format_prediction_message(prediction, thermal_images_folder)
         )
 
-    def format_prediction_message(self, prediction):
+    def format_prediction_message(self, prediction, thermal_images_folder=None):
         """
         Build the result popup text with every class confidence.
         """
@@ -861,6 +1118,15 @@ class CoBasV1App:
         for label, confidence in prediction.class_confidences:
             lines.append(
                 f"{label} Battery ({self.format_confidence(confidence)} Confidence)"
+            )
+
+        if thermal_images_folder is not None:
+            lines.extend(
+                [
+                    "",
+                    f"Thermal images saved in: {thermal_images_folder}",
+                    "Thermal images were not used for this prediction.",
+                ]
             )
 
         return "\n".join(lines)
@@ -1119,15 +1385,11 @@ class CoBasV1App:
 
         self.cancel_preview_loop()
 
-        saved_video_path = None
-
-        if self.camera.is_recording:
-            saved_video_path = self.camera.stop_recording()
-
-            if saved_video_path:
-                self.current_video_path = saved_video_path
+        saved_video_path, saved_thermal_video_path = self.stop_active_recordings()
 
         self.camera.stop_camera()
+        self.thermal_camera.stop_camera()
+        self.cancel_thermal_preview_loop()
 
         self.video_label.config(
             image="",
@@ -1136,6 +1398,14 @@ class CoBasV1App:
             fg=COLORS["muted_text"]
         )
         self.video_label.image = None
+
+        self.thermal_video_label.config(
+            image="",
+            text="Timed thermal recording complete.\n\nClick 'Start Tracking' to start again.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"]
+        )
+        self.thermal_video_label.image = None
 
         self.record_button.config(
             text="Capture Video",
@@ -1151,7 +1421,10 @@ class CoBasV1App:
                 f"Status: Timed recording complete. Video saved to {saved_video_path}",
                 "● IDLE"
             )
-            self.process_last_video_with_pipeline(saved_video_path)
+            self.process_last_video_with_pipeline(
+                saved_video_path,
+                saved_thermal_video_path
+            )
         else:
             self.update_status(
                 "Status: Timed recording complete",
@@ -1302,10 +1575,15 @@ class CoBasV1App:
 
         # Prevent duplicate preview loops before starting.
         self.cancel_preview_loop()
+        self.cancel_thermal_preview_loop()
 
         self.is_preparing_tracking = True
         self.tracking_start_token += 1
         start_token = self.tracking_start_token
+        self.current_video_path = None
+        self.current_thermal_video_path = None
+
+        self.start_thermal_camera_feed()
 
         self.track_button.config(
             text="Preparing...",
@@ -1321,8 +1599,16 @@ class CoBasV1App:
         )
         self.video_label.image = None
 
+        self.thermal_video_label.config(
+            image="",
+            text="Preparing thermal camera...\n\nRecording starts with pulse playback.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"]
+        )
+        self.thermal_video_label.image = None
+
         self.update_status(
-            "Status: Generating pulse audio before tracking...",
+            "Status: Generating pulse audio and preparing thermal camera...",
             "● STARTING"
         )
 
@@ -1352,6 +1638,9 @@ class CoBasV1App:
             "● STARTING"
         )
 
+        if not self.thermal_camera.is_tracking:
+            self.start_thermal_camera_feed()
+
         # Open camera through the camera backend.
         started = self.camera.start_camera()
 
@@ -1369,8 +1658,17 @@ class CoBasV1App:
             # Change Start Tracking button into Stop Tracking.
             self.update_tracking_button()
 
-            # Automatically start recording video with audio during playback.
-            self.current_video_path = self.camera.start_recording()
+            # Automatically start synchronized regular and thermal recordings.
+            recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.current_video_path = self.camera.start_recording(
+                timestamp=recording_timestamp
+            )
+            self.current_thermal_video_path = None
+
+            if self.current_video_path:
+                self.current_thermal_video_path = self.thermal_camera.start_recording(
+                    timestamp=recording_timestamp
+                )
 
             if self.current_video_path:
                 self.record_button.config(
@@ -1378,9 +1676,16 @@ class CoBasV1App:
                     style="VideoStop.TButton"
                 )
                 self.update_status(
-                    f"Status: Recording during pulse playback to {self.current_video_path}",
+                    "Status: Recording regular and thermal video during pulse playback",
                     "● REC"
                 )
+
+                if not self.current_thermal_video_path:
+                    print("[WARNING] Thermal recording did not start.")
+                    self.update_status(
+                        "Status: Regular recording active; thermal recording unavailable",
+                        "● WARNING"
+                    )
             else:
                 print("[WARNING] Could not start automatic video recording.")
                 self.record_button.config(
@@ -1397,6 +1702,8 @@ class CoBasV1App:
 
         else:
             self.stop_pulse_protocol_generation()
+            self.thermal_camera.stop_camera()
+            self.cancel_thermal_preview_loop()
 
             # Keep button as Start Tracking if camera failed.
             self.update_tracking_button()
@@ -1440,24 +1747,16 @@ class CoBasV1App:
 
         # Cancel preview update loop first.
         self.cancel_preview_loop()
+        self.cancel_thermal_preview_loop()
 
         # Stop pulse protocol generation alongside recording/tracking.
         self.stop_pulse_protocol_generation()
 
-        saved_video_path = None
-
-        # --------------------------------------------------
-        # Stop recording first if it is active.
-        # This gives us the final saved video path.
-        # --------------------------------------------------
-        if self.camera.is_recording:
-            saved_video_path = self.camera.stop_recording()
-
-            if saved_video_path:
-                self.current_video_path = saved_video_path
+        saved_video_path, saved_thermal_video_path = self.stop_active_recordings()
 
         # Release camera through backend.
         self.camera.stop_camera()
+        self.thermal_camera.stop_camera()
 
         # Reset preview display.
         self.video_label.config(
@@ -1467,6 +1766,14 @@ class CoBasV1App:
             fg=COLORS["muted_text"]
         )
         self.video_label.image = None
+
+        self.thermal_video_label.config(
+            image="",
+            text="Thermal tracking stopped.\n\nClick 'Start Tracking' to start again.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"]
+        )
+        self.thermal_video_label.image = None
 
         # Reset record button and timer.
         self.record_button.config(
@@ -1489,10 +1796,16 @@ class CoBasV1App:
         # Process the last available recorded video.
         # --------------------------------------------------
         if saved_video_path:
-            self.process_last_video_with_pipeline(saved_video_path)
+            self.process_last_video_with_pipeline(
+                saved_video_path,
+                saved_thermal_video_path
+            )
 
         elif self.current_video_path and os.path.exists(self.current_video_path):
-            self.process_last_video_with_pipeline(self.current_video_path)
+            self.process_last_video_with_pipeline(
+                self.current_video_path,
+                self.current_thermal_video_path
+            )
 
         else:
             print("[INFO] Tracking stopped, but no saved video was found to process.")
@@ -1505,7 +1818,7 @@ class CoBasV1App:
         print("Restart Camera clicked")
 
         # Restarting while recording would corrupt or interrupt recording.
-        if self.camera.is_recording:
+        if self.camera.is_recording or self.thermal_camera.is_recording:
             messagebox.showwarning(
                 "Recording Active",
                 "Stop recording before restarting the camera."
@@ -1514,10 +1827,14 @@ class CoBasV1App:
 
         # Cancel preview loop.
         self.cancel_preview_loop()
+        self.cancel_thermal_preview_loop()
 
         # Release active camera if needed.
         if self.camera.is_tracking:
             self.camera.stop_camera()
+
+        if self.thermal_camera.is_tracking:
+            self.thermal_camera.stop_camera()
 
         # Update preview text.
         self.video_label.config(
@@ -1527,6 +1844,14 @@ class CoBasV1App:
             fg=COLORS["muted_text"]
         )
         self.video_label.image = None
+
+        self.thermal_video_label.config(
+            image="",
+            text="Restarting thermal camera...\n\nPlease wait.",
+            bg=COLORS["preview_bg"],
+            fg=COLORS["muted_text"]
+        )
+        self.thermal_video_label.image = None
 
         self.update_status(
             "Status: Restarting camera...",
@@ -1560,8 +1885,13 @@ class CoBasV1App:
             # Convert NumPy frame to PIL image.
             image = Image.fromarray(frame_rgb)
 
-            # Resize preview to fit GUI.
-            image = image.resize((PREVIEW["width"], PREVIEW["height"]))
+            preview_width, preview_height = self.get_preview_dimensions(
+                self.video_label
+            )
+            image = image.resize(
+                (preview_width, preview_height),
+                Image.Resampling.LANCZOS
+            )
 
             # Convert PIL image to Tkinter image.
             self.preview_photo = ImageTk.PhotoImage(image=image)
@@ -1684,10 +2014,19 @@ class CoBasV1App:
 
         # Capture photo through camera backend.
         filepath = self.camera.take_photo()
+        thermal_filepath = self.thermal_camera.take_photo()
 
         if filepath:
+            if thermal_filepath:
+                status_message = (
+                    f"Status: Photo saved to {filepath}; "
+                    f"thermal photo saved to {thermal_filepath}"
+                )
+            else:
+                status_message = f"Status: Photo saved to {filepath}"
+
             self.update_status(
-                f"Status: Photo saved to {filepath}",
+                status_message,
                 "● LIVE"
             )
         else:
@@ -1711,7 +2050,16 @@ class CoBasV1App:
 
         # Start recording.
         if not self.camera.is_recording:
-            self.current_video_path = self.camera.start_recording()
+            recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.current_video_path = self.camera.start_recording(
+                timestamp=recording_timestamp
+            )
+            self.current_thermal_video_path = None
+
+            if self.current_video_path:
+                self.current_thermal_video_path = self.thermal_camera.start_recording(
+                    timestamp=recording_timestamp
+                )
 
             if self.current_video_path:
                 self.record_button.config(
@@ -1720,9 +2068,15 @@ class CoBasV1App:
                 )
 
                 self.update_status(
-                    f"Status: Recording video/audio to {self.current_video_path}",
+                    "Status: Recording regular and thermal video/audio",
                     "● REC"
                 )
+
+                if not self.current_thermal_video_path:
+                    self.update_status(
+                        "Status: Regular recording active; thermal recording unavailable",
+                        "● WARNING"
+                    )
             else:
                 messagebox.showerror(
                     "Recording Error",
@@ -1731,7 +2085,7 @@ class CoBasV1App:
 
         # Stop recording.
         else:
-            saved_video_path = self.camera.stop_recording()
+            saved_video_path, saved_thermal_video_path = self.stop_active_recordings()
 
             self.record_button.config(
                 text="Capture Video",
@@ -1743,8 +2097,11 @@ class CoBasV1App:
             if saved_video_path:
                 self.current_video_path = saved_video_path
 
+                if saved_thermal_video_path:
+                    self.current_thermal_video_path = saved_thermal_video_path
+
                 self.update_status(
-                    f"Status: Video with audio saved to {self.current_video_path}",
+                    "Status: Regular and thermal videos saved with audio",
                     "● LIVE"
                 )
             else:
@@ -1809,12 +2166,17 @@ class CoBasV1App:
 
         # Stop scheduled preview loop.
         self.cancel_preview_loop()
+        self.cancel_thermal_preview_loop()
 
         # Stop pulse generation if app closes while tracking.
         self.stop_pulse_protocol_generation()
 
+        # Finalize any active recordings before releasing camera resources.
+        self.stop_active_recordings()
+
         # Release camera and recording resources.
         self.camera.stop_camera()
+        self.thermal_camera.stop_camera()
 
         # Close Tkinter window.
         self.root.destroy()

@@ -1,11 +1,11 @@
 import cv2
 import os
+import queue
 import time
 import threading
 import subprocess
 from datetime import datetime
 
-import numpy as np
 import sounddevice as sd
 import soundfile as sf
 
@@ -53,10 +53,12 @@ class Camera:
         self.microphone_device_id = None
         self.microphone_device_name = "System Default Microphone"
 
-        self.audio_frames = []
+        self.audio_queue = None
         self.audio_thread = None
         self.audio_recording = False
         self.audio_available = True
+        self.audio_chunks_written = 0
+        self.audio_chunks_dropped = 0
 
         # Recording paths
         self.temp_video_path = None
@@ -301,24 +303,46 @@ class Camera:
         if status:
             print(f"Audio warning: {status}")
 
-        if self.audio_recording:
-            self.audio_frames.append(indata.copy())
+        if not self.audio_recording or self.audio_queue is None:
+            return
+
+        try:
+            self.audio_queue.put_nowait(indata.copy())
+        except queue.Full:
+            self.audio_chunks_dropped += 1
 
     def _record_audio(self):
         """
         Record microphone audio while video recording is active.
         Uses selected external microphone if one was chosen.
+        Audio chunks are streamed to disk through a bounded queue so long
+        recordings do not grow memory usage.
         """
 
         try:
-            with sd.InputStream(
+            with sf.SoundFile(
+                self.temp_audio_path,
+                mode="w",
                 samplerate=self.audio_sample_rate,
-                channels=self.audio_channels,
-                device=self.microphone_device_id,
-                callback=self._audio_callback
-            ):
-                while self.audio_recording:
-                    time.sleep(0.05)
+                channels=self.audio_channels
+            ) as audio_file:
+                with sd.InputStream(
+                    samplerate=self.audio_sample_rate,
+                    channels=self.audio_channels,
+                    device=self.microphone_device_id,
+                    callback=self._audio_callback
+                ):
+                    while self.audio_recording or (
+                        self.audio_queue is not None
+                        and not self.audio_queue.empty()
+                    ):
+                        try:
+                            chunk = self.audio_queue.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
+
+                        audio_file.write(chunk)
+                        self.audio_chunks_written += len(chunk)
 
         except Exception as e:
             self.audio_available = False
@@ -326,9 +350,11 @@ class Camera:
             print(f"Audio recording failed: {e}")
 
     def _start_audio_recording(self):
-        self.audio_frames = []
+        self.audio_queue = queue.Queue(maxsize=64)
         self.audio_available = True
         self.audio_recording = True
+        self.audio_chunks_written = 0
+        self.audio_chunks_dropped = 0
 
         self.audio_thread = threading.Thread(
             target=self._record_audio,
@@ -340,23 +366,23 @@ class Camera:
         self.audio_recording = False
 
         if self.audio_thread is not None:
-            self.audio_thread.join(timeout=2)
+            self.audio_thread.join(timeout=5)
+            if self.audio_thread.is_alive():
+                print("Audio writer did not finish cleanly.")
+                self.audio_available = False
+                return None
+
             self.audio_thread = None
 
         if not self.audio_available:
             return None
 
-        if len(self.audio_frames) == 0:
+        if self.audio_chunks_dropped:
+            print(f"Audio chunks dropped: {self.audio_chunks_dropped}")
+
+        if self.audio_chunks_written == 0:
             print("No audio frames captured.")
             return None
-
-        audio_data = np.concatenate(self.audio_frames, axis=0)
-
-        sf.write(
-            self.temp_audio_path,
-            audio_data,
-            self.audio_sample_rate
-        )
 
         return self.temp_audio_path
 
@@ -364,7 +390,7 @@ class Camera:
     # Video Recording with Audio
     # --------------------------------------------------
 
-    def start_recording(self):
+    def start_recording(self, timestamp=None):
         """
         Start video and microphone audio recording.
         """
@@ -379,7 +405,8 @@ class Camera:
 
         height, width = frame.shape[:2]
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         self.temp_video_path = os.path.join(
             self.output_dir,
@@ -421,7 +448,7 @@ class Camera:
         if self.is_recording and self.video_writer is not None:
             self.video_writer.write(frame)
 
-    def stop_recording(self):
+    def stop_recording(self, keep_audio=False):
         """
         Stop recording and merge audio/video.
 
@@ -455,12 +482,13 @@ class Camera:
         merged_path = self._merge_video_audio(
             self.temp_video_path,
             audio_path,
-            self.final_video_path
+            self.final_video_path,
+            remove_audio=not keep_audio
         )
 
         return merged_path
 
-    def _merge_video_audio(self, video_path, audio_path, output_path):
+    def _merge_video_audio(self, video_path, audio_path, output_path, remove_audio=True):
         if not video_path or not audio_path:
             return video_path
 
@@ -494,7 +522,7 @@ class Camera:
             if os.path.exists(video_path):
                 os.remove(video_path)
 
-            if os.path.exists(audio_path):
+            if remove_audio and os.path.exists(audio_path):
                 os.remove(audio_path)
 
             return output_path
@@ -502,6 +530,14 @@ class Camera:
         except Exception as e:
             print(f"FFmpeg merge failed: {e}")
             return video_path
+
+    def cleanup_temp_audio(self):
+        """
+        Remove the last temporary audio file after other recorders have used it.
+        """
+
+        if self.temp_audio_path and os.path.exists(self.temp_audio_path):
+            os.remove(self.temp_audio_path)
 
     def get_recording_seconds(self):
         if not self.is_recording or self.record_start_time is None:
