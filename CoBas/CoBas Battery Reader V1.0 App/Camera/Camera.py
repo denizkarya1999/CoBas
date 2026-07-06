@@ -467,6 +467,17 @@ class Camera:
             None if nothing was recorded.
         """
 
+        audio_path = self.stop_recording_capture_phase()
+        return self.finalize_recording(audio_path=audio_path, keep_audio=keep_audio)
+
+    def stop_recording_capture_phase(self):
+        """
+        Stop active video/audio capture immediately and return captured WAV path.
+
+        This method only ends capture. It does not run FFmpeg merge, so callers
+        can stop multiple recorders first and finalize files afterwards.
+        """
+
         if not self.is_recording and self.video_writer is None:
             return None
 
@@ -479,6 +490,21 @@ class Camera:
 
         self.is_recording = False
         self.record_start_time = None
+
+        return audio_path
+
+    def finalize_recording(self, audio_path=None, keep_audio=False):
+        """
+        Finalize files after capture has already stopped.
+
+        Returns:
+            Final merged MP4 path if successful.
+            Video-only temp path if audio fails.
+            None if nothing was recorded.
+        """
+
+        if not self.temp_video_path:
+            return None
 
         if audio_path is None:
             print("Audio failed or unavailable. Keeping video-only file.")
@@ -494,7 +520,8 @@ class Camera:
             self.temp_video_path,
             audio_path,
             self.final_video_path,
-            remove_audio=not keep_audio
+            remove_audio=not keep_audio,
+            shortest=not keep_audio
         )
 
         return merged_path
@@ -513,7 +540,14 @@ class Camera:
             print(f"Voice copy save failed: {e}")
             return None
 
-    def _merge_video_audio(self, video_path, audio_path, output_path, remove_audio=True):
+    def _merge_video_audio(
+        self,
+        video_path,
+        audio_path,
+        output_path,
+        remove_audio=True,
+        shortest=True
+    ):
         if not video_path or not audio_path:
             return video_path
 
@@ -532,9 +566,12 @@ class Camera:
             "-i", audio_path,
             "-c:v", "copy",
             "-c:a", "aac",
-            "-shortest",
-            output_path
         ]
+
+        if shortest:
+            command.append("-shortest")
+
+        command.append(output_path)
 
         try:
             subprocess.run(

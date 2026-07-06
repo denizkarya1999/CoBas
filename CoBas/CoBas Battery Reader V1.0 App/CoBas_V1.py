@@ -764,6 +764,9 @@ class CoBasV1App:
     def stop_active_recordings(self):
         """
         Stop regular and thermal recorders, reusing the single captured WAV.
+
+        Capture is stopped first on both recorders so video durations stay
+        synchronized before FFmpeg merge/finalization begins.
         """
 
         saved_video_path = None
@@ -771,8 +774,25 @@ class CoBasV1App:
         saved_voice_path = None
         audio_path = None
 
-        if self.camera.is_recording:
-            saved_video_path = self.camera.stop_recording(keep_audio=True)
+        regular_was_recording = self.camera.is_recording
+        thermal_was_recording = self.thermal_camera.is_recording
+
+        if regular_was_recording:
+            audio_path = self.camera.stop_recording_capture_phase()
+
+        if thermal_was_recording:
+            saved_thermal_video_path = self.thermal_camera.stop_recording(
+                audio_path=audio_path
+            )
+
+            if saved_thermal_video_path:
+                self.current_thermal_video_path = saved_thermal_video_path
+
+        if regular_was_recording:
+            saved_video_path = self.camera.finalize_recording(
+                audio_path=audio_path,
+                keep_audio=True
+            )
             saved_voice_path = self.camera.last_saved_voice_path
 
             if saved_video_path:
@@ -781,20 +801,185 @@ class CoBasV1App:
             if saved_voice_path:
                 self.current_voice_path = saved_voice_path
 
-            if self.camera.temp_audio_path and os.path.exists(self.camera.temp_audio_path):
-                audio_path = self.camera.temp_audio_path
-
-        if self.thermal_camera.is_recording:
-            saved_thermal_video_path = self.thermal_camera.stop_recording(
-                audio_path=audio_path
+        if saved_video_path and saved_thermal_video_path:
+            thermal_duration = self.get_video_duration_seconds(
+                saved_thermal_video_path
             )
 
-            if saved_thermal_video_path:
-                self.current_thermal_video_path = saved_thermal_video_path
+            if thermal_duration is not None:
+                synced_video_path = self.sync_video_duration(
+                    saved_video_path,
+                    thermal_duration
+                )
+
+                if synced_video_path:
+                    saved_video_path = synced_video_path
+                    self.current_video_path = synced_video_path
 
         self.camera.cleanup_temp_audio()
 
         return saved_video_path, saved_thermal_video_path, saved_voice_path
+
+    def get_video_duration_seconds(self, video_path):
+        """
+        Read video duration in seconds using ffprobe.
+        """
+
+        if not video_path or not os.path.exists(video_path):
+            return None
+
+        ffprobe = shutil.which("ffprobe")
+
+        if ffprobe is None:
+            print("[WARNING] ffprobe is not installed; cannot read video duration.")
+            return None
+
+        command = [
+            ffprobe,
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            value = result.stdout.strip()
+
+            if not value:
+                return None
+
+            return float(value)
+
+        except Exception as e:
+            print(f"[WARNING] Could not read video duration: {e}")
+            return None
+
+    def video_has_audio_stream(self, video_path):
+        """
+        Return True when the video file contains an audio stream.
+        """
+
+        ffprobe = shutil.which("ffprobe")
+
+        if ffprobe is None:
+            return False
+
+        command = [
+            ffprobe,
+            "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            video_path,
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            return bool(result.stdout.strip())
+
+        except Exception:
+            return False
+
+    def sync_video_duration(self, video_path, target_duration_seconds):
+        """
+        Force video duration to match target duration exactly.
+
+        The regular camera writes frames from the Tkinter preview loop, so its
+        encoded duration can be shorter than real capture time if the loop runs
+        below the configured FPS. Retiming spreads the captured frames across
+        the thermal duration instead of freezing the last frame.
+        """
+
+        if not video_path or not os.path.exists(video_path):
+            return video_path
+
+        if target_duration_seconds is None or target_duration_seconds <= 0:
+            return video_path
+
+        current_duration = self.get_video_duration_seconds(video_path)
+
+        if current_duration is None:
+            return video_path
+
+        if abs(current_duration - target_duration_seconds) <= 0.05:
+            return video_path
+
+        ffmpeg = shutil.which("ffmpeg")
+
+        if ffmpeg is None:
+            print("[WARNING] ffmpeg is not installed; cannot synchronize video duration.")
+            return video_path
+
+        target_text = f"{target_duration_seconds:.3f}"
+        duration_scale = target_duration_seconds / current_duration
+        scale_text = f"{duration_scale:.9f}"
+
+        base, ext = os.path.splitext(video_path)
+        temp_output_path = f"{base}_sync_tmp{ext}"
+        has_audio = self.video_has_audio_stream(video_path)
+
+        command = [
+            ffmpeg,
+            "-y",
+            "-i", video_path,
+            "-vf", f"setpts={scale_text}*PTS,trim=duration={target_text},setpts=PTS-STARTPTS",
+            "-t", target_text,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-pix_fmt", "yuv420p",
+        ]
+
+        if has_audio:
+            command.extend(
+                [
+                    "-map", "0:v:0",
+                    "-map", "0:a:0",
+                    "-af", f"apad,atrim=duration={target_text}",
+                    "-c:a", "aac",
+                ]
+            )
+        else:
+            command.extend(["-an"])
+
+        command.append(temp_output_path)
+
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+
+            os.replace(temp_output_path, video_path)
+            print(
+                "[INFO] Regular video duration synchronized "
+                f"({current_duration:.2f}s -> {target_duration_seconds:.2f}s)."
+            )
+
+            return video_path
+
+        except Exception as e:
+            print(f"[WARNING] Could not synchronize video duration: {e}")
+
+            if os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except Exception:
+                    pass
+
+            return video_path
 
     def get_indicator_color(self, indicator_text):
         """
