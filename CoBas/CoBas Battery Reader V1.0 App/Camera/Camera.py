@@ -1,6 +1,7 @@
 import cv2
 import os
 import queue
+import shutil
 import time
 import threading
 import subprocess
@@ -64,6 +65,8 @@ class Camera:
         self.temp_video_path = None
         self.temp_audio_path = None
         self.final_video_path = None
+        self.voice_audio_path = None
+        self.last_saved_voice_path = None
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -418,6 +421,12 @@ class Camera:
             f"CoBas_V1_TempAudio_{timestamp}.wav"
         )
 
+        self.voice_audio_path = os.path.join(
+            self.output_dir,
+            f"CoBas_V1_Voice_{timestamp}.wav"
+        )
+        self.last_saved_voice_path = None
+
         self.final_video_path = os.path.join(
             self.output_dir,
             f"CoBas_V1_Video_{timestamp}.mp4"
@@ -479,6 +488,8 @@ class Camera:
 
             return None
 
+        self.last_saved_voice_path = self._save_voice_copy(audio_path)
+
         merged_path = self._merge_video_audio(
             self.temp_video_path,
             audio_path,
@@ -487,6 +498,20 @@ class Camera:
         )
 
         return merged_path
+
+    def _save_voice_copy(self, audio_path):
+        if not audio_path or not os.path.exists(audio_path):
+            return None
+
+        if not self.voice_audio_path:
+            return None
+
+        try:
+            shutil.copyfile(audio_path, self.voice_audio_path)
+            return self.voice_audio_path
+        except Exception as e:
+            print(f"Voice copy save failed: {e}")
+            return None
 
     def _merge_video_audio(self, video_path, audio_path, output_path, remove_audio=True):
         if not video_path or not audio_path:

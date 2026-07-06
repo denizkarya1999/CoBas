@@ -81,6 +81,7 @@ class CoBasV1App:
         # Stores path of the current video file.
         self.current_video_path = None
         self.current_thermal_video_path = None
+        self.current_voice_path = None
 
         # Stores last processed video path to avoid processing the same video twice.
         self.last_processed_video_path = None
@@ -767,13 +768,18 @@ class CoBasV1App:
 
         saved_video_path = None
         saved_thermal_video_path = None
+        saved_voice_path = None
         audio_path = None
 
         if self.camera.is_recording:
             saved_video_path = self.camera.stop_recording(keep_audio=True)
+            saved_voice_path = self.camera.last_saved_voice_path
 
             if saved_video_path:
                 self.current_video_path = saved_video_path
+
+            if saved_voice_path:
+                self.current_voice_path = saved_voice_path
 
             if self.camera.temp_audio_path and os.path.exists(self.camera.temp_audio_path):
                 audio_path = self.camera.temp_audio_path
@@ -788,7 +794,7 @@ class CoBasV1App:
 
         self.camera.cleanup_temp_audio()
 
-        return saved_video_path, saved_thermal_video_path
+        return saved_video_path, saved_thermal_video_path, saved_voice_path
 
     def get_indicator_color(self, indicator_text):
         """
@@ -1385,7 +1391,7 @@ class CoBasV1App:
 
         self.cancel_preview_loop()
 
-        saved_video_path, saved_thermal_video_path = self.stop_active_recordings()
+        saved_video_path, saved_thermal_video_path, saved_voice_path = self.stop_active_recordings()
 
         self.camera.stop_camera()
         self.thermal_camera.stop_camera()
@@ -1417,10 +1423,11 @@ class CoBasV1App:
         self.refresh_info_panel()
 
         if saved_video_path:
-            self.update_status(
-                f"Status: Timed recording complete. Video saved to {saved_video_path}",
-                "● IDLE"
-            )
+            status_message = f"Status: Timed recording complete. Video saved to {saved_video_path}"
+            if saved_voice_path:
+                status_message = f"{status_message}; voice saved to {saved_voice_path}"
+
+            self.update_status(status_message, "● IDLE")
             self.process_last_video_with_pipeline(
                 saved_video_path,
                 saved_thermal_video_path
@@ -1752,7 +1759,7 @@ class CoBasV1App:
         # Stop pulse protocol generation alongside recording/tracking.
         self.stop_pulse_protocol_generation()
 
-        saved_video_path, saved_thermal_video_path = self.stop_active_recordings()
+        saved_video_path, saved_thermal_video_path, saved_voice_path = self.stop_active_recordings()
 
         # Release camera through backend.
         self.camera.stop_camera()
@@ -2085,7 +2092,7 @@ class CoBasV1App:
 
         # Stop recording.
         else:
-            saved_video_path, saved_thermal_video_path = self.stop_active_recordings()
+            saved_video_path, saved_thermal_video_path, saved_voice_path = self.stop_active_recordings()
 
             self.record_button.config(
                 text="Capture Video",
@@ -2100,10 +2107,16 @@ class CoBasV1App:
                 if saved_thermal_video_path:
                     self.current_thermal_video_path = saved_thermal_video_path
 
-                self.update_status(
-                    "Status: Regular and thermal videos saved with audio",
-                    "● LIVE"
-                )
+                if saved_voice_path:
+                    self.update_status(
+                        f"Status: Regular and thermal videos saved with voice at {saved_voice_path}",
+                        "● LIVE"
+                    )
+                else:
+                    self.update_status(
+                        "Status: Regular and thermal videos saved with audio",
+                        "● LIVE"
+                    )
             else:
                 self.update_status(
                     "Status: Recording stopped, but file could not be saved",

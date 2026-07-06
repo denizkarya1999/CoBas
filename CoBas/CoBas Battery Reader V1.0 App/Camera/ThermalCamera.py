@@ -489,11 +489,23 @@ class ThermalCamera:
 
         return self.renderer.render_image(frame, width, height)
 
+    def _wait_for_frame(self, timeout_seconds=2.0):
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+
+        while time.monotonic() < deadline:
+            self.poll_events()
+            frame = self._copy_latest_frame()
+            if frame is not None:
+                return frame
+            time.sleep(0.05)
+
+        return None
+
     def start_recording(self, timestamp=None):
         if self.is_recording:
             return self.final_video_path
 
-        frame = self._copy_latest_frame()
+        frame = self._wait_for_frame(timeout_seconds=2.0)
         if frame is None:
             print("[WARNING] Thermal recording could not start: no frame yet.")
             return None
