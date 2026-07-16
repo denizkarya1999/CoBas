@@ -85,6 +85,8 @@ install_driver_library() {
 
     local build_dir
     local build_output
+    # Root creates the disposable directory, the desktop user performs the
+    # build, and root then installs it and refreshes the linker cache.
     build_dir="$(mktemp -d /tmp/cobas-mlx90642.XXXXXX)"
     build_output="${build_dir}/libmlx90642.so"
 
@@ -159,9 +161,12 @@ enable_i2c_boot_overlay() {
     fi
 
     backup_file_once "$BOOT_CONFIG"
+    # The firmware enables the hardware controller at boot; kernel-module and
+    # permission setup below separately make its /dev/i2c-* node usable.
     ensure_config_line "$BOOT_CONFIG" "dtparam=i2c_arm=on"
 
     if [[ -n "${MLX90642_I2C_BAUDRATE:-}" ]]; then
+        # Leave bus timing at the platform default unless explicitly requested.
         ensure_config_line "$BOOT_CONFIG" "dtparam=i2c_arm_baudrate=${MLX90642_I2C_BAUDRATE}"
     fi
 }
@@ -169,6 +174,8 @@ enable_i2c_boot_overlay() {
 enable_i2c_kernel_modules() {
     log "Enabling Linux I2C device support"
 
+    # i2c-dev exposes adapters to user space. The optional bcm2835 probe is a
+    # best-effort compatibility step and is ignored when it does not apply.
     install -d -m 0755 /etc/modules-load.d
     printf 'i2c-dev\n' > /etc/modules-load.d/cobas-i2c.conf
 
@@ -179,6 +186,8 @@ enable_i2c_kernel_modules() {
 configure_i2c_permissions() {
     log "Configuring /dev/i2c-* permissions"
 
+    # Grant the dedicated group access instead of requiring the camera app to
+    # run as root. New group membership takes effect at the next login/reboot.
     if ! getent group i2c >/dev/null; then
         groupadd --system i2c
     fi

@@ -30,6 +30,8 @@ int MLX90642_GetFWver(uint8_t slaveAddr, uint8_t *fwver)
     uint16_t data[2];
     int status = MLX90642_I2CRead(slaveAddr, MLX90642_FW_VER_ADDRESS1, MLX90642_NUMBER_OF_FWVER_WORDS, data);
 
+    /* The public three-byte version occupies selected byte lanes in two
+     * 16-bit words, so unpack it explicitly rather than using host byte order. */
     fwver[0] = MLX90642_MS_BYTE(data[0]);
     fwver[1] = MLX90642_LS_BYTE(data[1]);
     fwver[2] = MLX90642_MS_BYTE(data[1]);
@@ -59,6 +61,8 @@ int MLX90642_SetMeasMode(uint8_t slaveAddr, uint16_t meas_mode)
     if((meas_mode != MLX90642_CONT_MEAS_MODE) && (meas_mode != MLX90642_STEP_MEAS_MODE))
         return -MLX90642_INVAL_VAL_ERR;
 
+    /* This register also contains the output-format and reserved fields;
+     * preserve them while replacing only the pre-shifted mode bit. */
     status = MLX90642_I2CRead(slaveAddr, MLX90642_APPLICATION_CONFIG_ADDRESS, 1, &data);
     if(status < 0)
         return status;
@@ -68,6 +72,7 @@ int MLX90642_SetMeasMode(uint8_t slaveAddr, uint16_t meas_mode)
 
     status = MLX90642_Config(slaveAddr, MLX90642_APPLICATION_CONFIG_ADDRESS, data);
 
+    /* Persistent configuration writes finish asynchronously in EEPROM. */
     MLX90642_Wait_ms(MLX90642_EE_WRITE_TIME);
 
     return status;
@@ -119,6 +124,8 @@ int MLX90642_GetRefreshRate(uint8_t slaveAddr)
 
     status = data & MLX90642_REFRESH_RATE_MASK;
 
+    /* The checked-in API names codes 2..6 as nominal rate settings. Reserved
+     * lower codes are clamped to the lowest named setting. */
     if(status < MLX90642_REF_RATE_2HZ)
         return MLX90642_REF_RATE_2HZ;
 
@@ -166,6 +173,8 @@ int MLX90642_GetRefreshTime(uint8_t slaveAddr)
     if(status < 0)
         return status;
 
+    /* The driver treats the rate field as an exponent: 2000 >> 2 yields the
+     * 500 ms nominal period, while higher codes successively halve it. */
     ref_time_ms >>= status;
 
     return (int16_t)ref_time_ms;
@@ -179,6 +188,8 @@ int MLX90642_GetEmissivity(uint8_t slaveAddr, int16_t *emissivity)
     int status;
 
     status = MLX90642_I2CRead(slaveAddr, MLX90642_EMISSIVITY_ADDRESS, 1, &data);
+    /* Emissivity uses Q14 scaling. This driver substitutes unity (1 << 14)
+     * whenever data is zero. */
     if(data == 0)
         data = 0x4000;
 
@@ -196,6 +207,9 @@ int MLX90642_SetEmissivity(uint8_t slaveAddr, int16_t emissivity)
     return status;
 }
 
+/* These I2C options use their raw register encodings, including active-low
+ * choices such as FM+ == 0 and SDA current limiting enabled == 0. Masked
+ * getter results can therefore be passed directly back to the setters. */
 int MLX90642_GetI2CMode(uint8_t slaveAddr)
 {
 
@@ -307,6 +321,8 @@ int MLX90642_SetI2CSlaveAddress(uint8_t slaveAddr, uint8_t new_slaveAddr)
     if((new_slaveAddr > SA_90642_MAX) || (new_slaveAddr < SA_90642_MIN))
         return -MLX90642_INVAL_VAL_ERR;
 
+    /* Send the configuration through the current address; once committed,
+     * subsequent transactions must use new_slaveAddr. */
     data = (uint16_t)new_slaveAddr;
 
     status = MLX90642_Config(slaveAddr, MLX90642_I2C_SA_ADDRESS, data);
@@ -318,6 +334,8 @@ int MLX90642_SetI2CSlaveAddress(uint8_t slaveAddr, uint8_t new_slaveAddr)
 int MLX90642_SetTreflected(uint8_t slaveAddr, int16_t tr)
 {
 
+    /* Config transports an unsigned word; the cast preserves the signed
+     * centi-degree value's two's-complement bit pattern. */
     return MLX90642_Config(slaveAddr, MLX90642_REFLECTED_TEMP_ADDRESS, (uint16_t)tr);
 
 }
@@ -357,6 +375,7 @@ int MLX90642_IsDataReady(uint8_t slaveAddr)
     status = MLX90642_I2CRead(slaveAddr, MLX90642_FLAGS_ADDRESS, 1, &data);
     if(status >= 0) {
         status = data & MLX90642_FLAGS_READY_MASK;
+        /* READY lives at bit 8; normalize it to MLX90642_NO/YES. */
         status >>= MLX90642_FLAGS_READY_SHIFT;
     }
 
@@ -369,10 +388,13 @@ int MLX90642_ClearDataReady(uint8_t slaveAddr)
     uint16_t data;
     int status;
 
+    /* Reading the first calculated-output word acknowledges the current
+     * frame and clears the sensor's read-to-clear READY flag. */
     status = MLX90642_I2CRead(slaveAddr, MLX90642_TO_DATA_ADDRESS, 1, &data);
     if(status < 0)
         return status;
 
+    /* Re-read READY so the caller can detect a failed acknowledgement. */
     return MLX90642_IsDataReady(slaveAddr);
 
 }
@@ -382,6 +404,8 @@ int MLX90642_IsReadWindowOpen(uint8_t slaveAddr)
 
     int status;
 
+    /* This API defines an open window as READY set and BUSY clear. It does not
+     * inspect the sensor's separate frame-update flag. */
     status = MLX90642_IsDataReady(slaveAddr);
     if(status != MLX90642_YES)
         return status;
@@ -410,6 +434,7 @@ int MLX90642_Init(uint8_t slaveAddr)
 
     ref_time = (uint16_t)status;
 
+    /* Acknowledge any stale frame before synchronizing a fresh acquisition. */
     status = MLX90642_ClearDataReady(slaveAddr);
     if(status !=0)
         return -MLX90642_INVAL_VAL_ERR;
@@ -418,6 +443,8 @@ int MLX90642_Init(uint8_t slaveAddr)
     if(status < 0)
         return status;
 
+    /* Wait the nominal frame period before bounded polling; the extra polls
+     * absorb sensor-oscillator variation without busy-looping on I2C. */
     MLX90642_Wait_ms(ref_time);
 
     for(poll_tries=0; poll_tries<MLX90642_MAX_POLL_TRIES; poll_tries++) {
@@ -458,6 +485,8 @@ int MLX90642_MeasureNow(uint8_t slaveAddr, uint16_t *pixVal)
 
     ref_time = (uint16_t)status;
 
+    /* Use the same stale-frame acknowledgement as initialization so pixVal
+     * cannot be satisfied by data that predates this trigger. */
     status = MLX90642_ClearDataReady(slaveAddr);
     if(status !=0)
         return -MLX90642_INVAL_VAL_ERR;
@@ -491,6 +520,8 @@ int MLX90642_MeasureNow(uint8_t slaveAddr, uint16_t *pixVal)
 int MLX90642_GetImage(uint8_t slaveAddr, uint16_t *pixVal)
 {
 
+    /* A read beginning at TO_DATA also acknowledges READY, as used by
+     * MLX90642_ClearDataReady, while transferring the complete image. */
     return MLX90642_I2CRead(slaveAddr, MLX90642_TO_DATA_ADDRESS, MLX90642_TOTAL_NUMBER_OF_PIXELS, pixVal);
 
 }
@@ -500,6 +531,8 @@ int MLX90642_GetFrameData(uint8_t slaveAddr, uint16_t *aux, uint16_t *rawpix, ui
 
     int status;
 
+    /* These are separate, non-atomic transfers with no readiness checks here;
+     * cross-region coherence therefore depends on caller timing and bus speed. */
     status = MLX90642_I2CRead(slaveAddr, MLX90642_AUX_DATA_ADDRESS, MLX90642_TOTAL_NUMBER_OF_AUX, aux);
     if(status < 0)
         return status;
@@ -508,6 +541,8 @@ int MLX90642_GetFrameData(uint8_t slaveAddr, uint16_t *aux, uint16_t *rawpix, ui
     if(status < 0)
         return status;
 
+    /* The sensor-temperature word follows the 768 calculated pixels. The +1
+     * stores it at pixVal[MLX90642_TOTAL_NUMBER_OF_PIXELS]. */
     status = MLX90642_I2CRead(slaveAddr, MLX90642_TO_DATA_ADDRESS, MLX90642_TOTAL_NUMBER_OF_PIXELS + 1, pixVal);
 
     return status;

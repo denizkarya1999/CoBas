@@ -20,20 +20,40 @@
 #ifndef _MLX90642_H_
 #define _MLX90642_H_
 
+/**
+ * @file MLX90642.h
+ * @brief Public register-level API for one MLX90642 addressed on an I2C bus.
+ *
+ * The caller owns every buffer passed through a pointer and must provide
+ * writable storage of the documented size.  The driver does not allocate,
+ * retain, or free those buffers.  Treat output contents as valid only after a
+ * successful call.
+ *
+ * Driver-generated failures are returned as negative integers.  The error
+ * macros below are positive identifiers so code returns, for example,
+ * `-MLX90642_TIMEOUT_ERR`.  Some getters return a nonnegative setting or flag,
+ * so callers must use `< 0` (rather than `!= 0`) to detect their failures.
+ */
+
+/* Positive error identifiers; public routines report them with a minus sign. */
 #define MLX90642_NACK_ERR 1
 #define MLX90642_INVAL_VAL_ERR 2
 #define MLX90642_TIMEOUT_ERR 3
 
+/* Boolean values returned by status-query routines. */
 #define MLX90642_YES 1
 #define MLX90642_NO 0
 
+/* Valid 7-bit I2C addresses and the factory-default address. */
 #define SA_90642_DEFAULT 0x66
 #define SA_90642_MIN 0x01
 #define SA_90642_MAX 0x7F
 
+/* Device-defined reset and EEPROM-write settling-time constants. */
 #define MLX90642_RESET_TIME 10 /**Time to wait after hot reset with I2C command, in milliseconds)*/
 #define MLX90642_EE_WRITE_TIME 15 /**Time to wait for EEPROM write, in milliseconds)*/
 
+/* Runtime data blocks and measurement-status flags. */
 #define MLX90642_AUX_DATA_ADDRESS 0x2E02
 #define MLX90642_IR_DATA_ADDRESS 0x2E2A
 #define MLX90642_TO_DATA_ADDRESS 0x342C
@@ -44,6 +64,7 @@
 #define MLX90642_FLAGS_READY_MASK 0x0100
 #define MLX90642_FLAGS_READY_SHIFT 8
 
+/* Persistent device-configuration registers and their field masks. */
 #define MLX90642_REFRESH_RATE_ADDRESS 0x11F0
 #define MLX90642_REFRESH_RATE_MASK 0x0007
 
@@ -64,8 +85,10 @@
 #define MLX90642_I2C_SA_ADDRESS 0x11FE
 #define MLX90642_I2C_SA_MASK 0x007F
 
+/* Special configuration target used to override reflected temperature. */
 #define MLX90642_REFLECTED_TEMP_ADDRESS 0xEEEE
 
+/* Identification storage sizes refer to 16-bit I2C memory words. */
 #define MLX90642_NUMBER_OF_ID_WORDS 4
 #define MLX90642_ID1_ADDR 0x1230
 #define MLX90642_ID2_ADDR 0x1232
@@ -75,13 +98,19 @@
 #define MLX90642_FW_VER_ADDRESS1 0xFFF8
 #define MLX90642_FW_VER_ADDRESS2 0xFFFA
 
+/* A frame is a flat 32-by-24 image; auxiliary data is a separate 20-word block. */
 #define MLX90642_TOTAL_NUMBER_OF_AUX 20
 #define MLX90642_TOTAL_NUMBER_OF_PIXELS 768
 
+/* Polling constants bound the driver's blocking measurement operations. */
 #define MLX90642_POLL_TIME_MS 2
 #define MLX90642_MAX_POLL_TRIES 100
 #define MLX90642_REF_TIME 2000
 
+/*
+ * Public configuration values are register-field encodings, not sequential C
+ * enum values.  Pass the named constants directly to the matching setter.
+ */
 #define MLX90642_CONT_MEAS_MODE 0
 #define MLX90642_STEP_MEAS_MODE 0x0800
 #define MLX90642_TEMPERATURE_OUTPUT 0
@@ -98,20 +127,24 @@
 #define MLX90642_I2C_LEVEL_VDD 0
 #define MLX90642_I2C_LEVEL_1P8 4
 
+/* Protocol opcodes used for configuration and addressed commands. */
 #define MLX90642_CONFIG_OPCODE 0x3A2E
 #define MLX90642_CMD_OPCODE 0x0180
 #define MLX90642_ADRESSED_RESET_CMD 0x0006
 #define MLX90642_START_SYNC_MEAS_CMD 0x0001
 #define MLX90642_SLEEP_CMD 0x0007
 
+/* Extract the logical high or low byte from a host-order register word. */
 #define MLX90642_MS_BYTE(reg)   (reg >> 8)
 #define MLX90642_LS_BYTE(reg)   (reg & 0x00FF)
 
 /** Get the ID of the MLX90642 device
  *
  * @param[in] slaveAddr I2C slave address of the device
- * @param[out] mlxid Pointer to where the device ID is stored
+ * @param[out] mlxid Caller-owned array of at least
+ *                  MLX90642_NUMBER_OF_ID_WORDS 16-bit words
  *
+ * @retval 0 Device ID read successfully
  * @retval <0 Error while reading the device ID
  *
  */
@@ -121,8 +154,11 @@ int MLX90642_GetID(uint8_t slaveAddr, uint16_t *mlxid);
  * @note Different version of the FW may support different features
  *
  * @param[in] slaveAddr I2C slave address of the device
- * @param[out] fwver Pointer to where the firmware versioin is stored
+ * @param[out] fwver Caller-owned array of at least 3 bytes.  The driver reads
+ *                   MLX90642_NUMBER_OF_FWVER_WORDS 16-bit words and extracts
+ *                   the three version bytes into this array.
  *
+ * @retval 0 Firmware version read successfully
  * @retval <0 Error while reading the firmware version
  *
  */
@@ -207,9 +243,10 @@ int MLX90642_SetRefreshRate(uint8_t slaveAddr, uint16_t ref_rate);
  * @note The emissivity value is scaled by 2^14 (0x4000 corresponds to emissivity 1.0)
  *
  * @param[in] slaveAddr I2C slave address of the device
- * @param[out] emissivity Pointer to where the emissivity is stored
+ * @param[out] emissivity Caller-owned storage for one signed 16-bit fixed-point
+ *                        value
  *
- * @retval Emissivity * 2^14
+ * @retval 0 Emissivity read successfully; the value is written to emissivity
  * @retval <0 Error while getting the emissivity
  *
  */
@@ -297,6 +334,8 @@ int MLX90642_GetI2CLevel(uint8_t slaveAddr);
 int MLX90642_SetI2CLevel(uint8_t slaveAddr, uint8_t i2c_level);
 
 /** Set a new I2C slave address for the MLX90642 device
+ * @note slaveAddr is the address currently in use.  After a successful change,
+ *       subsequent calls must address the device using new_slaveAddr.
  *
  * @param[in] slaveAddr I2C slave address of the device
  * @param[in] new_slaveAddr New I2C slave address to be set
@@ -368,6 +407,7 @@ int MLX90642_ClearDataReady(uint8_t slaveAddr);
 
 /** Check if the image data read window is open
  * @note During the read window it is guaranteed that at I2C frequency of 1MHz, the image data that is being read-out will be from the same frame
+ * @note A YES result means data-ready is set and the device-busy flag is clear.
  *
  * @param[in] slaveAddr I2C slave address of the device
  *
@@ -402,9 +442,12 @@ int MLX90642_StartSync(uint8_t slaveAddr);
 
 /** Start a new measurement, wait for the new data to be available and store the new data in the specified array
  * @note When in step mode, this function will start the new measurement. When in continuous mode, this command will syncronize the measurement by stopping the ongoing measurement and starting a new measurement
+ * @note This is the blocking convenience API: unlike MLX90642_GetImage, it
+ *       performs the start/synchronize and readiness polling before reading.
  *
  * @param[in] slaveAddr I2C slave address of the device
- * @param[out] pixVal Pointer to where the image data is stored
+ * @param[out] pixVal Caller-owned array of at least
+ *                    MLX90642_TOTAL_NUMBER_OF_PIXELS 16-bit words
  *
  * @retval 0 The image is read-out successfully
  * @retval <0 Error while runnning the new measurement
@@ -414,9 +457,15 @@ int MLX90642_MeasureNow(uint8_t slaveAddr, uint16_t *pixVal);
 
 /** Get the calculated image from the MLX90642 device
  * @note The image will contain temperature data or normalized data depending on the output format set
+ * @note This function only reads the image block; it does not start a
+ *       measurement or wait for a read window.  The caller is responsible for
+ *       establishing that timing, or can use MLX90642_MeasureNow instead.
  *
  * @param[in] slaveAddr I2C slave address of the device
- * @param[out] pixVal Pointer to where the image data is stored
+ * @param[out] pixVal Caller-owned array of at least
+ *                    MLX90642_TOTAL_NUMBER_OF_PIXELS 16-bit words.  The words
+ *                    preserve the sensor bit patterns; interpret them according
+ *                    to the configured output format.
  *
  * @retval 0 The image is read-out successfully
  * @retval <0 Error while getting the image
@@ -426,11 +475,18 @@ int MLX90642_GetImage(uint8_t slaveAddr, uint16_t *pixVal);
 
 /** Get the full frame data - raw IR data, aux data and calculated image from the MLX90642 device
  * @note The image will contain temperature data or normalized data depending on the output format set
+ * @note The three blocks are read sequentially.  If a later read fails, an
+ *       earlier output array may already contain newly read data.
  *
  * @param[in] slaveAddr I2C slave address of the device
- * @param[out] aux Pointer to where the aux data is stored
- * @param[out] rawpix Pointer to where the raw IR data is stored
- * @param[out] pixVal Pointer to where the image data is stored
+ * @param[out] aux Caller-owned array of at least
+ *                 MLX90642_TOTAL_NUMBER_OF_AUX 16-bit words
+ * @param[out] rawpix Caller-owned array of at least
+ *                    MLX90642_TOTAL_NUMBER_OF_PIXELS 16-bit words
+ * @param[out] pixVal Caller-owned array of at least
+ *                    (MLX90642_TOTAL_NUMBER_OF_PIXELS + 1) 16-bit words.  The
+ *                    first words are the calculated image; the final word is
+ *                    the sensor temperature at MLX90642_TA_DATA_ADDRESS.
  *
  * @retval 0 The full frame data is read-out successfully
  * @retval <0 Error while getting the full frame data

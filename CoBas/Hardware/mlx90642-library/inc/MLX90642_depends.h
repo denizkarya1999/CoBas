@@ -19,6 +19,16 @@
 
 #include <stdint.h>
 
+/**
+ * @file MLX90642_depends.h
+ * @brief Platform hooks required by the register-level sensor driver.
+ *
+ * A platform backend implements these functions to isolate bus access and
+ * delays from the portable driver logic. Read lengths are counts of 16-bit
+ * words, not byte counts; buffers remain owned by the caller. Status-returning
+ * hooks use zero for success and a negative value for transport failure.
+ */
+
 /** MLX90642 block read I2C command
  * @note For more information refer to the MLX90642 datasheet
  *

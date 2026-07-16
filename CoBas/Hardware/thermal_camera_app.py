@@ -17,8 +17,12 @@ import tkinter as tk
 
 ROOT = Path(__file__).resolve().parent
 LIB = ROOT / "mlx90642-library"
+# The path is configurable so an installer or developer can choose where the
+# ctypes-compatible shared-library build is written.
 SHARED_LIB = Path(os.environ.get("MLX90642_SHARED_LIB", "/tmp/libmlx90642.so"))
 
+# These dimensions are part of the sensor/driver ABI: every frame passed across
+# the C boundary contains exactly this many 16-bit pixel values.
 SENSOR_WIDTH = 32
 SENSOR_HEIGHT = 24
 SENSOR_PIXELS = SENSOR_WIDTH * SENSOR_HEIGHT
@@ -44,6 +48,8 @@ class DriverError(RuntimeError):
 
 
 def build_shared_library(output=SHARED_LIB):
+    # The vendor driver is plain C, so build its platform layer and the narrow
+    # Python bridge into one shared object that ctypes can load directly.
     sources = [
         LIB / "MLX90642_python.c",
         LIB / "src" / "MLX90642.c",
@@ -78,10 +84,13 @@ def build_shared_library(output=SHARED_LIB):
 
 
 def signed_word(value):
+    # ctypes receives the driver's bit pattern as uint16_t. Pixel temperatures
+    # are signed two's-complement values, so restore the negative half here.
     return value - 65536 if value >= 32768 else value
 
 
 def raw_to_celsius(value):
+    # Temperature-format frames use a fixed scale of 50 counts per degree C.
     return value / 50.0
 
 
@@ -90,6 +99,9 @@ class MLX90642Camera:
         self._library = ctypes.CDLL(str(library_path))
         self._frame_type = ctypes.c_uint16 * SENSOR_PIXELS
 
+        # Declare the C ABI explicitly. Without these signatures ctypes would
+        # assume C int arguments/results, which is unsafe for pointers and the
+        # uint16_t poll limit.
         self._library.MLX90642_PythonInit.argtypes = []
         self._library.MLX90642_PythonInit.restype = ctypes.c_int
         self._library.MLX90642_PythonReadFrame.argtypes = [
@@ -102,11 +114,15 @@ class MLX90642Camera:
         self._library.MLX90642_PythonWaitForNextFrame.restype = ctypes.c_int
 
     def initialize(self):
+        # The C initializer synchronizes a measurement and waits until the
+        # first frame is ready, so a successful return makes read_frame usable.
         status = self._library.MLX90642_PythonInit()
         if status < 0:
             raise DriverError(f"MLX90642_Init failed: {status}")
 
     def read_frame(self):
+        # Keep the ctypes array alive for the entire C call; the driver fills it
+        # in place with one complete, flat 32 x 24 frame in sensor order.
         frame = self._frame_type()
         status = self._library.MLX90642_PythonReadFrame(frame)
         if status < 0:
@@ -115,6 +131,8 @@ class MLX90642Camera:
         return [signed_word(frame[index]) for index in range(SENSOR_PIXELS)]
 
     def wait_for_next_frame(self):
+        # Waiting for the read window to close and reopen prevents the worker
+        # from publishing the same sensor frame repeatedly.
         status = self._library.MLX90642_PythonWaitForNextFrame(1000)
         if status < 0:
             raise DriverError(f"MLX90642_IsReadWindowOpen failed: {status}")
@@ -157,6 +175,8 @@ class CameraWorker(threading.Thread):
 
     def run(self):
         try:
+            # Driver compilation and blocking I2C calls stay off Tk's event
+            # thread; results cross back through the thread-safe queue.
             if self.mock:
                 camera = MockCamera()
             else:
@@ -168,6 +188,8 @@ class CameraWorker(threading.Thread):
             self.events.put(("status", "Live"))
 
             while not self.stop_event.is_set():
+                # Read the current frame, then require a closed-to-open window
+                # transition before fetching the following frame.
                 frame = camera.read_frame()
                 self.events.put(("frame", frame, time.monotonic()))
                 camera.wait_for_next_frame()
