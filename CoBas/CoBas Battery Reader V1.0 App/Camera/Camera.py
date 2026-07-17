@@ -163,7 +163,8 @@ class Camera:
 
     def stop_camera(self):
         self.is_tracking = False
-        self.stop_recording()
+        if self.is_recording or self.video_writer is not None:
+            self.stop_recording()
 
         if self.cap is not None:
             self.cap.release()

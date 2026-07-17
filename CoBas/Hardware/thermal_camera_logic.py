@@ -227,6 +227,12 @@ class ThermalRenderer:
         # frames and avoid repeating bilinear setup at recording frame rate.
         self._maps = {}
 
+    def scale_color(self, normalized):
+        """Return the RGB color at one normalized point on this renderer's scale."""
+        # A fresh cache lets renderer variants reuse their normal color mapping
+        # without integer cache keys collapsing nearby legend positions.
+        return self._color(normalized, 0.0, 1.0, {})
+
     def _get_map(self, width, height):
         key = (width, height)
         if key in self._maps:
@@ -353,6 +359,7 @@ class FfmpegRecorder:
         self.width = width
         self.height = height
         self.fps = fps
+        self.frame_bytes = width * height * 3
         self.frames_written = 0
         self.frames_dropped = 0
         self.error = None
@@ -419,6 +426,15 @@ class FfmpegRecorder:
 
     def write_frame(self, rgb):
         if self._closed:
+            return
+
+        if len(rgb) != self.frame_bytes:
+            self.frames_dropped += 1
+            self.error = ValueError(
+                "RGB frame size mismatch: "
+                f"expected {self.frame_bytes} bytes for "
+                f"{self.width}x{self.height}, received {len(rgb)}"
+            )
             return
 
         try:

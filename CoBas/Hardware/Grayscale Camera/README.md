@@ -6,6 +6,11 @@ sensor pixels are enlarged as crisp square blocks in both the live view and
 recorded video. Video is recorded at 1280x960 by default, making each sensor
 pixel a 40x40 block.
 
+The live GUI includes an estimated Celsius spectrum beside the image. White at
+the top represents the hottest value in the current frame, black at the bottom
+represents the coldest value, and the intermediate labels show the predicted
+temperature bands. The range updates automatically for every camera frame.
+
 Run without camera hardware:
 
 ```bash

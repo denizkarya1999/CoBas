@@ -19,8 +19,15 @@ PROJECT_ROOT = APP_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Import the shared camera window.
-from thermal_camera_app import ThermalCameraApp  # noqa: E402
+# Import the shared camera window and legend dimensions.
+from thermal_camera_app import (  # noqa: E402
+    CANVAS_MARGIN,
+    LEGEND_GAP,
+    LEGEND_PANEL_WIDTH,
+    MAX_LEGEND_HEIGHT,
+    MIN_LEGEND_HEIGHT,
+    ThermalCameraApp,
+)
 
 # Import camera and recorder tools.
 from thermal_camera_logic import (  # noqa: E402
@@ -52,6 +59,16 @@ class GrayscaleThermalCameraApp(ThermalCameraApp):
         # Use the greyscale renderer.
         self.renderer = GrayscaleThermalRenderer()
 
+        # Keep the inherited recording callback on this variant's dimensions.
+        # Without these overrides FFmpeg expects 1280x960 while the callback
+        # supplies 640x480 chunks, which tiles several images into each frame.
+        self.record_width = RECORD_WIDTH
+        self.record_height = RECORD_HEIGHT
+        self.record_fps = RECORD_FPS
+
+        # Refresh the shared legend with the greyscale renderer.
+        self._update_temperature_legend()
+
         # Maximize after Tk starts.
         self.after_idle(self._maximize_window)
 
@@ -75,29 +92,61 @@ class GrayscaleThermalCameraApp(ThermalCameraApp):
             self.geometry(f"{width}x{height}+0+0")
 
     def _display_bounds(self):
-        """Center the largest integer-scaled 32x24 image in the live canvas."""
+        """Return the integer-scaled image area beside the Celsius legend."""
+        display_bounds, _ = self._canvas_layout()
+        return display_bounds
+
+    def _canvas_layout(self):
+        """Lay out the camera image and its optional temperature legend."""
         # Read the canvas size.
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
 
+        # Reserve a panel to the right while keeping a margin around the group.
+        available_width = (
+            canvas_width
+            - 2 * CANVAS_MARGIN
+            - LEGEND_GAP
+            - LEGEND_PANEL_WIDTH
+        )
+        available_height = canvas_height - 2 * CANVAS_MARGIN
+
         # Find the largest square pixel size.
         pixel_size = min(
-            canvas_width // SENSOR_WIDTH,
-            canvas_height // SENSOR_HEIGHT,
+            available_width // SENSOR_WIDTH,
+            available_height // SENSOR_HEIGHT,
         )
 
-        if pixel_size < 1:
-            # Use the base layout for tiny windows.
-            return super()._display_bounds()
+        if pixel_size < 1 or available_height < MIN_LEGEND_HEIGHT:
+            # Tiny windows use the full base layout and hide the legend rather
+            # than squeezing either the image or the labels into unreadability.
+            return super()._image_only_bounds(), None
 
         # Scale the thermal image.
         width = pixel_size * SENSOR_WIDTH
         height = pixel_size * SENSOR_HEIGHT
 
-        # Center the image.
-        left = (canvas_width - width) // 2
+        # Center the image and legend together as one visual group.
+        group_width = width + LEGEND_GAP + LEGEND_PANEL_WIDTH
+        left = (canvas_width - group_width) // 2
         top = (canvas_height - height) // 2
-        return left, top, width, height
+        display_bounds = (left, top, width, height)
+
+        # Avoid an excessively tall legend on large or portrait displays.
+        legend_height = min(height, MAX_LEGEND_HEIGHT)
+        legend_left = left + width + LEGEND_GAP
+        legend_top = (canvas_height - legend_height) // 2
+        legend_bounds = (
+            legend_left,
+            legend_top,
+            LEGEND_PANEL_WIDTH,
+            legend_height,
+        )
+        return display_bounds, legend_bounds
+
+    def _temperature_legend_title(self):
+        """Describe the endpoints of the greyscale palette."""
+        return "ESTIMATED °C RANGE\nWHITE HOT · BLACK COLD"
 
     def _start_recording(self):
         """Start a timestamped MP4 inside this variant's recordings folder."""
@@ -123,9 +172,9 @@ class GrayscaleThermalCameraApp(ThermalCameraApp):
             # Start the MP4 recorder.
             self.recorder = FfmpegRecorder(
                 path,
-                RECORD_WIDTH,
-                RECORD_HEIGHT,
-                RECORD_FPS,
+                self.record_width,
+                self.record_height,
+                self.record_fps,
             )
         except Exception as exc:
             # Show recorder errors.

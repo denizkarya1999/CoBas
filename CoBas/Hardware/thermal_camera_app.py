@@ -36,6 +36,16 @@ from thermal_camera_logic import (
 )
 
 
+# The reusable legend is shared by the regular and grayscale camera windows.
+LEGEND_GRADIENT_STEPS = 96
+LEGEND_TICK_COUNT = 5
+LEGEND_PANEL_WIDTH = 178
+LEGEND_GAP = 24
+CANVAS_MARGIN = 20
+MIN_LEGEND_HEIGHT = 240
+MAX_LEGEND_HEIGHT = 520
+
+
 class ThermalCameraApp(tk.Tk):
     def __init__(self, mock=False):
         super().__init__()
@@ -62,8 +72,23 @@ class ThermalCameraApp(tk.Tk):
         self.recorder = None
         self.recording_started = None
         self.record_after_id = None
+        # Variants can override their output size without inheriting this
+        # module's 640x480 globals in the scheduled recording callback.
+        self.record_width = RECORD_WIDTH
+        self.record_height = RECORD_HEIGHT
+        self.record_fps = RECORD_FPS
+
+        # Legend canvas items are allocated once and updated in place.
+        self.legend_backdrop_item = None
+        self.legend_gradient_items = []
+        self.legend_border_item = None
+        self.legend_tick_line_items = []
+        self.legend_tick_text_items = []
+        self.legend_title_item = None
 
         self._build_ui()
+        self._create_temperature_legend()
+        self._update_temperature_legend()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.worker.start()
         # Polling with after() keeps all widget access on Tk's event thread.
@@ -122,9 +147,12 @@ class ThermalCameraApp(tk.Tk):
         self.canvas.itemconfigure(self.message_item, text=message, state="normal")
         self._place_canvas_message()
 
-    def _display_bounds(self):
-        canvas_width = max(1, self.canvas.winfo_width())
-        canvas_height = max(1, self.canvas.winfo_height())
+    def _image_only_bounds(self, canvas_width=None, canvas_height=None):
+        """Letterbox the 4:3 sensor grid without reserving legend space."""
+        if canvas_width is None:
+            canvas_width = max(1, self.canvas.winfo_width())
+        if canvas_height is None:
+            canvas_height = max(1, self.canvas.winfo_height())
 
         # Letterbox the 4:3 sensor grid inside any canvas size so pixels keep
         # their spatial proportions instead of stretching with the window.
@@ -141,6 +169,202 @@ class ThermalCameraApp(tk.Tk):
             top = (canvas_height - height) / 2
 
         return left, top, max(1, width), max(1, height)
+
+    def _display_bounds(self):
+        """Return the camera image area beside the temperature legend."""
+        display_bounds, _ = self._canvas_layout()
+        return display_bounds
+
+    def _canvas_layout(self):
+        """Lay out the regular camera image and optional temperature legend."""
+        canvas_width = max(1, self.canvas.winfo_width())
+        canvas_height = max(1, self.canvas.winfo_height())
+        available_width = (
+            canvas_width
+            - 2 * CANVAS_MARGIN
+            - LEGEND_GAP
+            - LEGEND_PANEL_WIDTH
+        )
+        available_height = canvas_height - 2 * CANVAS_MARGIN
+
+        if available_width < SENSOR_WIDTH or available_height < MIN_LEGEND_HEIGHT:
+            return self._image_only_bounds(canvas_width, canvas_height), None
+
+        # Preserve 4:3 proportions while fitting the remaining canvas space.
+        target_ratio = SENSOR_WIDTH / SENSOR_HEIGHT
+        if available_width / available_height > target_ratio:
+            height = available_height
+            width = height * target_ratio
+        else:
+            width = available_width
+            height = width / target_ratio
+
+        group_width = width + LEGEND_GAP + LEGEND_PANEL_WIDTH
+        left = (canvas_width - group_width) / 2
+        top = (canvas_height - height) / 2
+        display_bounds = (left, top, width, height)
+
+        legend_height = min(height, MAX_LEGEND_HEIGHT)
+        legend_left = left + width + LEGEND_GAP
+        legend_top = (canvas_height - legend_height) / 2
+        legend_bounds = (
+            legend_left,
+            legend_top,
+            LEGEND_PANEL_WIDTH,
+            legend_height,
+        )
+        return display_bounds, legend_bounds
+
+    def _temperature_legend_title(self):
+        """Describe the endpoints of the regular thermal palette."""
+        return "ESTIMATED °C RANGE\nWHITE HOT · BLUE COLD"
+
+    def _create_temperature_legend(self):
+        """Allocate reusable canvas items for the live temperature spectrum."""
+        legend_tag = "temperature_legend"
+        self.legend_backdrop_item = self.canvas.create_rectangle(
+            0,
+            0,
+            1,
+            1,
+            fill="#11151d",
+            outline="#303744",
+            width=1,
+            tags=(legend_tag,),
+        )
+
+        for _ in range(LEGEND_GRADIENT_STEPS):
+            item = self.canvas.create_rectangle(
+                0,
+                0,
+                1,
+                1,
+                width=0,
+                outline="",
+                fill="#000000",
+                tags=(legend_tag,),
+            )
+            self.legend_gradient_items.append(item)
+
+        self.legend_border_item = self.canvas.create_rectangle(
+            0,
+            0,
+            1,
+            1,
+            fill="",
+            outline="#d7dde8",
+            width=1,
+            tags=(legend_tag,),
+        )
+
+        for _ in range(LEGEND_TICK_COUNT):
+            line_item = self.canvas.create_line(
+                0,
+                0,
+                1,
+                0,
+                fill="#d7dde8",
+                width=1,
+                tags=(legend_tag,),
+            )
+            text_item = self.canvas.create_text(
+                0,
+                0,
+                anchor="w",
+                fill="#f3f5f8",
+                text="--.- °C",
+                font=("TkDefaultFont", 10),
+                tags=(legend_tag,),
+            )
+            self.legend_tick_line_items.append(line_item)
+            self.legend_tick_text_items.append(text_item)
+
+        self.legend_title_item = self.canvas.create_text(
+            0,
+            0,
+            anchor="nw",
+            fill="#f3f5f8",
+            justify="left",
+            text=self._temperature_legend_title(),
+            font=("TkDefaultFont", 9, "bold"),
+            tags=(legend_tag,),
+        )
+
+    def _update_temperature_legend(self):
+        """Position and label the spectrum from the current frame's range."""
+        if self.legend_backdrop_item is None:
+            return
+
+        _, legend_bounds = self._canvas_layout()
+        if legend_bounds is None:
+            self.canvas.itemconfigure("temperature_legend", state="hidden")
+            return
+
+        self.canvas.itemconfigure("temperature_legend", state="normal")
+        panel_left, panel_top, panel_width, panel_height = legend_bounds
+        panel_right = panel_left + panel_width
+        panel_bottom = panel_top + panel_height
+
+        self.canvas.coords(
+            self.legend_backdrop_item,
+            panel_left,
+            panel_top,
+            panel_right,
+            panel_bottom,
+        )
+        self.canvas.coords(
+            self.legend_title_item,
+            panel_left + 14,
+            panel_top + 12,
+        )
+
+        # Hot/max is at the top and cold/min is at the bottom, matching the
+        # renderer's dynamic per-frame color normalization.
+        bar_left = panel_left + 15
+        bar_right = bar_left + 32
+        bar_top = panel_top + 58
+        bar_bottom = panel_bottom - 20
+        bar_height = bar_bottom - bar_top
+
+        for index, item in enumerate(self.legend_gradient_items):
+            fraction = index / (LEGEND_GRADIENT_STEPS - 1)
+            red, green, blue = self.renderer.scale_color(1.0 - fraction)
+            color = f"#{red:02x}{green:02x}{blue:02x}"
+            y0 = bar_top + index * bar_height / LEGEND_GRADIENT_STEPS
+            y1 = bar_top + (index + 1) * bar_height / LEGEND_GRADIENT_STEPS
+            self.canvas.coords(item, bar_left, y0, bar_right, y1)
+            self.canvas.itemconfigure(item, fill=color)
+
+        self.canvas.coords(
+            self.legend_border_item,
+            bar_left,
+            bar_top,
+            bar_right,
+            bar_bottom,
+        )
+
+        min_value = max_value = None
+        if self.latest_frame is not None:
+            min_value = min(self.latest_frame)
+            max_value = max(self.latest_frame)
+
+        for index, (line_item, text_item) in enumerate(
+            zip(self.legend_tick_line_items, self.legend_tick_text_items)
+        ):
+            fraction = index / (LEGEND_TICK_COUNT - 1)
+            y = bar_top + fraction * bar_height
+            self.canvas.coords(line_item, bar_right, y, bar_right + 8, y)
+
+            if min_value is None:
+                label = "--.- °C"
+            else:
+                raw_value = max_value + (min_value - max_value) * fraction
+                label = f"{raw_to_celsius(raw_value):.1f} °C"
+
+            self.canvas.coords(text_item, bar_right + 14, y)
+            self.canvas.itemconfigure(text_item, text=label)
+
+        self.canvas.tag_raise("temperature_legend")
 
     def _process_events(self):
         # Drain every event currently available so acquisition cannot build up
@@ -183,6 +407,7 @@ class ThermalCameraApp(tk.Tk):
 
     def _redraw_latest(self, event=None):
         if self.latest_frame is None:
+            self._update_temperature_legend()
             return
 
         if self.message_item is not None:
@@ -207,6 +432,9 @@ class ThermalCameraApp(tk.Tk):
         cell_width = width / SENSOR_WIDTH
         cell_height = height / SENSOR_HEIGHT
         colors = self.renderer.frame_colors(self.latest_frame)
+
+        # Relabel and raise the scale after first-frame rectangles are allocated.
+        self._update_temperature_legend()
 
         # Frame data and canvas items share the same row-major pixel index.
         for row in range(SENSOR_HEIGHT):
@@ -245,7 +473,12 @@ class ThermalCameraApp(tk.Tk):
         try:
             # FfmpegRecorder writes on its own thread so encoder or pipe delays
             # do not freeze Tk's event loop.
-            self.recorder = FfmpegRecorder(path, RECORD_WIDTH, RECORD_HEIGHT, RECORD_FPS)
+            self.recorder = FfmpegRecorder(
+                path,
+                self.record_width,
+                self.record_height,
+                self.record_fps,
+            )
         except Exception as exc:
             self.recorder = None
             messagebox.showerror("Recording Error", str(exc))
@@ -263,8 +496,18 @@ class ThermalCameraApp(tk.Tk):
         if self.latest_frame is not None:
             # Recording samples the latest available frame at RECORD_FPS. This
             # deliberately decouples video timing from sensor acquisition.
-            rgb = self.renderer.render_rgb(self.latest_frame, RECORD_WIDTH, RECORD_HEIGHT)
+            rgb = self.renderer.render_rgb(
+                self.latest_frame,
+                self.record_width,
+                self.record_height,
+            )
             self.recorder.write_frame(rgb)
+
+            # Stop immediately if the recorder rejected a malformed frame or
+            # its writer thread failed; continuing would hide the real error.
+            if self.recorder.error is not None:
+                self._stop_recording()
+                return
 
         elapsed = 0.0
         if self.recording_started is not None:
@@ -276,7 +519,10 @@ class ThermalCameraApp(tk.Tk):
             f"REC {elapsed:0.1f}s, {self.recorder.frames_written} frames{suffix}"
         )
         # Keep the timer identifier so stopping can cancel the pending callback.
-        self.record_after_id = self.after(int(1000 / RECORD_FPS), self._record_tick)
+        self.record_after_id = self.after(
+            int(1000 / self.record_fps),
+            self._record_tick,
+        )
 
     def _stop_recording(self):
         if self.recorder is None:

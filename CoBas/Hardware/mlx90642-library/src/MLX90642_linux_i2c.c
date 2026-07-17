@@ -1,8 +1,10 @@
 #include <stdint.h>
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/ioctl.h>
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
@@ -19,6 +21,10 @@
 
 /* Default Raspberry Pi I2C bus; a nonempty environment override wins below. */
 #define I2C_BUS "/dev/i2c-1"
+
+/* The sensor can briefly NACK while changing measurement/read-window state. */
+#define I2C_READ_MAX_ATTEMPTS 4
+#define I2C_READ_RETRY_DELAY_US 2500
 
 static const char *i2c_bus_path(void)
 {
@@ -54,6 +60,14 @@ static int open_i2c(uint8_t slaveAddr)
     }
 
     return fd;
+}
+
+static int is_retryable_i2c_error(int error_number)
+{
+    /* These errors can be transient after a NACK or controller arbitration. */
+    return error_number == EREMOTEIO || error_number == EIO ||
+           error_number == ENXIO || error_number == EAGAIN ||
+           error_number == EBUSY || error_number == ETIMEDOUT;
 }
 
 int MLX90642_I2CRead(uint8_t slaveAddr, uint16_t startAddress,
@@ -118,14 +132,45 @@ int MLX90642_I2CRead(uint8_t slaveAddr, uint16_t startAddress,
     transaction.nmsgs = 2;
 
     /*
-     * A negative ioctl result is treated as a failed transaction; no retry is
-     * made.
+     * A target can briefly NACK with EREMOTEIO around a measurement boundary.
+     * Retry only transient bus failures, reopening the descriptor so the next
+     * attempt starts with clean adapter/file state.  I2C_RDWR returns the
+     * number of transferred messages; a short nonnegative result is also a
+     * failed combined transaction and is retried as EIO.
      */
-    if (ioctl(fd, I2C_RDWR, &transaction) < 0) {
-        perror("i2c read transaction");
-        free(data);
+    int transaction_result = -1;
+    int saved_errno = EIO;
+    unsigned int attempt;
+
+    for (attempt = 1; attempt <= I2C_READ_MAX_ATTEMPTS; attempt++) {
+        errno = 0;
+        transaction_result = ioctl(fd, I2C_RDWR, &transaction);
+        if (transaction_result == (int)transaction.nmsgs) {
+            break;
+        }
+
+        saved_errno = transaction_result < 0 ? errno : EIO;
+        if (!is_retryable_i2c_error(saved_errno) ||
+            attempt == I2C_READ_MAX_ATTEMPTS) {
+            fprintf(stderr,
+                    "i2c read transaction failed: bus=%s slave=0x%02X "
+                    "register=0x%04X bytes=%zu attempts=%u/%u: %s\n",
+                    i2c_bus_path(), (unsigned)slaveAddr,
+                    (unsigned)startAddress, read_len, attempt,
+                    I2C_READ_MAX_ATTEMPTS, strerror(saved_errno));
+            free(data);
+            close(fd);
+            errno = saved_errno;
+            return -1;
+        }
+
         close(fd);
-        return -1;
+        usleep(I2C_READ_RETRY_DELAY_US * attempt);
+        fd = open_i2c(slaveAddr);
+        if (fd < 0) {
+            free(data);
+            return -1;
+        }
     }
 
     /* Reassemble each big-endian wire pair into a host-order 16-bit word. */

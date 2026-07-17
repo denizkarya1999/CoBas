@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +23,8 @@ SENSOR_PIXELS = SENSOR_WIDTH * SENSOR_HEIGHT
 RECORD_WIDTH = int(os.environ.get("MLX90642_RECORD_WIDTH", "640"))
 RECORD_HEIGHT = int(os.environ.get("MLX90642_RECORD_HEIGHT", "480"))
 RECORD_FPS = int(os.environ.get("MLX90642_RECORD_FPS", "8"))
+SCALE_RECORD_WIDTH = int(os.environ.get("MLX90642_SCALE_RECORD_WIDTH", "240"))
+SCALE_RECORD_HEIGHT = int(os.environ.get("MLX90642_SCALE_RECORD_HEIGHT", "480"))
 READ_FAILURE_LIMIT = int(os.environ.get("MLX90642_READ_FAILURE_LIMIT", "5"))
 WAIT_FAILURE_LIMIT = int(os.environ.get("MLX90642_WAIT_FAILURE_LIMIT", "30"))
 WAIT_FAILURE_BACKOFF_SECONDS = float(
@@ -40,6 +42,16 @@ PALETTE = [
     (235, 48, 28),
     (255, 255, 255),
 ]
+
+PREVIEW_BACKGROUND = (2, 6, 23)
+LEGEND_BACKGROUND = (17, 21, 29)
+LEGEND_BORDER = (48, 55, 68)
+LEGEND_FOREGROUND = (243, 245, 248)
+LEGEND_TICK_COUNT = 5
+LEGEND_PANEL_WIDTH = 116
+LEGEND_GAP = 8
+PREVIEW_MARGIN = 6
+MIN_LEGEND_HEIGHT = 120
 
 
 class DriverError(RuntimeError):
@@ -236,6 +248,17 @@ class CameraWorker(threading.Thread):
 
 
 class ThermalRenderer:
+    def __init__(self):
+        self._fonts = {}
+
+    def scale_color(self, normalized):
+        """Return the RGB color at one normalized point on the thermal scale."""
+        return self._color(normalized, 0.0, 1.0, {})
+
+    def temperature_legend_title(self):
+        """Describe the endpoints of this renderer's palette."""
+        return "ESTIMATED °C RANGE\nWHITE HOT · BLUE COLD"
+
     def _color(self, value, min_value, max_value, color_cache):
         rounded = int(value)
         cached = color_cache.get(rounded)
@@ -285,6 +308,195 @@ class ThermalRenderer:
         image = self.render_sensor_image(frame)
         return image.resize((width, height), Image.Resampling.BICUBIC)
 
+    def _font(self, size, bold=False):
+        """Load and cache a portable legend font."""
+        key = (size, bold)
+        if key in self._fonts:
+            return self._fonts[key]
+
+        font_name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+        try:
+            font = ImageFont.truetype(font_name, size)
+        except OSError:
+            font = ImageFont.load_default()
+
+        self._fonts[key] = font
+        return font
+
+    @staticmethod
+    def _fit_thermal_image(available_width, available_height):
+        """Fit the 4:3 sensor view without stretching its proportions."""
+        target_ratio = SENSOR_WIDTH / SENSOR_HEIGHT
+        if available_width / available_height > target_ratio:
+            image_height = available_height
+            image_width = image_height * target_ratio
+        else:
+            image_width = available_width
+            image_height = image_width / target_ratio
+
+        return max(1, int(image_width)), max(1, int(image_height))
+
+    def _draw_temperature_legend(self, image, frame, bounds):
+        """Draw this renderer's live Celsius scale inside the given bounds."""
+        panel_left, panel_top, panel_right, panel_bottom = bounds
+        panel_width = panel_right - panel_left + 1
+        panel_height = panel_bottom - panel_top + 1
+        expanded = panel_width >= 160 and panel_height >= 240
+        draw = ImageDraw.Draw(image)
+        draw.rectangle(
+            bounds,
+            fill=LEGEND_BACKGROUND,
+            outline=LEGEND_BORDER,
+        )
+
+        title_padding = 14 if expanded else 9
+        title_top = 12 if expanded else 7
+        title_font = self._font(10 if expanded else 7, bold=True)
+        tick_font = self._font(12 if expanded else 9)
+        draw.multiline_text(
+            (panel_left + title_padding, panel_top + title_top),
+            self.temperature_legend_title(),
+            fill=LEGEND_FOREGROUND,
+            font=title_font,
+            spacing=2 if expanded else 1,
+        )
+
+        bar_left = panel_left + (16 if expanded else 10)
+        bar_right = bar_left + (34 if expanded else 18)
+        bar_top = panel_top + (66 if expanded else 38)
+        bar_bottom = panel_bottom - (22 if expanded else 10)
+        bar_height = max(1, bar_bottom - bar_top)
+
+        for y_offset in range(bar_height + 1):
+            fraction = y_offset / bar_height
+            color = self.scale_color(1.0 - fraction)
+            draw.line(
+                (bar_left, bar_top + y_offset, bar_right, bar_top + y_offset),
+                fill=color,
+            )
+
+        draw.rectangle(
+            (bar_left, bar_top, bar_right, bar_bottom),
+            outline=LEGEND_FOREGROUND,
+        )
+
+        min_value = min(frame)
+        max_value = max(frame)
+        tick_length = 8 if expanded else 5
+        text_gap = 7 if expanded else 3
+        for index in range(LEGEND_TICK_COUNT):
+            fraction = index / (LEGEND_TICK_COUNT - 1)
+            y = int(round(bar_top + fraction * bar_height))
+            raw_value = max_value + (min_value - max_value) * fraction
+            label = f"{raw_to_celsius(raw_value):.1f} °C"
+            draw.line(
+                (bar_right, y, bar_right + tick_length, y),
+                fill=LEGEND_FOREGROUND,
+            )
+
+            text_box = draw.textbbox((0, 0), label, font=tick_font)
+            text_height = text_box[3] - text_box[1]
+            draw.text(
+                (
+                    bar_right + tick_length + text_gap,
+                    y - text_height // 2 - text_box[1],
+                ),
+                label,
+                fill=LEGEND_FOREGROUND,
+                font=tick_font,
+            )
+
+    def render_scale_image(self, frame, width, height):
+        """Render the dynamic temperature scale as its own video frame."""
+        width = max(1, int(width))
+        height = max(1, int(height))
+        image = Image.new("RGB", (width, height), PREVIEW_BACKGROUND)
+        margin = 10 if width >= 40 and height >= 40 else 0
+        self._draw_temperature_legend(
+            image,
+            frame,
+            (margin, margin, width - margin - 1, height - margin - 1),
+        )
+        return image
+
+    def render_preview_image(self, frame, width, height):
+        """Render a letterboxed live view with a dynamic Celsius scale."""
+        width = max(1, int(width))
+        height = max(1, int(height))
+        preview = Image.new("RGB", (width, height), PREVIEW_BACKGROUND)
+
+        available_height = max(1, height - 2 * PREVIEW_MARGIN)
+        image_width_available = (
+            width
+            - 2 * PREVIEW_MARGIN
+            - LEGEND_GAP
+            - LEGEND_PANEL_WIDTH
+        )
+        show_legend = image_width_available >= SENSOR_WIDTH
+
+        if show_legend:
+            image_width, image_height = self._fit_thermal_image(
+                image_width_available,
+                available_height,
+            )
+
+            # A narrow view can technically fit both columns but leave too
+            # little height for readable ticks; use image-only mode there.
+            show_legend = image_height >= MIN_LEGEND_HEIGHT
+
+        if show_legend:
+            group_width = image_width + LEGEND_GAP + LEGEND_PANEL_WIDTH
+            image_left = (width - group_width) // 2
+        else:
+            image_width, image_height = self._fit_thermal_image(
+                width,
+                height,
+            )
+            image_left = (width - image_width) // 2
+
+        image_top = (height - image_height) // 2
+        thermal_image = self.render_image(frame, image_width, image_height)
+        preview.paste(thermal_image, (image_left, image_top))
+
+        if not show_legend:
+            return preview
+
+        legend_left = image_left + image_width + LEGEND_GAP
+        legend_top = image_top
+        legend_right = legend_left + LEGEND_PANEL_WIDTH - 1
+        legend_bottom = legend_top + image_height - 1
+        self._draw_temperature_legend(
+            preview,
+            frame,
+            (legend_left, legend_top, legend_right, legend_bottom),
+        )
+
+        return preview
+
+
+class GrayscaleThermalRenderer(ThermalRenderer):
+    """Map the current frame's coldest value to black and hottest to white."""
+
+    def temperature_legend_title(self):
+        return "ESTIMATED °C RANGE\nWHITE HOT · BLACK COLD"
+
+    def _color(self, value, min_value, max_value, color_cache):
+        rounded = int(value)
+        cached = color_cache.get(rounded)
+        if cached is not None:
+            return cached
+
+        if max_value <= min_value:
+            intensity = 127
+        else:
+            normalized = (value - min_value) / (max_value - min_value)
+            normalized = max(0.0, min(1.0, normalized))
+            intensity = int(normalized * 255)
+
+        color = (intensity, intensity, intensity)
+        color_cache[rounded] = color
+        return color
+
 
 class FfmpegRecorder:
     def __init__(self, path, width, height, fps):
@@ -296,6 +508,7 @@ class FfmpegRecorder:
         self.width = width
         self.height = height
         self.fps = fps
+        self.frame_bytes = width * height * 3
         self.frames_written = 0
         self.frames_dropped = 0
         self.error = None
@@ -355,12 +568,23 @@ class FfmpegRecorder:
 
     def write_frame(self, rgb):
         if self._closed:
-            return
+            return False
+
+        if len(rgb) != self.frame_bytes:
+            self.frames_dropped += 1
+            self.error = ValueError(
+                "RGB frame size mismatch: "
+                f"expected {self.frame_bytes} bytes for "
+                f"{self.width}x{self.height}, received {len(rgb)}"
+            )
+            return False
 
         try:
             self._queue.put_nowait(rgb)
+            return True
         except queue.Full:
             self.frames_dropped += 1
+            return False
 
     def close(self):
         if self._closed:
@@ -395,7 +619,10 @@ class ThermalCamera:
     def __init__(self, output_dir="Captures", mock=False):
         self.output_dir = output_dir
         self.mock = mock or os.environ.get("COBAS_THERMAL_MOCK") == "1"
-        self.renderer = ThermalRenderer()
+        self.rgb_renderer = ThermalRenderer()
+        self.grayscale_renderer = GrayscaleThermalRenderer()
+        self.display_mode = "rgb"
+        self.renderer = self.rgb_renderer
 
         self.events = queue.Queue(maxsize=8)
         self.stop_event = threading.Event()
@@ -409,16 +636,43 @@ class ThermalCamera:
         self.frame_lock = threading.Lock()
 
         self.recorder = None
+        self.scale_recorder = None
         self.record_thread = None
         self.is_recording = False
         self.record_start_time = None
+        self.record_renderer = None
         self.temp_video_path = None
         self.final_video_path = None
+        self.scale_video_path = None
         self.record_width = RECORD_WIDTH
         self.record_height = RECORD_HEIGHT
         self.record_fps = RECORD_FPS
+        self.scale_record_width = SCALE_RECORD_WIDTH
+        self.scale_record_height = SCALE_RECORD_HEIGHT
 
         os.makedirs(self.output_dir, exist_ok=True)
+
+    def set_display_mode(self, mode):
+        """Select the RGB or greyscale renderer when not recording."""
+        normalized_mode = str(mode).strip().lower()
+        if normalized_mode == "regular":
+            normalized_mode = "rgb"
+        if normalized_mode == "greyscale":
+            normalized_mode = "grayscale"
+
+        if normalized_mode not in ("rgb", "grayscale"):
+            raise ValueError(f"Unknown thermal display mode: {mode}")
+
+        if self.is_recording:
+            return False
+
+        self.display_mode = normalized_mode
+        if normalized_mode == "grayscale":
+            self.renderer = self.grayscale_renderer
+        else:
+            self.renderer = self.rgb_renderer
+
+        return True
 
     def start_camera(self):
         if self.worker is not None and self.worker.is_alive():
@@ -435,7 +689,12 @@ class ThermalCamera:
         return True
 
     def stop_camera(self):
-        self.stop_recording()
+        if (
+            self.is_recording
+            or self.recorder is not None
+            or self.scale_recorder is not None
+        ):
+            self.stop_recording()
         self.stop_event.set()
 
         if self.worker is not None:
@@ -487,7 +746,7 @@ class ThermalCamera:
         if frame is None:
             return None
 
-        return self.renderer.render_image(frame, width, height)
+        return self.renderer.render_preview_image(frame, width, height)
 
     def _wait_for_frame(self, timeout_seconds=2.0):
         deadline = time.monotonic() + max(0.0, timeout_seconds)
@@ -521,6 +780,10 @@ class ThermalCamera:
             self.output_dir,
             f"CoBas_V1_Thermal_Video_{timestamp}.mp4"
         )
+        self.scale_video_path = os.path.join(
+            self.output_dir,
+            f"CoBas_V1_Thermal_Scale_Video_{timestamp}.mp4"
+        )
 
         try:
             self.recorder = FfmpegRecorder(
@@ -534,8 +797,30 @@ class ThermalCamera:
             print(f"[WARNING] Thermal recording could not start: {exc}")
             return None
 
+        try:
+            self.scale_recorder = FfmpegRecorder(
+                self.scale_video_path,
+                self.scale_record_width,
+                self.scale_record_height,
+                self.record_fps
+            )
+        except Exception as exc:
+            try:
+                self.recorder.close()
+            except Exception:
+                pass
+
+            self.recorder = None
+            self.scale_recorder = None
+            print(
+                "[WARNING] Thermal scale video could not start: "
+                f"{exc}"
+            )
+            return None
+
         self.is_recording = True
         self.record_start_time = time.time()
+        self.record_renderer = self.renderer
         self.record_thread = threading.Thread(
             target=self._record_loop,
             daemon=True
@@ -547,23 +832,52 @@ class ThermalCamera:
         next_frame_time = time.monotonic()
         frame_interval = 1.0 / max(1, self.record_fps)
 
-        while self.is_recording and self.recorder is not None:
+        while (
+            self.is_recording
+            and self.recorder is not None
+            and self.scale_recorder is not None
+        ):
             frame = self._copy_latest_frame()
 
             if frame is not None:
-                image = self.renderer.render_image(
+                renderer = self.record_renderer or self.renderer
+                image = renderer.render_image(
                     frame,
                     self.record_width,
                     self.record_height
                 )
-                self.recorder.write_frame(image.tobytes())
+                frame_accepted = self.recorder.write_frame(image.tobytes())
+                if self.recorder.error is not None:
+                    print(
+                        "[WARNING] Thermal recorder rejected a frame: "
+                        f"{self.recorder.error}"
+                    )
+                    break
+
+                if frame_accepted:
+                    scale_image = renderer.render_scale_image(
+                        frame,
+                        self.scale_record_width,
+                        self.scale_record_height
+                    )
+                    self.scale_recorder.write_frame(scale_image.tobytes())
+                    if self.scale_recorder.error is not None:
+                        print(
+                            "[WARNING] Thermal scale recorder rejected a frame: "
+                            f"{self.scale_recorder.error}"
+                        )
+                        break
 
             next_frame_time += frame_interval
             sleep_seconds = max(0.0, next_frame_time - time.monotonic())
             time.sleep(sleep_seconds)
 
     def stop_recording(self, audio_path=None):
-        if not self.is_recording and self.recorder is None:
+        if (
+            not self.is_recording
+            and self.recorder is None
+            and self.scale_recorder is None
+        ):
             return None
 
         self.is_recording = False
@@ -573,20 +887,54 @@ class ThermalCamera:
             self.record_thread = None
 
         recorder = self.recorder
+        scale_recorder = self.scale_recorder
         self.recorder = None
+        self.scale_recorder = None
         self.record_start_time = None
+        self.record_renderer = None
+
+        recording_error = None
+        if recorder is not None:
+            try:
+                recorder.close()
+            except Exception as exc:
+                recording_error = exc
+
+        scale_error = None
+        if scale_recorder is not None:
+            try:
+                scale_recorder.close()
+            except Exception as exc:
+                scale_error = exc
 
         if recorder is None:
             return None
 
-        try:
-            recorder.close()
-        except Exception as exc:
-            print(f"[WARNING] Thermal recording failed: {exc}")
+        if recording_error is not None:
+            print(f"[WARNING] Thermal recording failed: {recording_error}")
             return None
+
+        if scale_error is not None:
+            print(f"[WARNING] Thermal scale video failed: {scale_error}")
 
         if recorder.frames_dropped:
             print(f"[WARNING] Thermal frames dropped: {recorder.frames_dropped}")
+
+        if scale_recorder is not None and scale_recorder.frames_dropped:
+            print(
+                "[WARNING] Thermal scale frames dropped: "
+                f"{scale_recorder.frames_dropped}"
+            )
+
+        if (
+            scale_error is None
+            and self.scale_video_path
+            and os.path.exists(self.scale_video_path)
+        ):
+            print(
+                "[INFO] Thermal scale video saved: "
+                f"{self.scale_video_path}"
+            )
 
         if audio_path and os.path.exists(audio_path):
             return self._merge_video_audio(

@@ -12,8 +12,7 @@ import wave
 from datetime import datetime
 
 from Camera.Camera import Camera
-from Camera.ThermalCamera import ThermalCamera, extract_thermal_images
-from Inference.BatteryInference import BatteryPercentagePredictor
+from Camera.ThermalCamera import ThermalCamera
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
 from Settings import SettingsWindow
 from About import show_about_window
@@ -76,7 +75,6 @@ class CoBasV1App:
             output_dir=self.captures_dir
         )
         self.thermal_camera = ThermalCamera(output_dir=self.captures_dir)
-        self.battery_predictor = BatteryPercentagePredictor(self.base_dir)
 
         # Stores path of the current video file.
         self.current_video_path = None
@@ -85,7 +83,6 @@ class CoBasV1App:
 
         # Stores last processed video path to avoid processing the same video twice.
         self.last_processed_video_path = None
-        self.last_processed_thermal_video_path = None
 
         # Background pulse protocol generation process.
         self.pulse_process = None
@@ -101,6 +98,13 @@ class CoBasV1App:
         # Stores Tkinter image reference for preview.
         self.preview_photo = None
         self.thermal_preview_photo = None
+
+        # Controls the palette used by the thermal preview and recorder.
+        self.thermal_scale_mode = tk.StringVar(
+            master=self.root,
+            value=self.thermal_camera.display_mode
+        )
+        self.thermal_scale_buttons = []
 
         # Apply styles from Style.py.
         self.style = apply_styles(self.root)
@@ -336,11 +340,35 @@ class CoBasV1App:
             style="PanelText.TLabel"
         ).grid(row=0, column=0, sticky="w", pady=(0, 3))
 
-        ttk.Label(
+        thermal_header = ttk.Frame(
             thermal_preview_frame,
+            style="Panel.TFrame"
+        )
+        thermal_header.grid(row=0, column=0, sticky="ew", pady=(0, 3))
+
+        ttk.Label(
+            thermal_header,
             text="Thermal Camera",
             style="PanelText.TLabel"
-        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
+        ).pack(side="left")
+
+        thermal_scale_controls = ttk.Frame(
+            thermal_header,
+            style="Panel.TFrame"
+        )
+        thermal_scale_controls.pack(side="right")
+
+        for label, value in (("Regular", "rgb"), ("Greyscale", "grayscale")):
+            button = ttk.Radiobutton(
+                thermal_scale_controls,
+                text=label,
+                value=value,
+                variable=self.thermal_scale_mode,
+                command=self.change_thermal_scale_mode,
+                style="ThermalScale.TRadiobutton"
+            )
+            button.pack(side="left", padx=(4, 0))
+            self.thermal_scale_buttons.append(button)
 
         self.video_label = tk.Label(
             regular_preview_frame,
@@ -710,6 +738,90 @@ class CoBasV1App:
         if self.thermal_preview_after_id is None:
             self.update_thermal_feed()
 
+    def change_thermal_scale_mode(self):
+        """Switch the CoBas thermal preview between regular and greyscale."""
+        requested_mode = self.thermal_scale_mode.get()
+        if not self.thermal_camera.set_display_mode(requested_mode):
+            self.thermal_scale_mode.set(self.thermal_camera.display_mode)
+
+    def refresh_thermal_scale_controls(self):
+        """Lock the palette while a thermal recording is in progress."""
+        state = "disabled" if self.thermal_camera.is_recording else "normal"
+        for button in self.thermal_scale_buttons:
+            button.configure(state=state)
+
+        if self.thermal_scale_mode.get() != self.thermal_camera.display_mode:
+            self.thermal_scale_mode.set(self.thermal_camera.display_mode)
+
+    def start_active_recordings(self):
+        """Start the single synchronized camera and thermal recording pipeline."""
+        if self.camera.is_recording or self.thermal_camera.is_recording:
+            print("[INFO] A synchronized recording is already active.")
+            return self.current_video_path, self.current_thermal_video_path
+
+        self.set_recording_volume_to_maximum()
+        recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.current_video_path = None
+        self.current_thermal_video_path = None
+        self.current_voice_path = None
+
+        self.current_video_path = self.camera.start_recording(
+            timestamp=recording_timestamp
+        )
+
+        if self.current_video_path:
+            self.current_thermal_video_path = self.thermal_camera.start_recording(
+                timestamp=recording_timestamp
+            )
+            self.refresh_thermal_scale_controls()
+
+        return self.current_video_path, self.current_thermal_video_path
+
+    def set_recording_volume_to_maximum(self):
+        """Unmute the default output device and set it to exactly 100%."""
+        volume_command_sets = []
+
+        wpctl = shutil.which("wpctl")
+        pactl = shutil.which("pactl")
+        amixer = shutil.which("amixer")
+
+        if wpctl:
+            volume_command_sets.append([
+                [wpctl, "set-mute", "@DEFAULT_AUDIO_SINK@", "0"],
+                [wpctl, "set-volume", "@DEFAULT_AUDIO_SINK@", "1.0"],
+            ])
+        if pactl:
+            volume_command_sets.append([
+                [pactl, "set-sink-mute", "@DEFAULT_SINK@", "0"],
+                [pactl, "set-sink-volume", "@DEFAULT_SINK@", "100%"],
+            ])
+        if amixer:
+            volume_command_sets.append([
+                [amixer, "sset", "Master", "unmute"],
+                [amixer, "sset", "Master", "100%"],
+            ])
+
+        if not volume_command_sets:
+            print("[WARNING] No supported system volume control was found.")
+            return False
+
+        for volume_commands in volume_command_sets:
+            try:
+                for command in volume_commands:
+                    subprocess.run(
+                        command,
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                print("[INFO] Recording output volume set to 100%.")
+                return True
+            except Exception:
+                continue
+
+        print("[WARNING] Could not set recording volume to 100%.")
+        return False
+
     def update_thermal_feed(self):
         """
         Refresh the thermal preview at a lower rate than the regular camera.
@@ -784,6 +896,7 @@ class CoBasV1App:
             saved_thermal_video_path = self.thermal_camera.stop_recording(
                 audio_path=audio_path
             )
+            self.refresh_thermal_scale_controls()
 
             if saved_thermal_video_path:
                 self.current_thermal_video_path = saved_thermal_video_path
@@ -819,6 +932,23 @@ class CoBasV1App:
         self.camera.cleanup_temp_audio()
 
         return saved_video_path, saved_thermal_video_path, saved_voice_path
+
+    def finalize_capture_session(self):
+        """Stop and export one capture session through the single output pipeline."""
+        saved_paths = self.stop_active_recordings()
+        saved_video_path, saved_thermal_video_path, _ = saved_paths
+
+        video_path = saved_video_path or self.current_video_path
+        thermal_video_path = (
+            saved_thermal_video_path or self.current_thermal_video_path
+        )
+
+        if video_path and os.path.exists(video_path):
+            self.export_capture_session(video_path, thermal_video_path)
+        else:
+            print("[INFO] No unprocessed capture session was found.")
+
+        return saved_paths
 
     def get_video_duration_seconds(self, video_path):
         """
@@ -1098,6 +1228,7 @@ class CoBasV1App:
         self.thermal_info_label.config(
             text=f"Thermal: {thermal_status}"
         )
+        self.refresh_thermal_scale_controls()
 
         self.microphone_info_label.config(
             text=f"Mic: {self.camera.microphone_device_name}"
@@ -1115,20 +1246,117 @@ class CoBasV1App:
             text=f"Zoom: {self.camera.zoom_factor}x"
         )
 
-    def process_last_video_with_pipeline(self, video_path, thermal_video_path=None):
+    def run_capture_ffmpeg(self, label, command):
+        """Run one FFmpeg capture-export command."""
+        print(f"[INFO] Starting {label}...")
+        subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f"[INFO] Finished {label}.")
+
+    def move_capture_output(self, source_path, output_path):
+        """Move a finalized recording to its canonical session location."""
+        source_path = os.path.abspath(source_path)
+        output_path = os.path.abspath(output_path)
+
+        if source_path != output_path:
+            shutil.move(source_path, output_path)
+
+    def generate_capture_outputs(
+        self,
+        video_path,
+        thermal_video_path,
+        scale_video_path,
+        voice_path,
+        output_folder
+    ):
+        """Generate the six requested capture artifacts without an external script."""
+        if os.path.isdir(output_folder):
+            shutil.rmtree(output_folder)
+
+        camera_frames = os.path.join(output_folder, "Camera_Frames")
+        thermal_frames = os.path.join(output_folder, "Thermal_Frames")
+        os.makedirs(camera_frames, exist_ok=True)
+        os.makedirs(thermal_frames, exist_ok=True)
+
+        self.run_capture_ffmpeg(
+            "camera frame extraction",
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                video_path,
+                "-vf",
+                "fps=0.5",
+                "-start_number",
+                "0",
+                "-qscale:v",
+                "2",
+                os.path.join(camera_frames, "Camera_Frame_%03d.jpg"),
+            ]
+        )
+        self.run_capture_ffmpeg(
+            "thermal frame extraction",
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                thermal_video_path,
+                "-vf",
+                "fps=0.5",
+                "-start_number",
+                "0",
+                "-qscale:v",
+                "2",
+                os.path.join(thermal_frames, "Thermal_Frame_%03d.jpg"),
+            ]
+        )
+
+        voice_output = os.path.join(output_folder, "Voice.wav")
+        if voice_path and os.path.exists(voice_path):
+            self.move_capture_output(voice_path, voice_output)
+        else:
+            self.run_capture_ffmpeg(
+                "single voice extraction",
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    video_path,
+                    "-vn",
+                    "-ar",
+                    "48000",
+                    "-ac",
+                    "1",
+                    "-c:a",
+                    "pcm_s16le",
+                    voice_output,
+                ]
+            )
+
+        capture_moves = (
+            (video_path, os.path.join(output_folder, "Camera_Video.mp4")),
+            (
+                thermal_video_path,
+                os.path.join(output_folder, "Thermal_Video.mp4")
+            ),
+            (
+                scale_video_path,
+                os.path.join(output_folder, "Thermal_Range_Video.mp4")
+            ),
+        )
+        for source_path, output_path in capture_moves:
+            self.move_capture_output(source_path, output_path)
+
+    def export_capture_session(self, video_path, thermal_video_path=None):
         """
-        Run the post-capture processing pipeline on the last saved video file.
+        Export the six capture artifacts from the latest recording.
 
-        This runs after tracking is stopped.
-        A background thread is used so the Tkinter GUI does not freeze.
-
-        Pipeline:
-        1. Segment captured video every 2 seconds.
-        2. Extract one unsegmented 48 kHz mono voice WAV from the full video.
-        3. Extract one frame every 2 seconds.
-        4. Run beacon voice preprocessing and STFT spectrogram preparation.
-        5. Save final raw video, Frames, Voices, and <voice_name>_Spectogram output under Captures.
-        6. Export thermal images beside the output as Thermal_Images for review only.
+        Outputs: camera frames, thermal frames, one voice, camera video,
+        thermal video, and the separately recorded thermal-range video.
         """
 
         if video_path is None:
@@ -1143,90 +1371,72 @@ class CoBasV1App:
             print(f"[INFO] Video already processed: {video_path}")
             return
 
+        if thermal_video_path is None:
+            thermal_video_path = self.current_thermal_video_path
+
+        scale_video_path = self.thermal_camera.scale_video_path
+        voice_path = self.current_voice_path
+
+        required_outputs = (
+            (thermal_video_path, "thermal video"),
+            (scale_video_path, "thermal-range video"),
+        )
+        for required_path, label in required_outputs:
+            if not required_path or not os.path.exists(required_path):
+                print(f"[WARNING] {label.title()} is unavailable: {required_path}")
+                self.update_status(
+                    f"Status: {label.title()} is unavailable",
+                    "● WARNING"
+                )
+                return
+
+        video_stem = os.path.splitext(os.path.basename(video_path))[0]
+        output_folder = os.path.join(
+            self.captures_dir,
+            f"{video_stem}_Image_and_Video"
+        )
         self.last_processed_video_path = video_path
 
-        pipeline_script = os.path.join(
-            self.base_dir,
-            "Inference",
-            "Video Processing",
-            "Video_Processing_Pipeline.py"
-        )
-
-        if not os.path.exists(pipeline_script):
-            print(f"[ERROR] Pipeline script not found: {pipeline_script}")
-
-            self.update_status(
-                "Status: Video pipeline script not found",
-                "● WARNING"
-            )
-            return
-
-        pipeline_command = [
-            sys.executable,
-            pipeline_script,
-            video_path
-        ]
-
         def worker():
-            print(f"[INFO] Processing stopped tracking video through pipeline: {video_path}")
+            print(f"[INFO] Generating capture outputs for: {video_path}")
 
             self.root.after(
                 0,
                 lambda: (
                     self.update_status(
-                        "Status: Processing video, voice, and STFT...",
+                        "Status: Generating camera, thermal, and voice outputs...",
                         "● WARNING"
                     ),
-                    self.set_processing_indicator(True, "Processing...")
+                    self.set_processing_indicator(True, "Generating outputs...")
                 )
             )
 
             try:
-                subprocess.run(pipeline_command, check=True)
-                self.cleanup_video_processing_work_folder()
-
-                print("[INFO] Video pipeline finished.")
-
-                self.root.after(
-                    0,
-                    lambda: (
-                        self.update_status(
-                            "Status: Running battery percentage inference...",
-                            "● WARNING"
-                        ),
-                        self.set_processing_indicator(True, "Running inference...")
-                    )
-                )
-
-                prediction = self.battery_predictor.predict_from_video(video_path)
-                print(
-                    "[INFO] Battery inference finished: "
-                    f"{prediction.label} ({prediction.segment_count} segments)"
-                )
-
-                thermal_images_folder = self.extract_thermal_images_for_capture(
+                self.generate_capture_outputs(
                     video_path,
-                    thermal_video_path
+                    thermal_video_path,
+                    scale_video_path,
+                    voice_path,
+                    output_folder
                 )
+                print(f"[INFO] Capture outputs saved in: {output_folder}")
 
                 self.root.after(
                     0,
-                    lambda: self.handle_battery_inference_finished(
-                        prediction,
-                        thermal_images_folder
-                    )
+                    lambda: self.handle_capture_outputs_finished(output_folder)
                 )
 
             except Exception as e:
-                self.cleanup_video_processing_work_folder()
-                print(f"[ERROR] Processing or inference failed: {e}")
+                print(f"[ERROR] Capture output generation failed: {e}")
+                if self.last_processed_video_path == video_path:
+                    self.last_processed_video_path = None
 
                 self.root.after(
                     0,
                     lambda: (
                         self.set_processing_indicator(False),
                         self.update_status(
-                            "Status: Processing or inference failed",
+                            "Status: Capture output generation failed",
                             "● WARNING"
                         )
                     )
@@ -1237,117 +1447,27 @@ class CoBasV1App:
             daemon=True
         ).start()
 
-    def extract_thermal_images_for_capture(self, regular_video_path, thermal_video_path):
-        """
-        Save thermal video frames alongside regular processing output.
-        """
-
-        if thermal_video_path is None:
-            return None
-
-        if self.last_processed_thermal_video_path == thermal_video_path:
-            print(f"[INFO] Thermal video already processed: {thermal_video_path}")
-            return None
-
-        if not os.path.exists(thermal_video_path):
-            print(f"[WARNING] Thermal video file does not exist: {thermal_video_path}")
-            return None
-
-        regular_video_path = os.path.abspath(regular_video_path)
-        video_stem = os.path.splitext(os.path.basename(regular_video_path))[0]
-        output_folder = os.path.join(
-            self.base_dir,
-            "Captures",
-            f"{video_stem}_Image_and_Video"
-        )
-        thermal_images_folder = extract_thermal_images(
-            thermal_video_path,
-            output_folder
-        )
-        self.last_processed_thermal_video_path = thermal_video_path
-        return thermal_images_folder
-
-    def handle_battery_inference_finished(self, prediction, thermal_images_folder=None):
-        """
-        Show the final battery prediction and leave tracking stopped.
-        """
+    def handle_capture_outputs_finished(self, output_folder):
+        """Report successful capture-only output generation."""
 
         self.set_processing_indicator(False)
-        self.cancel_preview_loop()
-        self.cancel_thermal_preview_loop()
-
-        if self.camera.is_tracking:
-            self.camera.stop_camera()
-
-        if self.thermal_camera.is_tracking:
-            self.thermal_camera.stop_camera()
-
-        self.update_tracking_button()
         self.refresh_info_panel()
 
-        result_message = f"Predicted Battery Percentage = {prediction.label}"
         self.update_status(
-            f"Status: {result_message}",
+            f"Status: Capture outputs saved in {output_folder}",
             "● IDLE"
         )
         messagebox.showinfo(
-            "Battery Percentage Prediction",
-            self.format_prediction_message(prediction, thermal_images_folder)
+            "Capture Outputs Saved",
+            "Generated outputs:\n"
+            "• Camera_Frames\n"
+            "• Thermal_Frames\n"
+            "• Voice.wav\n"
+            "• Camera_Video.mp4\n"
+            "• Thermal_Video.mp4\n"
+            "• Thermal_Range_Video.mp4\n\n"
+            f"Saved in: {output_folder}"
         )
-
-    def format_prediction_message(self, prediction, thermal_images_folder=None):
-        """
-        Build the result popup text with every class confidence.
-        """
-
-        lines = [
-            f"Predicted Battery Percentage = {prediction.label}",
-            "",
-            "Prediction Confidence:",
-        ]
-
-        for label, confidence in prediction.class_confidences:
-            lines.append(
-                f"{label} Battery ({self.format_confidence(confidence)} Confidence)"
-            )
-
-        if thermal_images_folder is not None:
-            lines.extend(
-                [
-                    "",
-                    f"Thermal images saved in: {thermal_images_folder}",
-                    "Thermal images were not used for this prediction.",
-                ]
-            )
-
-        return "\n".join(lines)
-
-    def format_confidence(self, confidence):
-        """
-        Format a model probability without rounding tiny values to 0.0%.
-        """
-
-        percent = confidence * 100
-
-        if 0 < percent < 0.01:
-            return "<0.01%"
-
-        return f"{percent:.2f}%"
-
-    def cleanup_video_processing_work_folder(self):
-        """
-        Delete temporary video/voice-processing work files from Captures.
-        """
-
-        work_folders = [
-            os.path.join(self.base_dir, "Captures", "_Video_Processing_Work"),
-            os.path.join(self.base_dir, "Captures", "_Voice_Processing_Work"),
-        ]
-
-        for work_folder in work_folders:
-            if os.path.isdir(work_folder):
-                shutil.rmtree(work_folder)
-                print(f"[INFO] Deleted processing work folder: {work_folder}")
 
     def get_pulse_protocol_command(self, mode):
         """
@@ -1356,7 +1476,6 @@ class CoBasV1App:
 
         pulse_folder = os.path.join(
             self.base_dir,
-            "Inference",
             "Pulse Generation"
         )
         pulse_script = os.path.join(
@@ -1377,7 +1496,6 @@ class CoBasV1App:
 
         return os.path.join(
             self.base_dir,
-            "Inference",
             "Pulse Generation",
             "Inputs",
             "5_15sPause_BeaconProtocol.wav"
@@ -1576,7 +1694,7 @@ class CoBasV1App:
 
         self.cancel_preview_loop()
 
-        saved_video_path, saved_thermal_video_path, saved_voice_path = self.stop_active_recordings()
+        saved_video_path, saved_thermal_video_path, saved_voice_path = self.finalize_capture_session()
 
         self.camera.stop_camera()
         self.thermal_camera.stop_camera()
@@ -1613,10 +1731,6 @@ class CoBasV1App:
                 status_message = f"{status_message}; voice saved to {saved_voice_path}"
 
             self.update_status(status_message, "● IDLE")
-            self.process_last_video_with_pipeline(
-                saved_video_path,
-                saved_thermal_video_path
-            )
         else:
             self.update_status(
                 "Status: Timed recording complete",
@@ -1774,6 +1888,7 @@ class CoBasV1App:
         start_token = self.tracking_start_token
         self.current_video_path = None
         self.current_thermal_video_path = None
+        self.current_voice_path = None
 
         self.start_thermal_camera_feed()
 
@@ -1850,17 +1965,8 @@ class CoBasV1App:
             # Change Start Tracking button into Stop Tracking.
             self.update_tracking_button()
 
-            # Automatically start synchronized regular and thermal recordings.
-            recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.current_video_path = self.camera.start_recording(
-                timestamp=recording_timestamp
-            )
-            self.current_thermal_video_path = None
-
-            if self.current_video_path:
-                self.current_thermal_video_path = self.thermal_camera.start_recording(
-                    timestamp=recording_timestamp
-                )
+            # Automatically start the single synchronized recording pipeline.
+            self.start_active_recordings()
 
             if self.current_video_path:
                 self.record_button.config(
@@ -1928,8 +2034,7 @@ class CoBasV1App:
         Stop camera preview safely.
 
         If video recording is active, stop it first.
-        Then process the last saved video with the segmentation, separation,
-        and frame-slicing pipeline.
+        Then generate the capture-only camera, thermal, and voice outputs.
         """
 
         self.is_preparing_tracking = False
@@ -1944,7 +2049,7 @@ class CoBasV1App:
         # Stop pulse protocol generation alongside recording/tracking.
         self.stop_pulse_protocol_generation()
 
-        saved_video_path, saved_thermal_video_path, saved_voice_path = self.stop_active_recordings()
+        saved_video_path, saved_thermal_video_path, saved_voice_path = self.finalize_capture_session()
 
         # Release camera through backend.
         self.camera.stop_camera()
@@ -1983,24 +2088,6 @@ class CoBasV1App:
 
         # Change Stop Tracking button back into Start Tracking.
         self.update_tracking_button()
-
-        # --------------------------------------------------
-        # Process the last available recorded video.
-        # --------------------------------------------------
-        if saved_video_path:
-            self.process_last_video_with_pipeline(
-                saved_video_path,
-                saved_thermal_video_path
-            )
-
-        elif self.current_video_path and os.path.exists(self.current_video_path):
-            self.process_last_video_with_pipeline(
-                self.current_video_path,
-                self.current_thermal_video_path
-            )
-
-        else:
-            print("[INFO] Tracking stopped, but no saved video was found to process.")
 
     def restart_camera(self):
         """
@@ -2242,16 +2329,7 @@ class CoBasV1App:
 
         # Start recording.
         if not self.camera.is_recording:
-            recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.current_video_path = self.camera.start_recording(
-                timestamp=recording_timestamp
-            )
-            self.current_thermal_video_path = None
-
-            if self.current_video_path:
-                self.current_thermal_video_path = self.thermal_camera.start_recording(
-                    timestamp=recording_timestamp
-                )
+            self.start_active_recordings()
 
             if self.current_video_path:
                 self.record_button.config(
@@ -2277,7 +2355,7 @@ class CoBasV1App:
 
         # Stop recording.
         else:
-            saved_video_path, saved_thermal_video_path, saved_voice_path = self.stop_active_recordings()
+            saved_video_path, saved_thermal_video_path, saved_voice_path = self.finalize_capture_session()
 
             self.record_button.config(
                 text="Capture Video",

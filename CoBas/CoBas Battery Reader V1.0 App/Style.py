@@ -359,4 +359,23 @@ def apply_styles(root):
         padding=3
     )
 
+    style.configure(
+        "ThermalScale.TRadiobutton",
+        background=COLORS["panel_bg"],
+        foreground=COLORS["panel_text"],
+        font=FONTS["panel_text"],
+        padding=(1, 0)
+    )
+    style.map(
+        "ThermalScale.TRadiobutton",
+        background=[
+            ("active", COLORS["panel_bg"]),
+            ("disabled", COLORS["panel_bg"])
+        ],
+        foreground=[
+            ("active", COLORS["text"]),
+            ("disabled", COLORS["muted_text"])
+        ]
+    )
+
     return style
