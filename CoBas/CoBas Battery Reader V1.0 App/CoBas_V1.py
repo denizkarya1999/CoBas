@@ -1271,9 +1271,11 @@ class CoBasV1App:
         thermal_video_path,
         scale_video_path,
         voice_path,
+        temperature_log_path,
+        temperature_average_path,
         output_folder
     ):
-        """Generate the six requested capture artifacts without an external script."""
+        """Generate all requested capture artifacts without an external script."""
         if os.path.isdir(output_folder):
             shutil.rmtree(output_folder)
 
@@ -1347,16 +1349,24 @@ class CoBasV1App:
                 scale_video_path,
                 os.path.join(output_folder, "Thermal_Range_Video.mp4")
             ),
+            (
+                temperature_log_path,
+                os.path.join(output_folder, "Thermal_Temperature_Log.txt")
+            ),
+            (
+                temperature_average_path,
+                os.path.join(output_folder, "Thermal_Temperature_Averages.txt")
+            ),
         )
         for source_path, output_path in capture_moves:
             self.move_capture_output(source_path, output_path)
 
     def export_capture_session(self, video_path, thermal_video_path=None):
         """
-        Export the six capture artifacts from the latest recording.
+        Export the capture artifacts from the latest recording.
 
         Outputs: camera frames, thermal frames, one voice, camera video,
-        thermal video, and the separately recorded thermal-range video.
+        thermal video, thermal-range video, and two temperature text files.
         """
 
         if video_path is None:
@@ -1375,11 +1385,15 @@ class CoBasV1App:
             thermal_video_path = self.current_thermal_video_path
 
         scale_video_path = self.thermal_camera.scale_video_path
+        temperature_log_path = self.thermal_camera.temperature_log_path
+        temperature_average_path = self.thermal_camera.temperature_average_path
         voice_path = self.current_voice_path
 
         required_outputs = (
             (thermal_video_path, "thermal video"),
             (scale_video_path, "thermal-range video"),
+            (temperature_log_path, "thermal temperature log"),
+            (temperature_average_path, "thermal temperature averages"),
         )
         for required_path, label in required_outputs:
             if not required_path or not os.path.exists(required_path):
@@ -1417,6 +1431,8 @@ class CoBasV1App:
                     thermal_video_path,
                     scale_video_path,
                     voice_path,
+                    temperature_log_path,
+                    temperature_average_path,
                     output_folder
                 )
                 print(f"[INFO] Capture outputs saved in: {output_folder}")
@@ -1465,7 +1481,9 @@ class CoBasV1App:
             "• Voice.wav\n"
             "• Camera_Video.mp4\n"
             "• Thermal_Video.mp4\n"
-            "• Thermal_Range_Video.mp4\n\n"
+            "• Thermal_Range_Video.mp4\n"
+            "• Thermal_Temperature_Log.txt\n"
+            "• Thermal_Temperature_Averages.txt\n\n"
             f"Saved in: {output_folder}"
         )
 

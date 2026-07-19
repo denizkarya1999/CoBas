@@ -302,6 +302,15 @@ class ThermalCamera:
         self.temp_video_path = None
         self.final_video_path = None
         self.scale_video_path = None
+        self.temperature_log_path = None
+        self.temperature_average_path = None
+        self.temperature_log_file = None
+        self.temperature_log_start_time = None
+        self.temperature_recording_started_at = None
+        self.temperature_sample_count = 0
+        self.temperature_minimum_total = 0.0
+        self.temperature_maximum_total = 0.0
+        self.temperature_logging_error = None
         self.record_width = RECORD_WIDTH
         self.record_height = RECORD_HEIGHT
         self.record_fps = RECORD_FPS
@@ -419,6 +428,114 @@ class ThermalCamera:
 
         return None
 
+    def _start_temperature_logging(self):
+        """Create the live per-frame thermal min/max log for a recording."""
+        self.temperature_sample_count = 0
+        self.temperature_minimum_total = 0.0
+        self.temperature_maximum_total = 0.0
+        self.temperature_logging_error = None
+        self.temperature_log_start_time = time.monotonic()
+        self.temperature_recording_started_at = datetime.now()
+
+        try:
+            self.temperature_log_file = open(
+                self.temperature_log_path,
+                "w",
+                encoding="utf-8",
+                buffering=1,
+            )
+            self.temperature_log_file.write(
+                "Thermal Temperature Min/Max Log\n"
+                f"Recording started: "
+                f"{self.temperature_recording_started_at.isoformat(timespec='milliseconds')}\n"
+                "Units: degrees Celsius\n\n"
+                "Sample\tElapsed Seconds\tMinimum Temperature\tMaximum Temperature\n"
+            )
+        except Exception:
+            if self.temperature_log_file is not None:
+                self.temperature_log_file.close()
+                self.temperature_log_file = None
+            raise
+
+    def _log_frame_temperatures(self, frame):
+        """Append one recorded frame's extrema and update running averages."""
+        if self.temperature_log_file is None:
+            return
+
+        minimum_raw, _, maximum_raw = backend_logic.frame_statistics(frame)
+        minimum_celsius = raw_to_celsius(minimum_raw)
+        maximum_celsius = raw_to_celsius(maximum_raw)
+        sample_number = self.temperature_sample_count + 1
+        elapsed_seconds = max(
+            0.0,
+            time.monotonic() - self.temperature_log_start_time,
+        )
+
+        self.temperature_log_file.write(
+            f"{sample_number}\t{elapsed_seconds:.3f}\t"
+            f"{minimum_celsius:.2f}\t{maximum_celsius:.2f}\n"
+        )
+        self.temperature_sample_count = sample_number
+        self.temperature_minimum_total += minimum_celsius
+        self.temperature_maximum_total += maximum_celsius
+
+    def _finish_temperature_logging(self):
+        """Close the live log and write average per-frame min/max values."""
+        if self.temperature_log_file is not None:
+            try:
+                self.temperature_log_file.close()
+            except Exception as exc:
+                self.temperature_logging_error = (
+                    self.temperature_logging_error or exc
+                )
+            finally:
+                self.temperature_log_file = None
+
+        if not self.temperature_average_path:
+            return
+
+        stopped_at = datetime.now()
+        with open(self.temperature_average_path, "w", encoding="utf-8") as file:
+            file.write("Average Thermal Minimum/Maximum Temperatures\n")
+            if self.temperature_recording_started_at is not None:
+                file.write(
+                    "Recording started: "
+                    f"{self.temperature_recording_started_at.isoformat(timespec='milliseconds')}\n"
+                )
+            file.write(
+                f"Recording stopped: {stopped_at.isoformat(timespec='milliseconds')}\n"
+                "Units: degrees Celsius\n"
+                f"Samples: {self.temperature_sample_count}\n\n"
+            )
+
+            if self.temperature_sample_count:
+                average_minimum = (
+                    self.temperature_minimum_total
+                    / self.temperature_sample_count
+                )
+                average_maximum = (
+                    self.temperature_maximum_total
+                    / self.temperature_sample_count
+                )
+                file.write(
+                    f"Average minimum temperature: {average_minimum:.2f}\n"
+                    f"Average maximum temperature: {average_maximum:.2f}\n"
+                )
+            else:
+                file.write(
+                    "Average minimum temperature: unavailable\n"
+                    "Average maximum temperature: unavailable\n"
+                )
+
+            if self.temperature_logging_error is not None:
+                file.write(
+                    "\nLogging warning: "
+                    f"{self.temperature_logging_error}\n"
+                )
+
+        self.temperature_log_start_time = None
+        self.temperature_recording_started_at = None
+
     def start_recording(self, timestamp=None):
         if self.is_recording:
             return self.final_video_path
@@ -442,6 +559,14 @@ class ThermalCamera:
         self.scale_video_path = os.path.join(
             self.output_dir,
             f"CoBas_V1_Thermal_Scale_Video_{timestamp}.mp4"
+        )
+        self.temperature_log_path = os.path.join(
+            self.output_dir,
+            f"CoBas_V1_Thermal_Temperature_Log_{timestamp}.txt"
+        )
+        self.temperature_average_path = os.path.join(
+            self.output_dir,
+            f"CoBas_V1_Thermal_Temperature_Averages_{timestamp}.txt"
         )
 
         try:
@@ -472,6 +597,23 @@ class ThermalCamera:
             self.recorder = None
             self.scale_recorder = None
             print(f"[WARNING] Thermal scale video could not start: {exc}")
+            return None
+
+        try:
+            self._start_temperature_logging()
+        except Exception as exc:
+            try:
+                self.scale_recorder.close()
+            except Exception:
+                pass
+            try:
+                self.recorder.close()
+            except Exception:
+                pass
+
+            self.recorder = None
+            self.scale_recorder = None
+            print(f"[WARNING] Thermal temperature log could not start: {exc}")
             return None
 
         self.is_recording = True
@@ -523,6 +665,16 @@ class ThermalCamera:
                     )
                     break
 
+                try:
+                    self._log_frame_temperatures(frame)
+                except Exception as exc:
+                    self.temperature_logging_error = exc
+                    print(
+                        "[WARNING] Thermal temperature logging failed: "
+                        f"{exc}"
+                    )
+                    break
+
             next_frame_time += frame_interval
             sleep_seconds = max(0.0, next_frame_time - time.monotonic())
             time.sleep(sleep_seconds)
@@ -547,6 +699,11 @@ class ThermalCamera:
         self.scale_recorder = None
         self.record_start_time = None
         self.record_renderer = None
+
+        try:
+            self._finish_temperature_logging()
+        except Exception as exc:
+            print(f"[WARNING] Thermal temperature summary failed: {exc}")
 
         recording_error = None
         if recorder is not None:
@@ -587,6 +744,24 @@ class ThermalCamera:
             and os.path.exists(self.scale_video_path)
         ):
             print(f"[INFO] Thermal scale video saved: {self.scale_video_path}")
+
+        if (
+            self.temperature_log_path
+            and os.path.exists(self.temperature_log_path)
+        ):
+            print(
+                "[INFO] Thermal temperature log saved: "
+                f"{self.temperature_log_path}"
+            )
+
+        if (
+            self.temperature_average_path
+            and os.path.exists(self.temperature_average_path)
+        ):
+            print(
+                "[INFO] Thermal temperature averages saved: "
+                f"{self.temperature_average_path}"
+            )
 
         if audio_path and os.path.exists(audio_path):
             return self._merge_video_audio(
