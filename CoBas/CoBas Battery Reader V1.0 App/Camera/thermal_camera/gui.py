@@ -1,9 +1,10 @@
-import ctypes
-import math
+"""CoBas application bridge for thermal-camera logic and rendered images."""
+
 import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -11,37 +12,42 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from . import thermal_camera_logic as backend_logic
 
-APP_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = APP_ROOT.parent
-LIB = REPO_ROOT / "Hardware" / "mlx90642-library"
-SHARED_LIB = Path(os.environ.get("MLX90642_SHARED_LIB", "/tmp/libmlx90642.so"))
 
-SENSOR_WIDTH = 32
-SENSOR_HEIGHT = 24
-SENSOR_PIXELS = SENSOR_WIDTH * SENSOR_HEIGHT
-RECORD_WIDTH = int(os.environ.get("MLX90642_RECORD_WIDTH", "640"))
-RECORD_HEIGHT = int(os.environ.get("MLX90642_RECORD_HEIGHT", "480"))
-RECORD_FPS = int(os.environ.get("MLX90642_RECORD_FPS", "8"))
-SCALE_RECORD_WIDTH = int(os.environ.get("MLX90642_SCALE_RECORD_WIDTH", "240"))
-SCALE_RECORD_HEIGHT = int(os.environ.get("MLX90642_SCALE_RECORD_HEIGHT", "480"))
-READ_FAILURE_LIMIT = int(os.environ.get("MLX90642_READ_FAILURE_LIMIT", "5"))
-WAIT_FAILURE_LIMIT = int(os.environ.get("MLX90642_WAIT_FAILURE_LIMIT", "30"))
-WAIT_FAILURE_BACKOFF_SECONDS = float(
-    os.environ.get("MLX90642_WAIT_FAILURE_BACKOFF_SECONDS", "0.05")
+# The copied grayscale backend imports thermal_camera_logic by its original
+# top-level name. Point that name at this package's copied backend before the
+# grayscale module is loaded, so both modes share the same local implementation.
+sys.modules["thermal_camera_logic"] = backend_logic
+
+from .grayscale_camera_logic import (  # noqa: E402
+    GrayscaleThermalRenderer as BackendGrayscaleThermalRenderer,
 )
 
-PALETTE = [
-    (0, 0, 48),
-    (0, 0, 130),
-    (0, 74, 210),
-    (0, 190, 255),
-    (0, 245, 150),
-    (252, 245, 60),
-    (255, 156, 36),
-    (235, 48, 28),
-    (255, 255, 255),
-]
+
+APP_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = APP_ROOT.parent
+HARDWARE_ROOT = REPO_ROOT / "Hardware"
+
+# The copied Hardware module expects the vendor C source beside itself. Keep
+# its code byte-identical while directing those runtime paths to the existing
+# repository copy of the MLX90642 library.
+backend_logic.ROOT = HARDWARE_ROOT
+backend_logic.LIB = HARDWARE_ROOT / "mlx90642-library"
+
+CameraWorker = backend_logic.CameraWorker
+FfmpegRecorder = backend_logic.FfmpegRecorder
+RECORD_FPS = backend_logic.RECORD_FPS
+RECORD_HEIGHT = backend_logic.RECORD_HEIGHT
+RECORD_WIDTH = backend_logic.RECORD_WIDTH
+SENSOR_HEIGHT = backend_logic.SENSOR_HEIGHT
+SENSOR_WIDTH = backend_logic.SENSOR_WIDTH
+BackendColoredThermalRenderer = backend_logic.ThermalRenderer
+raw_to_celsius = backend_logic.raw_to_celsius
+
+
+SCALE_RECORD_WIDTH = int(os.environ.get("MLX90642_SCALE_RECORD_WIDTH", "240"))
+SCALE_RECORD_HEIGHT = int(os.environ.get("MLX90642_SCALE_RECORD_HEIGHT", "480"))
 
 PREVIEW_BACKGROUND = (2, 6, 23)
 LEGEND_BACKGROUND = (17, 21, 29)
@@ -54,262 +60,16 @@ PREVIEW_MARGIN = 6
 MIN_LEGEND_HEIGHT = 120
 
 
-class DriverError(RuntimeError):
-    pass
-
-
-class FrameWaitError(DriverError):
-    def __init__(self, status):
-        self.status = status
-        super().__init__(f"MLX90642_IsReadWindowOpen failed: {status}")
-
-
-def build_shared_library(output=SHARED_LIB):
-    if not LIB.exists():
-        raise DriverError(f"MLX90642 library folder not found: {LIB}")
-
-    sources = [
-        LIB / "MLX90642_python.c",
-        LIB / "src" / "MLX90642.c",
-        LIB / "src" / "MLX90642_linux_i2c.c",
-    ]
-    command = [
-        "gcc",
-        "-shared",
-        "-fPIC",
-        "-Wall",
-        "-Wextra",
-        "-O2",
-        "-I",
-        LIB / "inc",
-        *sources,
-        "-o",
-        output,
-    ]
-
-    result = subprocess.run(
-        [str(part) for part in command],
-        cwd=REPO_ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout).strip()
-        raise DriverError(f"driver build failed:\n{details}")
-
-    return output
-
-
-def signed_word(value):
-    return value - 65536 if value >= 32768 else value
-
-
-def raw_to_celsius(value):
-    return value / 50.0
-
-
-class MLX90642Camera:
-    def __init__(self, library_path):
-        self._library = ctypes.CDLL(str(library_path))
-        self._frame_type = ctypes.c_uint16 * SENSOR_PIXELS
-
-        self._library.MLX90642_PythonInit.argtypes = []
-        self._library.MLX90642_PythonInit.restype = ctypes.c_int
-        self._library.MLX90642_PythonReadFrame.argtypes = [
-            ctypes.POINTER(ctypes.c_uint16)
-        ]
-        self._library.MLX90642_PythonReadFrame.restype = ctypes.c_int
-        self._library.MLX90642_PythonWaitForNextFrame.argtypes = [
-            ctypes.c_uint16
-        ]
-        self._library.MLX90642_PythonWaitForNextFrame.restype = ctypes.c_int
-
-    def initialize(self):
-        status = self._library.MLX90642_PythonInit()
-        if status < 0:
-            raise DriverError(f"MLX90642_Init failed: {status}")
-
-    def read_frame(self):
-        frame = self._frame_type()
-        status = self._library.MLX90642_PythonReadFrame(frame)
-        if status < 0:
-            raise DriverError(f"MLX90642_GetImage failed: {status}")
-
-        return [signed_word(frame[index]) for index in range(SENSOR_PIXELS)]
-
-    def wait_for_next_frame(self):
-        status = self._library.MLX90642_PythonWaitForNextFrame(1000)
-        if status < 0:
-            raise FrameWaitError(status)
-
-
-class MockThermalCamera:
-    def __init__(self):
-        self._tick = 0
-
-    def initialize(self):
-        return None
-
-    def read_frame(self):
-        self._tick += 1
-        frame = []
-        hot_x = 16 + math.sin(self._tick / 9.0) * 8
-        hot_y = 12 + math.cos(self._tick / 13.0) * 6
-
-        for y in range(SENSOR_HEIGHT):
-            for x in range(SENSOR_WIDTH):
-                base = 1180 + y * 7 + x * 2
-                dx = x - hot_x
-                dy = y - hot_y
-                hot = 620 * math.exp(-(dx * dx + dy * dy) / 36.0)
-                wave = 55 * math.sin((x + self._tick) / 4.0)
-                frame.append(int(base + hot + wave))
-
-        return frame
-
-    def wait_for_next_frame(self):
-        time.sleep(1.0 / RECORD_FPS)
-
-
-class CameraWorker(threading.Thread):
-    def __init__(self, events, stop_event, mock=False):
-        super().__init__(daemon=True)
-        self.events = events
-        self.stop_event = stop_event
-        self.mock = mock
-
-    def _put_event(self, event):
-        try:
-            self.events.put_nowait(event)
-            return
-        except queue.Full:
-            pass
-
-        if event[0] == "frame":
-            try:
-                self.events.get_nowait()
-            except queue.Empty:
-                pass
-
-        try:
-            self.events.put_nowait(event)
-        except queue.Full:
-            pass
-
-    def run(self):
-        try:
-            if self.mock:
-                camera = MockThermalCamera()
-            else:
-                library_path = build_shared_library()
-                camera = MLX90642Camera(library_path)
-
-            self._put_event(("status", "Initializing thermal camera"))
-            camera.initialize()
-            self._put_event(("status", "Thermal live"))
-            read_failures = 0
-            wait_failures = 0
-
-            while not self.stop_event.is_set():
-                try:
-                    frame = camera.read_frame()
-                    read_failures = 0
-                except DriverError as exc:
-                    read_failures += 1
-                    if read_failures >= READ_FAILURE_LIMIT:
-                        raise
-
-                    self._put_event((
-                        "status",
-                        f"Thermal read retry {read_failures}/{READ_FAILURE_LIMIT}"
-                    ))
-                    time.sleep(WAIT_FAILURE_BACKOFF_SECONDS)
-                    continue
-
-                self._put_event(("frame", frame, time.monotonic()))
-
-                try:
-                    camera.wait_for_next_frame()
-                    wait_failures = 0
-                except FrameWaitError as exc:
-                    wait_failures += 1
-
-                    if wait_failures >= WAIT_FAILURE_LIMIT:
-                        raise
-
-                    self._put_event((
-                        "status",
-                        f"Thermal wait retry {wait_failures}/{WAIT_FAILURE_LIMIT}"
-                    ))
-                    time.sleep(WAIT_FAILURE_BACKOFF_SECONDS)
-        except Exception as exc:
-            self._put_event(("error", str(exc)))
-
-
-class ThermalRenderer:
-    def __init__(self):
-        self._fonts = {}
-
-    def scale_color(self, normalized):
-        """Return the RGB color at one normalized point on the thermal scale."""
-        return self._color(normalized, 0.0, 1.0, {})
+class _PreviewRendererMixin:
+    """Preserve the existing CoBas PIL preview and temperature legend."""
 
     def temperature_legend_title(self):
-        """Describe the endpoints of this renderer's palette."""
         return "ESTIMATED °C RANGE\nWHITE HOT · BLUE COLD"
 
-    def _color(self, value, min_value, max_value, color_cache):
-        rounded = int(value)
-        cached = color_cache.get(rounded)
-        if cached is not None:
-            return cached
-
-        if max_value <= min_value:
-            color = PALETTE[len(PALETTE) // 2]
-            color_cache[rounded] = color
-            return color
-
-        t = (value - min_value) / (max_value - min_value)
-        t = max(0.0, min(1.0, t))
-        position = t * (len(PALETTE) - 1)
-        index = int(position)
-        next_index = min(index + 1, len(PALETTE) - 1)
-        weight = position - index
-        left = PALETTE[index]
-        right = PALETTE[next_index]
-        color = (
-            int(left[0] + (right[0] - left[0]) * weight),
-            int(left[1] + (right[1] - left[1]) * weight),
-            int(left[2] + (right[2] - left[2]) * weight),
-        )
-        color_cache[rounded] = color
-        return color
-
-    def render_sensor_image(self, frame):
-        min_value = min(frame)
-        max_value = max(frame)
-        color_cache = {}
-        output = bytearray(SENSOR_PIXELS * 3)
-        offset = 0
-
-        for value in frame:
-            red, green, blue = self._color(value, min_value, max_value, color_cache)
-            output[offset] = red
-            output[offset + 1] = green
-            output[offset + 2] = blue
-            offset += 3
-
-        return Image.frombytes("RGB", (SENSOR_WIDTH, SENSOR_HEIGHT), bytes(output))
-
-    def render_image(self, frame, width, height):
-        width = max(1, int(width))
-        height = max(1, int(height))
-        image = self.render_sensor_image(frame)
-        return image.resize((width, height), Image.Resampling.BICUBIC)
+    def _display_range(self, frame):
+        return min(frame), max(frame)
 
     def _font(self, size, bold=False):
-        """Load and cache a portable legend font."""
         key = (size, bold)
         if key in self._fonts:
             return self._fonts[key]
@@ -325,7 +85,6 @@ class ThermalRenderer:
 
     @staticmethod
     def _fit_thermal_image(available_width, available_height):
-        """Fit the 4:3 sensor view without stretching its proportions."""
         target_ratio = SENSOR_WIDTH / SENSOR_HEIGHT
         if available_width / available_height > target_ratio:
             image_height = available_height
@@ -337,7 +96,6 @@ class ThermalRenderer:
         return max(1, int(image_width)), max(1, int(image_height))
 
     def _draw_temperature_legend(self, image, frame, bounds):
-        """Draw this renderer's live Celsius scale inside the given bounds."""
         panel_left, panel_top, panel_right, panel_bottom = bounds
         panel_width = panel_right - panel_left + 1
         panel_height = panel_bottom - panel_top + 1
@@ -380,8 +138,7 @@ class ThermalRenderer:
             outline=LEGEND_FOREGROUND,
         )
 
-        min_value = min(frame)
-        max_value = max(frame)
+        min_value, max_value = self._display_range(frame)
         tick_length = 8 if expanded else 5
         text_gap = 7 if expanded else 3
         for index in range(LEGEND_TICK_COUNT):
@@ -406,8 +163,21 @@ class ThermalRenderer:
                 font=tick_font,
             )
 
+    def render_sensor_image(self, frame):
+        rgb = self.render_rgb(frame, SENSOR_WIDTH, SENSOR_HEIGHT)
+        return Image.frombytes("RGB", (SENSOR_WIDTH, SENSOR_HEIGHT), rgb)
+
+    def render_image(self, frame, width, height):
+        width = max(1, int(width))
+        height = max(1, int(height))
+        rgb = self.render_rgb(frame, width, height)
+        return Image.frombytes("RGB", (width, height), rgb)
+
+    def render_preview_frame(self, frame, width, height):
+        image = self.render_sensor_image(frame)
+        return image.resize((width, height), Image.Resampling.NEAREST)
+
     def render_scale_image(self, frame, width, height):
-        """Render the dynamic temperature scale as its own video frame."""
         width = max(1, int(width))
         height = max(1, int(height))
         image = Image.new("RGB", (width, height), PREVIEW_BACKGROUND)
@@ -420,7 +190,6 @@ class ThermalRenderer:
         return image
 
     def render_preview_image(self, frame, width, height):
-        """Render a letterboxed live view with a dynamic Celsius scale."""
         width = max(1, int(width))
         height = max(1, int(height))
         preview = Image.new("RGB", (width, height), PREVIEW_BACKGROUND)
@@ -439,23 +208,21 @@ class ThermalRenderer:
                 image_width_available,
                 available_height,
             )
-
-            # A narrow view can technically fit both columns but leave too
-            # little height for readable ticks; use image-only mode there.
             show_legend = image_height >= MIN_LEGEND_HEIGHT
 
         if show_legend:
             group_width = image_width + LEGEND_GAP + LEGEND_PANEL_WIDTH
             image_left = (width - group_width) // 2
         else:
-            image_width, image_height = self._fit_thermal_image(
-                width,
-                height,
-            )
+            image_width, image_height = self._fit_thermal_image(width, height)
             image_left = (width - image_width) // 2
 
         image_top = (height - image_height) // 2
-        thermal_image = self.render_image(frame, image_width, image_height)
+        thermal_image = self.render_preview_frame(
+            frame,
+            image_width,
+            image_height,
+        )
         preview.paste(thermal_image, (image_left, image_top))
 
         if not show_legend:
@@ -470,161 +237,52 @@ class ThermalRenderer:
             frame,
             (legend_left, legend_top, legend_right, legend_bottom),
         )
-
         return preview
 
 
-class GrayscaleThermalRenderer(ThermalRenderer):
-    """Map the current frame's coldest value to black and hottest to white."""
+class ColoredThermalRenderer(
+    BackendColoredThermalRenderer,
+    _PreviewRendererMixin,
+):
+    """Copied Hardware color backend with the unchanged CoBas presentation."""
+
+    def __init__(self):
+        BackendColoredThermalRenderer.__init__(self)
+        self._fonts = {}
+
+
+class GrayscaleThermalRenderer(
+    BackendGrayscaleThermalRenderer,
+    _PreviewRendererMixin,
+):
+    """Copied Hardware grayscale backend with unchanged CoBas presentation."""
+
+    def __init__(self, *args, **kwargs):
+        BackendGrayscaleThermalRenderer.__init__(self, *args, **kwargs)
+        self._fonts = {}
 
     def temperature_legend_title(self):
         return "ESTIMATED °C RANGE\nWHITE HOT · BLACK COLD"
 
-    def _color(self, value, min_value, max_value, color_cache):
-        rounded = int(value)
-        cached = color_cache.get(rounded)
-        if cached is not None:
-            return cached
-
-        if max_value <= min_value:
-            intensity = 127
-        else:
-            normalized = (value - min_value) / (max_value - min_value)
-            normalized = max(0.0, min(1.0, normalized))
-            intensity = int(normalized * 255)
-
-        color = (intensity, intensity, intensity)
-        color_cache[rounded] = color
-        return color
-
-
-class FfmpegRecorder:
-    def __init__(self, path, width, height, fps):
-        ffmpeg = shutil.which("ffmpeg")
-        if ffmpeg is None:
-            raise RuntimeError("ffmpeg is not installed")
-
-        self.path = Path(path)
-        self.width = width
-        self.height = height
-        self.fps = fps
-        self.frame_bytes = width * height * 3
-        self.frames_written = 0
-        self.frames_dropped = 0
-        self.error = None
-        self._queue = queue.Queue(maxsize=max(2, fps * 2))
-        self._closed = False
-        self._process = subprocess.Popen(
-            [
-                ffmpeg,
-                "-y",
-                "-loglevel",
-                "error",
-                "-f",
-                "rawvideo",
-                "-pixel_format",
-                "rgb24",
-                "-video_size",
-                f"{width}x{height}",
-                "-framerate",
-                str(fps),
-                "-i",
-                "pipe:0",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-pix_fmt",
-                "yuv420p",
-                str(self.path),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        self._thread = threading.Thread(target=self._write_loop, daemon=True)
-        self._thread.start()
-
-    def _write_loop(self):
-        assert self._process.stdin is not None
-
-        while True:
-            item = self._queue.get()
-            if item is None:
-                break
-
-            try:
-                self._process.stdin.write(item)
-                self.frames_written += 1
-            except Exception as exc:
-                self.error = exc
-                break
-
-        try:
-            self._process.stdin.close()
-        except Exception:
-            pass
-
-    def write_frame(self, rgb):
-        if self._closed:
-            return False
-
-        if len(rgb) != self.frame_bytes:
-            self.frames_dropped += 1
-            self.error = ValueError(
-                "RGB frame size mismatch: "
-                f"expected {self.frame_bytes} bytes for "
-                f"{self.width}x{self.height}, received {len(rgb)}"
-            )
-            return False
-
-        try:
-            self._queue.put_nowait(rgb)
-            return True
-        except queue.Full:
-            self.frames_dropped += 1
-            return False
-
-    def close(self):
-        if self._closed:
-            return
-
-        self._closed = True
-        while True:
-            try:
-                self._queue.put(None, timeout=0.1)
-                break
-            except queue.Full:
-                self.frames_dropped += 1
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
-
-        self._thread.join(timeout=10)
-        return_code = self._process.wait(timeout=10)
-        if return_code != 0:
-            stderr = b""
-            if self._process.stderr is not None:
-                stderr = self._process.stderr.read()
-            message = stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(message or f"ffmpeg failed with exit code {return_code}")
-
-        if self.error is not None:
-            raise RuntimeError(str(self.error))
+    def _display_range(self, frame):
+        values = self._validate_frame(frame)
+        return self._get_display_range(values)
 
 
 class ThermalCamera:
+    """Bridge thermal acquisition and rendering into the CoBas application."""
+
     def __init__(self, output_dir="Captures", mock=False):
         self.output_dir = output_dir
         self.mock = mock or os.environ.get("COBAS_THERMAL_MOCK") == "1"
-        self.rgb_renderer = ThermalRenderer()
+        self.rgb_renderer = ColoredThermalRenderer()
         self.grayscale_renderer = GrayscaleThermalRenderer()
         self.display_mode = "rgb"
         self.renderer = self.rgb_renderer
 
-        self.events = queue.Queue(maxsize=8)
+        # Hardware's worker uses blocking queue.put(), matching its standalone
+        # GUI, so this bridge intentionally supplies an unbounded event queue.
+        self.events = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = None
         self.is_tracking = False
@@ -653,9 +311,9 @@ class ThermalCamera:
         os.makedirs(self.output_dir, exist_ok=True)
 
     def set_display_mode(self, mode):
-        """Select the RGB or greyscale renderer when not recording."""
+        """Select the colored or grayscale renderer when not recording."""
         normalized_mode = str(mode).strip().lower()
-        if normalized_mode == "regular":
+        if normalized_mode in ("regular", "color", "colored", "coloured"):
             normalized_mode = "rgb"
         if normalized_mode == "greyscale":
             normalized_mode = "grayscale"
@@ -680,7 +338,7 @@ class ThermalCamera:
             return True
 
         self.stop_event.clear()
-        self.events = queue.Queue(maxsize=8)
+        self.events = queue.Queue()
         self.error = None
         self.status = "Starting thermal camera"
         self.worker = CameraWorker(self.events, self.stop_event, mock=self.mock)
@@ -742,6 +400,7 @@ class ThermalCamera:
             return list(self.latest_frame)
 
     def get_preview_image(self, width, height):
+        """Return a PIL image ready for the app's Tkinter preview label."""
         frame = self._copy_latest_frame()
         if frame is None:
             return None
@@ -812,10 +471,7 @@ class ThermalCamera:
 
             self.recorder = None
             self.scale_recorder = None
-            print(
-                "[WARNING] Thermal scale video could not start: "
-                f"{exc}"
-            )
+            print(f"[WARNING] Thermal scale video could not start: {exc}")
             return None
 
         self.is_recording = True
@@ -846,7 +502,7 @@ class ThermalCamera:
                     self.record_width,
                     self.record_height
                 )
-                frame_accepted = self.recorder.write_frame(image.tobytes())
+                self.recorder.write_frame(image.tobytes())
                 if self.recorder.error is not None:
                     print(
                         "[WARNING] Thermal recorder rejected a frame: "
@@ -854,19 +510,18 @@ class ThermalCamera:
                     )
                     break
 
-                if frame_accepted:
-                    scale_image = renderer.render_scale_image(
-                        frame,
-                        self.scale_record_width,
-                        self.scale_record_height
+                scale_image = renderer.render_scale_image(
+                    frame,
+                    self.scale_record_width,
+                    self.scale_record_height
+                )
+                self.scale_recorder.write_frame(scale_image.tobytes())
+                if self.scale_recorder.error is not None:
+                    print(
+                        "[WARNING] Thermal scale recorder rejected a frame: "
+                        f"{self.scale_recorder.error}"
                     )
-                    self.scale_recorder.write_frame(scale_image.tobytes())
-                    if self.scale_recorder.error is not None:
-                        print(
-                            "[WARNING] Thermal scale recorder rejected a frame: "
-                            f"{self.scale_recorder.error}"
-                        )
-                        break
+                    break
 
             next_frame_time += frame_interval
             sleep_seconds = max(0.0, next_frame_time - time.monotonic())
@@ -931,10 +586,7 @@ class ThermalCamera:
             and self.scale_video_path
             and os.path.exists(self.scale_video_path)
         ):
-            print(
-                "[INFO] Thermal scale video saved: "
-                f"{self.scale_video_path}"
-            )
+            print(f"[INFO] Thermal scale video saved: {self.scale_video_path}")
 
         if audio_path and os.path.exists(audio_path):
             return self._merge_video_audio(
@@ -943,7 +595,10 @@ class ThermalCamera:
                 self.final_video_path
             )
 
-        print("[WARNING] Thermal video saved without audio because audio was unavailable.")
+        print(
+            "[WARNING] Thermal video saved without audio because audio "
+            "was unavailable."
+        )
         return self.temp_video_path
 
     def _merge_video_audio(self, video_path, audio_path, output_path):
@@ -981,9 +636,8 @@ class ThermalCamera:
                 os.remove(video_path)
 
             return output_path
-
-        except Exception as e:
-            print(f"Thermal FFmpeg merge failed: {e}")
+        except Exception as exc:
+            print(f"Thermal FFmpeg merge failed: {exc}")
             return video_path
 
     def take_photo(self):
@@ -1006,6 +660,7 @@ class ThermalCamera:
 
 
 def extract_thermal_images(thermal_video_path, output_folder):
+    """Extract one thermal image every two seconds from a recorded video."""
     thermal_video_path = Path(thermal_video_path)
     output_folder = Path(output_folder)
 
@@ -1019,7 +674,10 @@ def extract_thermal_images(thermal_video_path, output_folder):
         shutil.rmtree(thermal_images_folder)
 
     thermal_images_folder.mkdir(parents=True, exist_ok=True)
-    output_pattern = thermal_images_folder / f"{thermal_video_path.stem}_thermal_frame%03d.jpg"
+    output_pattern = (
+        thermal_images_folder
+        / f"{thermal_video_path.stem}_thermal_frame%03d.jpg"
+    )
 
     command = [
         "ffmpeg",

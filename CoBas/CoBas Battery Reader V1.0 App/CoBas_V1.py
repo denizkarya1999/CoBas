@@ -12,7 +12,7 @@ import wave
 from datetime import datetime
 
 from Camera.Camera import Camera
-from Camera.ThermalCamera import ThermalCamera
+from Camera.thermal_camera.gui import ThermalCamera
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
 from Settings import SettingsWindow
 from About import show_about_window
