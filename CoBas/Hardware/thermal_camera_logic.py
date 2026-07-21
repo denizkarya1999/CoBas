@@ -10,6 +10,8 @@ import threading
 import time
 from pathlib import Path
 
+from celsius_heat_map import CelsiusHeatMap
+
 
 ROOT = Path(__file__).resolve().parent
 LIB = ROOT / "mlx90642-library"
@@ -28,19 +30,9 @@ RECORD_WIDTH = int(os.environ.get("MLX90642_RECORD_WIDTH", "640"))
 RECORD_HEIGHT = int(os.environ.get("MLX90642_RECORD_HEIGHT", "480"))
 RECORD_FPS = int(os.environ.get("MLX90642_RECORD_FPS", "8"))
 
-# Color stops run from cold/dark to hot/white. ThermalRenderer interpolates
-# between them after normalizing each frame to its own minimum and maximum.
-PALETTE = [
-    (0, 0, 48),
-    (0, 0, 130),
-    (0, 74, 210),
-    (0, 190, 255),
-    (0, 245, 150),
-    (252, 245, 60),
-    (255, 156, 36),
-    (235, 48, 28),
-    (255, 255, 255),
-]
+# Keep the public palette name for existing callers. It now contains one fixed
+# color for every whole temperature from 0 °C through 60 °C.
+PALETTE = list(CelsiusHeatMap.COLORS_BY_CELSIUS.values())
 
 
 class DriverError(RuntimeError):
@@ -95,6 +87,11 @@ def signed_word(value):
 def raw_to_celsius(value):
     # Temperature-format frames use a fixed scale of 50 counts per degree C.
     return value / 50.0
+
+
+def frame_to_celsius(frame):
+    """Convert one complete frame of raw camera values to degrees Celsius."""
+    return [raw_to_celsius(value) for value in frame]
 
 
 def frame_statistics(frame):
@@ -223,15 +220,39 @@ class CameraWorker(threading.Thread):
 
 class ThermalRenderer:
     def __init__(self):
+        self.heat_map = CelsiusHeatMap()
         # Coordinate maps depend only on output dimensions, so cache them across
         # frames and avoid repeating bilinear setup at recording frame rate.
         self._maps = {}
 
     def scale_color(self, normalized):
         """Return the RGB color at one normalized point on this renderer's scale."""
-        # A fresh cache lets renderer variants reuse their normal color mapping
-        # without integer cache keys collapsing nearby legend positions.
-        return self._color(normalized, 0.0, 1.0, {})
+        normalized = max(0.0, min(1.0, float(normalized)))
+        min_celsius = self.heat_map.MIN_CELSIUS
+        max_celsius = self.heat_map.MAX_CELSIUS
+        temperature = min_celsius + normalized * (max_celsius - min_celsius)
+        # Passing the fixed Celsius endpoints also lets renderer variants reuse
+        # this method while supplying their own _color implementation.
+        return self._color(temperature, min_celsius, max_celsius, {})
+
+    def legend_celsius_range(self, frame=None):
+        """Return the fixed Celsius endpoints represented by the heat map."""
+        return self.heat_map.MIN_CELSIUS, self.heat_map.MAX_CELSIUS
+
+    def legend_extrema_celsius(self, frame=None):
+        """Return the current frame's minimum and maximum Celsius values."""
+        if frame is None:
+            return None
+
+        temperatures = [
+            temperature
+            for temperature in frame_to_celsius(frame)
+            if math.isfinite(temperature)
+        ]
+        if not temperatures:
+            return None
+
+        return min(temperatures), max(temperatures)
 
     def _get_map(self, width, height):
         key = (width, height)
@@ -267,60 +288,54 @@ class ThermalRenderer:
         return x_map, y_map
 
     def _color(self, value, min_value, max_value, color_cache):
-        # Nearby interpolated values share an integer cache key, reducing repeat
-        # palette calculations with negligible display-level color difference.
-        rounded = int(value)
-        cached = color_cache.get(rounded)
+        # The heat map has a fixed physical range. Temperatures beyond the
+        # supported sensor-visualization range use the nearest endpoint color.
+        temperature = max(
+            self.heat_map.MIN_CELSIUS,
+            min(self.heat_map.MAX_CELSIUS, value),
+        )
+        cached = color_cache.get(temperature)
         if cached is not None:
             return cached
 
-        if max_value <= min_value:
-            # A constant frame has no meaningful range; use the middle color
-            # rather than dividing by zero or labeling it entirely hot/cold.
-            color = PALETTE[len(PALETTE) // 2]
-            color_cache[rounded] = color
-            return color
-
-        t = (value - min_value) / (max_value - min_value)
-        t = max(0.0, min(1.0, t))
-        position = t * (len(PALETTE) - 1)
-        index = int(position)
-        next_index = min(index + 1, len(PALETTE) - 1)
-        weight = position - index
-        left = PALETTE[index]
-        right = PALETTE[next_index]
-        # Linearly blend adjacent palette stops for a smooth thermal gradient.
-        color = (
-            int(left[0] + (right[0] - left[0]) * weight),
-            int(left[1] + (right[1] - left[1]) * weight),
-            int(left[2] + (right[2] - left[2]) * weight),
-        )
-        color_cache[rounded] = color
+        color = self.heat_map.rgb_for_celsius(temperature)
+        color_cache[temperature] = color
         return color
 
     def frame_colors(self, frame):
-        # The preview preserves the native 32x24 grid: it maps values to colors
-        # but leaves spatial scaling to Tk's rectangle geometry.
-        min_value = min(frame)
-        max_value = max(frame)
+        # Convert raw sensor values first, then assign the RGB color associated
+        # with each pixel's physical temperature.
+        temperatures = frame_to_celsius(frame)
+        min_value = min(temperatures)
+        max_value = max(temperatures)
         color_cache = {}
         colors = []
 
-        for value in frame:
-            red, green, blue = self._color(value, min_value, max_value, color_cache)
+        for temperature in temperatures:
+            red, green, blue = self._color(
+                temperature,
+                min_value,
+                max_value,
+                color_cache,
+            )
             colors.append(f"#{red:02x}{green:02x}{blue:02x}")
 
         return colors
 
     def render_rgb(self, frame, width, height):
-        # Recordings need a dense RGB image, so spatially upscale the sensor data
-        # with bilinear interpolation before applying the same thermal palette.
+        # Build the 32x24 thermal vision first: raw value -> Celsius -> RGB.
+        # The completed RGB pixels are then enlarged for video output.
         width = max(1, int(width))
         height = max(1, int(height))
-        min_value = min(frame)
-        max_value = max(frame)
-        x_map, y_map = self._get_map(width, height)
+        temperatures = frame_to_celsius(frame)
+        min_value = min(temperatures)
+        max_value = max(temperatures)
         color_cache = {}
+        source_colors = [
+            self._color(temperature, min_value, max_value, color_cache)
+            for temperature in temperatures
+        ]
+        x_map, y_map = self._get_map(width, height)
         output = bytearray(width * height * 3)
         offset = 0
 
@@ -329,19 +344,24 @@ class ThermalRenderer:
             row1 = y1 * SENSOR_WIDTH
 
             for x0, x1, x_weight in x_map:
-                # Interpolate horizontally on the two source rows, then blend
-                # those intermediate values vertically for the destination pixel.
-                top_left = frame[row0 + x0]
-                top_right = frame[row0 + x1]
-                bottom_left = frame[row1 + x0]
-                bottom_right = frame[row1 + x1]
-                top = top_left + (top_right - top_left) * x_weight
-                bottom = bottom_left + (bottom_right - bottom_left) * x_weight
-                value = top + (bottom - top) * y_weight
-                red, green, blue = self._color(value, min_value, max_value, color_cache)
-                output[offset] = red
-                output[offset + 1] = green
-                output[offset + 2] = blue
+                # Bilinearly expand the already colorized source pixels. This
+                # preserves the fixed Celsius-to-color association before the
+                # low-resolution sensor image becomes a dense RGB image.
+                top_left = source_colors[row0 + x0]
+                top_right = source_colors[row0 + x1]
+                bottom_left = source_colors[row1 + x0]
+                bottom_right = source_colors[row1 + x1]
+
+                for channel in range(3):
+                    top = top_left[channel] + (
+                        top_right[channel] - top_left[channel]
+                    ) * x_weight
+                    bottom = bottom_left[channel] + (
+                        bottom_right[channel] - bottom_left[channel]
+                    ) * x_weight
+                    output[offset + channel] = round(
+                        top + (bottom - top) * y_weight
+                    )
                 offset += 3
 
         return bytes(output)

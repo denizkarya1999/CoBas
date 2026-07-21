@@ -334,6 +334,8 @@ class Camera:
                     samplerate=self.audio_sample_rate,
                     channels=self.audio_channels,
                     device=self.microphone_device_id,
+                    blocksize=4096,
+                    latency="high",
                     callback=self._audio_callback
                 ):
                     while self.audio_recording or (
@@ -354,7 +356,10 @@ class Camera:
             print(f"Audio recording failed: {e}")
 
     def _start_audio_recording(self):
-        self.audio_queue = queue.Queue(maxsize=64)
+        # Keep enough buffered microphone data to survive temporary CPU spikes
+        # while both high-resolution thermal views are being rendered. The
+        # previous small queue could discard most of a long recording.
+        self.audio_queue = queue.Queue(maxsize=512)
         self.audio_available = True
         self.audio_recording = True
         self.audio_chunks_written = 0

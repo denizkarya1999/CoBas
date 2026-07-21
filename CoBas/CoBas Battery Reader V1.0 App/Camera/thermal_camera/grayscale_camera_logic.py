@@ -21,6 +21,7 @@ from thermal_camera_logic import (  # noqa: E402
     SENSOR_HEIGHT,
     SENSOR_WIDTH,
     ThermalRenderer,
+    raw_to_celsius,
 )
 
 
@@ -190,6 +191,19 @@ class GrayscaleThermalRenderer(ThermalRenderer):
         ]
 
         return min(finite_values), max(finite_values)
+
+    def legend_celsius_range(self, frame=None):
+        """Return the dynamic grayscale endpoints as Celsius values."""
+        if frame is None:
+            return None
+
+        values = self._validate_frame(frame)
+        min_value, max_value = self._get_display_range(values)
+        return raw_to_celsius(min_value), raw_to_celsius(max_value)
+
+    def legend_extrema_celsius(self, frame=None):
+        """Disable fixed-range extrema markers for the dynamic grayscale scale."""
+        return None
 
     def _color(
         self,

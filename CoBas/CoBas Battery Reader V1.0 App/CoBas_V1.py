@@ -873,12 +873,14 @@ class CoBasV1App:
                 self.update_thermal_feed
             )
 
-    def stop_active_recordings(self):
+    def stop_active_recordings(self, target_duration_seconds=None):
         """
         Stop regular and thermal recorders, reusing the single captured WAV.
 
         Capture is stopped first on both recorders so video durations stay
-        synchronized before FFmpeg merge/finalization begins.
+        synchronized before FFmpeg merge/finalization begins. When a pulse
+        duration is supplied, every camera video is conformed to that exact
+        generated-audio duration before capture outputs are exported.
         """
 
         saved_video_path = None
@@ -914,7 +916,34 @@ class CoBasV1App:
             if saved_voice_path:
                 self.current_voice_path = saved_voice_path
 
-        if saved_video_path and saved_thermal_video_path:
+        if target_duration_seconds is not None:
+            synchronized_video_path = self.sync_video_duration(
+                saved_video_path,
+                target_duration_seconds,
+                tolerance_seconds=0.001,
+            )
+            if synchronized_video_path:
+                saved_video_path = synchronized_video_path
+                self.current_video_path = synchronized_video_path
+
+            synchronized_thermal_path = self.sync_video_duration(
+                saved_thermal_video_path,
+                target_duration_seconds,
+                tolerance_seconds=0.001,
+            )
+            if synchronized_thermal_path:
+                saved_thermal_video_path = synchronized_thermal_path
+                self.current_thermal_video_path = synchronized_thermal_path
+
+            scale_video_path = self.thermal_camera.scale_video_path
+            if scale_video_path:
+                self.thermal_camera.scale_video_path = self.sync_video_duration(
+                    scale_video_path,
+                    target_duration_seconds,
+                    tolerance_seconds=0.001,
+                )
+
+        elif saved_video_path and saved_thermal_video_path:
             thermal_duration = self.get_video_duration_seconds(
                 saved_thermal_video_path
             )
@@ -933,9 +962,11 @@ class CoBasV1App:
 
         return saved_video_path, saved_thermal_video_path, saved_voice_path
 
-    def finalize_capture_session(self):
+    def finalize_capture_session(self, target_duration_seconds=None):
         """Stop and export one capture session through the single output pipeline."""
-        saved_paths = self.stop_active_recordings()
+        saved_paths = self.stop_active_recordings(
+            target_duration_seconds=target_duration_seconds
+        )
         saved_video_path, saved_thermal_video_path, _ = saved_paths
 
         video_path = saved_video_path or self.current_video_path
@@ -952,7 +983,11 @@ class CoBasV1App:
 
     def get_video_duration_seconds(self, video_path):
         """
-        Read video duration in seconds using ffprobe.
+        Read the video stream duration in seconds using ffprobe.
+
+        The container duration can be longer than the encoded video stream
+        when a full-length microphone track is attached to a short camera
+        stream, so synchronization must inspect the video stream itself.
         """
 
         if not video_path or not os.path.exists(video_path):
@@ -967,7 +1002,8 @@ class CoBasV1App:
         command = [
             ffprobe,
             "-v", "error",
-            "-show_entries", "format=duration",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
@@ -988,6 +1024,43 @@ class CoBasV1App:
 
         except Exception as e:
             print(f"[WARNING] Could not read video duration: {e}")
+            return None
+
+    def get_audio_duration_seconds(self, video_path):
+        """Read the first audio stream duration in seconds using ffprobe."""
+
+        if not video_path or not os.path.exists(video_path):
+            return None
+
+        ffprobe = shutil.which("ffprobe")
+
+        if ffprobe is None:
+            return None
+
+        command = [
+            ffprobe,
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            value = result.stdout.strip()
+
+            if not value:
+                return None
+
+            return float(value)
+
+        except Exception:
             return None
 
     def video_has_audio_stream(self, video_path):
@@ -1021,14 +1094,18 @@ class CoBasV1App:
         except Exception:
             return False
 
-    def sync_video_duration(self, video_path, target_duration_seconds):
+    def sync_video_duration(
+        self,
+        video_path,
+        target_duration_seconds,
+        tolerance_seconds=0.05,
+    ):
         """
         Force video duration to match target duration exactly.
 
-        The regular camera writes frames from the Tkinter preview loop, so its
-        encoded duration can be shorter than real capture time if the loop runs
-        below the configured FPS. Retiming spreads the captured frames across
-        the thermal duration instead of freezing the last frame.
+        Camera encoders can produce different media durations from the same
+        wall-clock capture interval. Retiming spreads the available frames
+        across the requested duration instead of freezing the last frame.
         """
 
         if not video_path or not os.path.exists(video_path):
@@ -1042,8 +1119,23 @@ class CoBasV1App:
         if current_duration is None:
             return video_path
 
-        if abs(current_duration - target_duration_seconds) <= 0.05:
-            return video_path
+        has_audio = self.video_has_audio_stream(video_path)
+        video_matches_target = (
+            abs(current_duration - target_duration_seconds)
+            <= tolerance_seconds
+        )
+
+        if video_matches_target:
+            if not has_audio:
+                return video_path
+
+            audio_duration = self.get_audio_duration_seconds(video_path)
+            if (
+                audio_duration is None
+                or abs(audio_duration - target_duration_seconds)
+                <= tolerance_seconds
+            ):
+                return video_path
 
         ffmpeg = shutil.which("ffmpeg")
 
@@ -1057,13 +1149,17 @@ class CoBasV1App:
 
         base, ext = os.path.splitext(video_path)
         temp_output_path = f"{base}_sync_tmp{ext}"
-        has_audio = self.video_has_audio_stream(video_path)
 
         command = [
             ffmpeg,
             "-y",
             "-i", video_path,
-            "-vf", f"setpts={scale_text}*PTS,trim=duration={target_text},setpts=PTS-STARTPTS",
+            "-vf", (
+                f"setpts={scale_text}*PTS,"
+                f"tpad=stop_mode=clone:stop_duration={target_text},"
+                "fps=fps=source_fps,"
+                f"trim=duration={target_text},setpts=PTS-STARTPTS"
+            ),
             "-t", target_text,
             "-c:v", "libx264",
             "-preset", "veryfast",
@@ -1094,7 +1190,7 @@ class CoBasV1App:
 
             os.replace(temp_output_path, video_path)
             print(
-                "[INFO] Regular video duration synchronized "
+                "[INFO] Video duration synchronized "
                 f"({current_duration:.2f}s -> {target_duration_seconds:.2f}s)."
             )
 
@@ -1512,12 +1608,32 @@ class CoBasV1App:
         Return the generated pulse protocol WAV path.
         """
 
-        return os.path.join(
+        input_folder = os.path.join(
             self.base_dir,
             "Pulse Generation",
-            "Inputs",
+            "Inputs"
+        )
+        expected_path = os.path.join(
+            input_folder,
             "5_15sPause_BeaconProtocol.wav"
         )
+
+        try:
+            candidates = [
+                os.path.join(input_folder, filename)
+                for filename in os.listdir(input_folder)
+                if filename.endswith("_15sPause_BeaconProtocol.wav")
+            ]
+        except OSError:
+            candidates = []
+
+        if not candidates:
+            return expected_path
+
+        # cycles_total is part of the generated filename. Selecting the newest
+        # matching WAV keeps duration synchronization correct if that setting
+        # is changed from its current value of five cycles.
+        return max(candidates, key=os.path.getmtime)
 
     def get_pulse_protocol_duration_seconds(self):
         """
@@ -1704,6 +1820,7 @@ class CoBasV1App:
         if self.pulse_process is not pulse_process:
             return
 
+        pulse_duration_seconds = self.get_pulse_protocol_duration_seconds()
         self.pulse_process = None
         self.pulse_playback_end_time = None
 
@@ -1712,7 +1829,11 @@ class CoBasV1App:
 
         self.cancel_preview_loop()
 
-        saved_video_path, saved_thermal_video_path, saved_voice_path = self.finalize_capture_session()
+        saved_video_path, saved_thermal_video_path, saved_voice_path = (
+            self.finalize_capture_session(
+                target_duration_seconds=pulse_duration_seconds
+            )
+        )
 
         self.camera.stop_camera()
         self.thermal_camera.stop_camera()

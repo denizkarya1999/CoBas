@@ -12,6 +12,13 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from . import celsius_heat_map as backend_heat_map
+
+# The copied thermal backend imports celsius_heat_map by its standalone
+# top-level name. Register this package's copied module before loading the
+# backend so the same source works both standalone and inside CoBas.
+sys.modules["celsius_heat_map"] = backend_heat_map
+
 from . import thermal_camera_logic as backend_logic
 
 
@@ -58,16 +65,15 @@ LEGEND_PANEL_WIDTH = 116
 LEGEND_GAP = 8
 PREVIEW_MARGIN = 6
 MIN_LEGEND_HEIGHT = 120
+LEGEND_MIN_MARKER_COLOR = (66, 212, 255)
+LEGEND_MAX_MARKER_COLOR = (255, 91, 69)
 
 
 class _PreviewRendererMixin:
-    """Preserve the existing CoBas PIL preview and temperature legend."""
+    """Render the CoBas PIL preview and its live temperature legend."""
 
     def temperature_legend_title(self):
         return "ESTIMATED °C RANGE\nWHITE HOT · BLUE COLD"
-
-    def _display_range(self, frame):
-        return min(frame), max(frame)
 
     def _font(self, size, bold=False):
         key = (size, bold)
@@ -95,6 +101,104 @@ class _PreviewRendererMixin:
 
         return max(1, int(image_width)), max(1, int(image_height))
 
+    def _draw_legend_extrema(
+        self,
+        draw,
+        extrema,
+        celsius_range,
+        panel_left,
+        bar_left,
+        bar_right,
+        bar_top,
+        bar_bottom,
+        marker_font,
+        expanded,
+    ):
+        """Draw changing MIN/MAX pointers on a fixed Celsius reference."""
+        if extrema is None or celsius_range is None:
+            return
+
+        range_min, range_max = celsius_range
+        if range_max <= range_min:
+            return
+
+        frame_min, frame_max = extrema
+        bar_height = max(1, bar_bottom - bar_top)
+
+        def marker_y(temperature):
+            clamped = max(range_min, min(range_max, temperature))
+            fraction = (range_max - clamped) / (range_max - range_min)
+            return bar_top + fraction * bar_height
+
+        marker_data = (
+            ("MAX", frame_max, marker_y(frame_max), LEGEND_MAX_MARKER_COLOR),
+            ("MIN", frame_min, marker_y(frame_min), LEGEND_MIN_MARKER_COLOR),
+        )
+        label_gap = 18 if expanded else 12
+        label_min_y = bar_top + label_gap / 2
+        label_max_y = bar_bottom - label_gap / 2
+        label_positions = [
+            max(label_min_y, min(label_max_y, point_y))
+            for _, _, point_y, _ in marker_data
+        ]
+
+        # Keep nearby MIN and MAX labels readable without moving their pointer
+        # endpoints away from the actual temperature positions.
+        for index in range(1, len(label_positions)):
+            label_positions[index] = max(
+                label_positions[index],
+                label_positions[index - 1] + label_gap,
+            )
+
+        overflow = label_positions[-1] - label_max_y
+        if overflow > 0:
+            label_positions = [position - overflow for position in label_positions]
+
+        for index in range(len(label_positions) - 2, -1, -1):
+            label_positions[index] = min(
+                label_positions[index],
+                label_positions[index + 1] - label_gap,
+            )
+
+        underflow = label_min_y - label_positions[0]
+        if underflow > 0:
+            label_positions = [position + underflow for position in label_positions]
+
+        label_padding = 8 if expanded else 5
+        elbow_x = bar_left - (5 if expanded else 3)
+        for (name, temperature, point_y, color), label_y in zip(
+            marker_data,
+            label_positions,
+        ):
+            label = f"{name} {temperature:.1f}°"
+            text_box = draw.textbbox((0, 0), label, font=marker_font)
+            text_width = text_box[2] - text_box[0]
+            text_height = text_box[3] - text_box[1]
+            text_right = bar_left - label_padding
+            text_x = max(panel_left + 2, text_right - text_width)
+            text_y = label_y - text_height / 2 - text_box[1]
+
+            draw.text(
+                (text_x, text_y),
+                label,
+                fill=color,
+                font=marker_font,
+            )
+            draw.line(
+                (
+                    text_right + 2,
+                    label_y,
+                    elbow_x,
+                    label_y,
+                    elbow_x,
+                    point_y,
+                    bar_right,
+                    point_y,
+                ),
+                fill=color,
+                width=2 if expanded else 1,
+            )
+
     def _draw_temperature_legend(self, image, frame, bounds):
         panel_left, panel_top, panel_right, panel_bottom = bounds
         panel_width = panel_right - panel_left + 1
@@ -111,6 +215,7 @@ class _PreviewRendererMixin:
         title_top = 12 if expanded else 7
         title_font = self._font(10 if expanded else 7, bold=True)
         tick_font = self._font(12 if expanded else 9)
+        marker_font = self._font(9 if expanded else 7, bold=True)
         draw.multiline_text(
             (panel_left + title_padding, panel_top + title_top),
             self.temperature_legend_title(),
@@ -119,7 +224,14 @@ class _PreviewRendererMixin:
             spacing=2 if expanded else 1,
         )
 
-        bar_left = panel_left + (16 if expanded else 10)
+        celsius_range = self.legend_celsius_range(frame)
+        extrema = self.legend_extrema_celsius(frame)
+        if extrema is None:
+            bar_left = panel_left + (16 if expanded else 10)
+        else:
+            # Reserve the left side for live MIN/MAX labels while retaining
+            # enough room on the right for the fixed Celsius tick labels.
+            bar_left = panel_left + (82 if expanded else 48)
         bar_right = bar_left + (34 if expanded else 18)
         bar_top = panel_top + (66 if expanded else 38)
         bar_bottom = panel_bottom - (22 if expanded else 10)
@@ -138,14 +250,19 @@ class _PreviewRendererMixin:
             outline=LEGEND_FOREGROUND,
         )
 
-        min_value, max_value = self._display_range(frame)
         tick_length = 8 if expanded else 5
         text_gap = 7 if expanded else 3
         for index in range(LEGEND_TICK_COUNT):
             fraction = index / (LEGEND_TICK_COUNT - 1)
             y = int(round(bar_top + fraction * bar_height))
-            raw_value = max_value + (min_value - max_value) * fraction
-            label = f"{raw_to_celsius(raw_value):.1f} °C"
+            if celsius_range is None:
+                label = "--.- °C"
+            else:
+                min_celsius, max_celsius = celsius_range
+                temperature = max_celsius + (
+                    min_celsius - max_celsius
+                ) * fraction
+                label = f"{temperature:.1f} °C"
             draw.line(
                 (bar_right, y, bar_right + tick_length, y),
                 fill=LEGEND_FOREGROUND,
@@ -162,6 +279,19 @@ class _PreviewRendererMixin:
                 fill=LEGEND_FOREGROUND,
                 font=tick_font,
             )
+
+        self._draw_legend_extrema(
+            draw,
+            extrema,
+            celsius_range,
+            panel_left,
+            bar_left,
+            bar_right,
+            bar_top,
+            bar_bottom,
+            marker_font,
+            expanded,
+        )
 
     def render_sensor_image(self, frame):
         rgb = self.render_rgb(frame, SENSOR_WIDTH, SENSOR_HEIGHT)
@@ -244,18 +374,21 @@ class ColoredThermalRenderer(
     BackendColoredThermalRenderer,
     _PreviewRendererMixin,
 ):
-    """Copied Hardware color backend with the unchanged CoBas presentation."""
+    """Use the fixed Hardware Celsius colors in the CoBas presentation."""
 
     def __init__(self):
         BackendColoredThermalRenderer.__init__(self)
         self._fonts = {}
+
+    def temperature_legend_title(self):
+        return "FIXED 0–60 °C RANGE\nWHITE HOT · BLUE COLD"
 
 
 class GrayscaleThermalRenderer(
     BackendGrayscaleThermalRenderer,
     _PreviewRendererMixin,
 ):
-    """Copied Hardware grayscale backend with unchanged CoBas presentation."""
+    """Use the dynamic Hardware grayscale backend in CoBas."""
 
     def __init__(self, *args, **kwargs):
         BackendGrayscaleThermalRenderer.__init__(self, *args, **kwargs)
@@ -263,10 +396,6 @@ class GrayscaleThermalRenderer(
 
     def temperature_legend_title(self):
         return "ESTIMATED °C RANGE\nWHITE HOT · BLACK COLD"
-
-    def _display_range(self, frame):
-        values = self._validate_frame(frame)
-        return self._get_display_range(values)
 
 
 class ThermalCamera:
@@ -793,9 +922,10 @@ class ThermalCamera:
             "-y",
             "-i", video_path,
             "-i", audio_path,
+            "-map", "0:v:0",
+            "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac",
-            "-shortest",
             output_path
         ]
 
