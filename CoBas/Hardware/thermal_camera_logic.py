@@ -30,8 +30,8 @@ RECORD_WIDTH = int(os.environ.get("MLX90642_RECORD_WIDTH", "640"))
 RECORD_HEIGHT = int(os.environ.get("MLX90642_RECORD_HEIGHT", "480"))
 RECORD_FPS = int(os.environ.get("MLX90642_RECORD_FPS", "8"))
 
-# Keep the public palette name for existing callers. It now contains one fixed
-# color for every whole temperature from 0 °C through 60 °C.
+# Keep the public palette name for existing callers. The same 61 RGB colors are
+# evenly spaced across the default 15–30 °C display range.
 PALETTE = list(CelsiusHeatMap.COLORS_BY_CELSIUS.values())
 
 
@@ -219,8 +219,10 @@ class CameraWorker(threading.Thread):
 
 
 class ThermalRenderer:
-    def __init__(self):
-        self.heat_map = CelsiusHeatMap()
+    def __init__(self, min_celsius=None, max_celsius=None):
+        # A renderer owns its display range. This keeps GUI-selected endpoints
+        # local to one camera window instead of changing module-wide state.
+        self.heat_map = CelsiusHeatMap(min_celsius, max_celsius)
         # Coordinate maps depend only on output dimensions, so cache them across
         # frames and avoid repeating bilinear setup at recording frame rate.
         self._maps = {}
@@ -288,8 +290,8 @@ class ThermalRenderer:
         return x_map, y_map
 
     def _color(self, value, min_value, max_value, color_cache):
-        # The heat map has a fixed physical range. Temperatures beyond the
-        # supported sensor-visualization range use the nearest endpoint color.
+        # Temperatures outside the configured display window use the nearest
+        # endpoint color: cold navy at the minimum or hot white at the maximum.
         temperature = max(
             self.heat_map.MIN_CELSIUS,
             min(self.heat_map.MAX_CELSIUS, value),

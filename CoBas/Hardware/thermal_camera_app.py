@@ -2,12 +2,13 @@
 """Tkinter front end for the thermal camera logic."""
 
 import argparse
+import math
 import queue
 import sys
 import threading
 import time
 from datetime import datetime
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 import tkinter as tk
 
 # Import moved symbols explicitly so existing callers can continue importing
@@ -49,15 +50,145 @@ LEGEND_MAX_MARKER_COLOR = "#ff5b45"
 LEGEND_MARKER_LABEL_GAP = 18
 
 
+class TemperatureRangeDialog(simpledialog.Dialog):
+    """Collect and validate the fixed display range before camera startup."""
+
+    def __init__(self, parent, default_min, default_max):
+        self.default_min = default_min
+        self.default_max = default_max
+        self.minimum_text = None
+        self.maximum_text = None
+        self.validated_range = None
+        self.result = None
+        super().__init__(parent, title="Thermal Display Range")
+
+    def body(self, parent):
+        """Build the two-field form and focus the minimum entry."""
+        parent.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            parent,
+            text=(
+                "Choose the temperatures represented by the coldest and "
+                "hottest palette colors."
+            ),
+            wraplength=360,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+
+        self.minimum_text = tk.StringVar(value=f"{self.default_min:g}")
+        self.maximum_text = tk.StringVar(value=f"{self.default_max:g}")
+
+        ttk.Label(parent, text="Minimum temperature (°C):").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            padx=(0, 12),
+            pady=5,
+        )
+        minimum_entry = ttk.Entry(parent, textvariable=self.minimum_text, width=14)
+        minimum_entry.grid(row=1, column=1, sticky="ew", pady=5)
+
+        ttk.Label(parent, text="Maximum temperature (°C):").grid(
+            row=2,
+            column=0,
+            sticky="w",
+            padx=(0, 12),
+            pady=5,
+        )
+        ttk.Entry(parent, textvariable=self.maximum_text, width=14).grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            pady=5,
+        )
+        return minimum_entry
+
+    def buttonbox(self):
+        """Use an explicit Start Camera action instead of a generic OK label."""
+        box = ttk.Frame(self)
+        ttk.Button(
+            box,
+            text="Start Camera",
+            command=self.ok,
+            default="active",
+        ).pack(side="left", padx=5)
+        ttk.Button(box, text="Cancel", command=self.cancel).pack(
+            side="left",
+            padx=5,
+        )
+        box.pack(pady=(4, 10))
+
+        self.bind("<Return>", self.ok)
+        self.bind("<Escape>", self.cancel)
+
+    def validate(self):
+        """Accept only finite numbers with a maximum above the minimum."""
+        try:
+            minimum = float(self.minimum_text.get().strip())
+            maximum = float(self.maximum_text.get().strip())
+        except (AttributeError, TypeError, ValueError):
+            messagebox.showerror(
+                "Invalid Temperature Range",
+                "Enter numeric values for both temperatures.",
+                parent=self,
+            )
+            return False
+
+        if not math.isfinite(minimum) or not math.isfinite(maximum):
+            messagebox.showerror(
+                "Invalid Temperature Range",
+                "Both temperatures must be finite numbers.",
+                parent=self,
+            )
+            return False
+
+        if maximum <= minimum:
+            messagebox.showerror(
+                "Invalid Temperature Range",
+                "Maximum temperature must be greater than minimum temperature.",
+                parent=self,
+            )
+            return False
+
+        self.validated_range = (minimum, maximum)
+        return True
+
+    def apply(self):
+        """Publish the validated range to the launcher."""
+        self.result = self.validated_range
+
+
+def request_temperature_range():
+    """Show the range dialog without initializing or reading the camera."""
+    # Read defaults from the renderer so the form stays synchronized with the
+    # configured application defaults (currently 15–30 °C).
+    default_min, default_max = ThermalRenderer().legend_celsius_range()
+
+    # The short-lived hidden root owns only the modal setup dialog. It is
+    # destroyed before the camera window and its background worker are created.
+    dialog_root = tk.Tk()
+    dialog_root.withdraw()
+    try:
+        dialog = TemperatureRangeDialog(
+            dialog_root,
+            default_min,
+            default_max,
+        )
+        return dialog.result
+    finally:
+        dialog_root.destroy()
+
+
 class ThermalCameraApp(tk.Tk):
-    def __init__(self, mock=False):
+    def __init__(self, mock=False, min_celsius=None, max_celsius=None):
         super().__init__()
         self.title("MLX90642 Thermal Camera")
         self.minsize(760, 620)
 
         # The worker owns blocking camera operations and communicates through
         # this queue; only the Tk thread reads the queue and updates widgets.
-        self.renderer = ThermalRenderer()
+        self.renderer = ThermalRenderer(min_celsius, max_celsius)
         self.events = queue.Queue()
         self.stop_event = threading.Event()
         self.worker = CameraWorker(self.events, self.stop_event, mock=mock)
@@ -65,6 +196,8 @@ class ThermalCameraApp(tk.Tk):
         # Keep the latest sensor frame independently of the canvas so resize
         # events and recording ticks can reuse it without another camera read.
         self.latest_frame = None
+        # The live view uses one rectangle for each physical 32x24 sensor cell.
+        # Items are allocated after the first frame and reused on every redraw.
         self.pixel_items = []
         self.message_item = None
         self.status_text = tk.StringVar(value="Starting")
@@ -219,7 +352,11 @@ class ThermalCameraApp(tk.Tk):
 
     def _temperature_legend_title(self):
         """Describe the endpoints of the regular thermal palette."""
-        return "FIXED 0–60 °C RANGE\nWHITE HOT · BLUE COLD"
+        min_celsius, max_celsius = self.renderer.legend_celsius_range()
+        return (
+            f"FIXED {min_celsius:g}–{max_celsius:g} °C RANGE\n"
+            "WHITE HOT · BLUE COLD"
+        )
 
     def _create_temperature_legend(self):
         """Allocate reusable canvas items for the live temperature spectrum."""
@@ -532,8 +669,8 @@ class ThermalCameraApp(tk.Tk):
             self.canvas.itemconfigure(self.message_item, state="hidden")
 
         if not self.pixel_items:
-            # Allocate one rectangle per sensor pixel once. Later frames and
-            # resizes mutate existing canvas items instead of recreating 768.
+            # Allocate exactly 768 reusable rectangles: one for each physical
+            # MLX90642 measurement, with no artificial interpolation pixels.
             for _ in range(SENSOR_PIXELS):
                 item = self.canvas.create_rectangle(
                     0,
@@ -551,20 +688,29 @@ class ThermalCameraApp(tk.Tk):
         cell_height = height / SENSOR_HEIGHT
         colors = self.renderer.frame_colors(self.latest_frame)
 
-        # Relabel and raise the scale after first-frame rectangles are allocated.
+        # Relabel and raise the scale after the sensor cells are allocated.
         self._update_temperature_legend()
 
-        # Frame data and canvas items share the same row-major pixel index.
+        # Frame data and canvas rectangles share the same row-major index.
         for row in range(SENSOR_HEIGHT):
             y0 = top + row * cell_height
             y1 = top + (row + 1) * cell_height
 
-            for col in range(SENSOR_WIDTH):
-                index = row * SENSOR_WIDTH + col
-                x0 = left + col * cell_width
-                x1 = left + (col + 1) * cell_width
-                self.canvas.coords(self.pixel_items[index], x0, y0, x1, y1)
-                self.canvas.itemconfigure(self.pixel_items[index], fill=colors[index])
+            for column in range(SENSOR_WIDTH):
+                index = row * SENSOR_WIDTH + column
+                x0 = left + column * cell_width
+                x1 = left + (column + 1) * cell_width
+                self.canvas.coords(
+                    self.pixel_items[index],
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                )
+                self.canvas.itemconfigure(
+                    self.pixel_items[index],
+                    fill=colors[index],
+                )
 
     def _toggle_recording(self):
         if self.recorder is None:
@@ -690,7 +836,18 @@ def main():
         print(output)
         return 0
 
-    app = ThermalCameraApp(mock=args.mock)
+    # Camera construction and I2C access happen only after the user confirms a
+    # valid range. Cancel exits cleanly without starting the camera worker.
+    temperature_range = request_temperature_range()
+    if temperature_range is None:
+        return 0
+
+    min_celsius, max_celsius = temperature_range
+    app = ThermalCameraApp(
+        mock=args.mock,
+        min_celsius=min_celsius,
+        max_celsius=max_celsius,
+    )
     app.mainloop()
     return 0
 
