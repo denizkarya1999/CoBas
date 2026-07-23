@@ -51,6 +51,7 @@ SENSOR_HEIGHT = backend_logic.SENSOR_HEIGHT
 SENSOR_WIDTH = backend_logic.SENSOR_WIDTH
 BackendColoredThermalRenderer = backend_logic.ThermalRenderer
 raw_to_celsius = backend_logic.raw_to_celsius
+RAW_COUNTS_PER_CELSIUS = 50.0
 
 
 SCALE_RECORD_WIDTH = int(os.environ.get("MLX90642_SCALE_RECORD_WIDTH", "240"))
@@ -376,12 +377,20 @@ class ColoredThermalRenderer(
 ):
     """Use the fixed Hardware Celsius colors in the CoBas presentation."""
 
-    def __init__(self):
-        BackendColoredThermalRenderer.__init__(self)
+    def __init__(self, min_celsius=None, max_celsius=None):
+        BackendColoredThermalRenderer.__init__(
+            self,
+            min_celsius,
+            max_celsius,
+        )
         self._fonts = {}
 
     def temperature_legend_title(self):
-        return "FIXED 0–60 °C RANGE\nWHITE HOT · BLUE COLD"
+        min_celsius, max_celsius = self.legend_celsius_range()
+        return (
+            f"FIXED {min_celsius:g}–{max_celsius:g} °C RANGE\n"
+            "WHITE HOT · BLUE COLD"
+        )
 
 
 class GrayscaleThermalRenderer(
@@ -395,17 +404,37 @@ class GrayscaleThermalRenderer(
         self._fonts = {}
 
     def temperature_legend_title(self):
-        return "ESTIMATED °C RANGE\nWHITE HOT · BLACK COLD"
+        celsius_range = self.legend_celsius_range()
+        if celsius_range is None:
+            return "ESTIMATED °C RANGE\nWHITE HOT · BLACK COLD"
+
+        min_celsius, max_celsius = celsius_range
+        return (
+            f"FIXED {min_celsius:g}–{max_celsius:g} °C RANGE\n"
+            "WHITE HOT · BLACK COLD"
+        )
 
 
 class ThermalCamera:
     """Bridge thermal acquisition and rendering into the CoBas application."""
 
-    def __init__(self, output_dir="Captures", mock=False):
+    def __init__(
+        self,
+        output_dir="Captures",
+        mock=False,
+        min_celsius=None,
+        max_celsius=None,
+    ):
         self.output_dir = output_dir
         self.mock = mock or os.environ.get("COBAS_THERMAL_MOCK") == "1"
-        self.rgb_renderer = ColoredThermalRenderer()
-        self.grayscale_renderer = GrayscaleThermalRenderer()
+        self.rgb_renderer = ColoredThermalRenderer(min_celsius, max_celsius)
+        selected_min, selected_max = self.rgb_renderer.legend_celsius_range()
+        self.grayscale_renderer = GrayscaleThermalRenderer(
+            min_celsius=selected_min,
+            max_celsius=selected_max,
+            display_min=selected_min * RAW_COUNTS_PER_CELSIUS,
+            display_max=selected_max * RAW_COUNTS_PER_CELSIUS,
+        )
         self.display_mode = "rgb"
         self.renderer = self.rgb_renderer
 
@@ -447,6 +476,34 @@ class ThermalCamera:
         self.scale_record_height = SCALE_RECORD_HEIGHT
 
         os.makedirs(self.output_dir, exist_ok=True)
+
+    def get_temperature_range(self):
+        """Return the stable Celsius endpoints used by both renderers."""
+        return self.rgb_renderer.legend_celsius_range()
+
+    def set_temperature_range(self, min_celsius, max_celsius):
+        """Apply a new fixed spectrum range unless recording has started."""
+        if self.is_recording:
+            return False
+
+        # Construct both replacements before publishing either one, so invalid
+        # input cannot leave the colored and grayscale modes out of sync.
+        rgb_renderer = ColoredThermalRenderer(min_celsius, max_celsius)
+        selected_min, selected_max = rgb_renderer.legend_celsius_range()
+        grayscale_renderer = GrayscaleThermalRenderer(
+            min_celsius=selected_min,
+            max_celsius=selected_max,
+            display_min=selected_min * RAW_COUNTS_PER_CELSIUS,
+            display_max=selected_max * RAW_COUNTS_PER_CELSIUS,
+        )
+
+        self.rgb_renderer = rgb_renderer
+        self.grayscale_renderer = grayscale_renderer
+        if self.display_mode == "grayscale":
+            self.renderer = self.grayscale_renderer
+        else:
+            self.renderer = self.rgb_renderer
+        return True
 
     def set_display_mode(self, mode):
         """Select the colored or grayscale renderer when not recording."""

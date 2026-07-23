@@ -105,6 +105,18 @@ class CoBasV1App:
             value=self.thermal_camera.display_mode
         )
         self.thermal_scale_buttons = []
+        thermal_min, thermal_max = self.thermal_camera.get_temperature_range()
+        self.thermal_min_text = tk.StringVar(
+            master=self.root,
+            value=f"{thermal_min:g}"
+        )
+        self.thermal_max_text = tk.StringVar(
+            master=self.root,
+            value=f"{thermal_max:g}"
+        )
+        self.thermal_min_entry = None
+        self.thermal_max_entry = None
+        self.thermal_range_button = None
 
         # Apply styles from Style.py.
         self.style = apply_styles(self.root)
@@ -358,6 +370,56 @@ class CoBasV1App:
         )
         thermal_scale_controls.pack(side="right")
 
+        ttk.Label(
+            thermal_scale_controls,
+            text="Min",
+            style="PanelText.TLabel"
+        ).pack(side="left", padx=(0, 2))
+
+        self.thermal_min_entry = ttk.Entry(
+            thermal_scale_controls,
+            textvariable=self.thermal_min_text,
+            width=4,
+            justify="center"
+        )
+        self.thermal_min_entry.pack(side="left", padx=(0, 3))
+        self.thermal_min_entry.bind(
+            "<Return>",
+            self.configure_thermal_temperature_range
+        )
+
+        ttk.Label(
+            thermal_scale_controls,
+            text="Max",
+            style="PanelText.TLabel"
+        ).pack(side="left", padx=(0, 2))
+
+        self.thermal_max_entry = ttk.Entry(
+            thermal_scale_controls,
+            textvariable=self.thermal_max_text,
+            width=4,
+            justify="center"
+        )
+        self.thermal_max_entry.pack(side="left", padx=(0, 3))
+        self.thermal_max_entry.bind(
+            "<Return>",
+            self.configure_thermal_temperature_range
+        )
+
+        ttk.Label(
+            thermal_scale_controls,
+            text="°C",
+            style="PanelText.TLabel"
+        ).pack(side="left", padx=(0, 1))
+
+        self.thermal_range_button = ttk.Button(
+            thermal_scale_controls,
+            text="Set",
+            width=3,
+            command=self.configure_thermal_temperature_range
+        )
+        self.thermal_range_button.pack(side="left", padx=(0, 2))
+
         for label, value in (("Regular", "rgb"), ("Greyscale", "grayscale")):
             button = ttk.Radiobutton(
                 thermal_scale_controls,
@@ -367,7 +429,7 @@ class CoBasV1App:
                 command=self.change_thermal_scale_mode,
                 style="ThermalScale.TRadiobutton"
             )
-            button.pack(side="left", padx=(4, 0))
+            button.pack(side="left", padx=(2, 0))
             self.thermal_scale_buttons.append(button)
 
         self.video_label = tk.Label(
@@ -744,14 +806,68 @@ class CoBasV1App:
         if not self.thermal_camera.set_display_mode(requested_mode):
             self.thermal_scale_mode.set(self.thermal_camera.display_mode)
 
+    def configure_thermal_temperature_range(self, _event=None):
+        """Apply the minimum and maximum temperatures from the textboxes."""
+        if self.thermal_camera.is_recording:
+            messagebox.showinfo(
+                "Thermal Display Range",
+                "The temperature range is locked while recording.",
+                parent=self.root
+            )
+            return
+
+        try:
+            changed = self.thermal_camera.set_temperature_range(
+                self.thermal_min_text.get(),
+                self.thermal_max_text.get()
+            )
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror(
+                "Invalid Thermal Display Range",
+                str(exc),
+                parent=self.root
+            )
+            return
+
+        if not changed:
+            messagebox.showinfo(
+                "Thermal Display Range",
+                "The temperature range is locked while recording.",
+                parent=self.root
+            )
+            return
+
+        selected_min, selected_max = self.thermal_camera.get_temperature_range()
+        self.thermal_min_text.set(f"{selected_min:g}")
+        self.thermal_max_text.set(f"{selected_max:g}")
+        self.update_status(
+            "Status: Thermal display range updated. Ready to record.",
+            "● READY"
+        )
+
     def refresh_thermal_scale_controls(self):
-        """Lock the palette while a thermal recording is in progress."""
+        """Lock the palette and fixed range during thermal recording."""
         state = "disabled" if self.thermal_camera.is_recording else "normal"
         for button in self.thermal_scale_buttons:
             button.configure(state=state)
+        if self.thermal_min_entry is not None:
+            self.thermal_min_entry.configure(state=state)
+        if self.thermal_max_entry is not None:
+            self.thermal_max_entry.configure(state=state)
+        if self.thermal_range_button is not None:
+            self.thermal_range_button.configure(state=state)
 
         if self.thermal_scale_mode.get() != self.thermal_camera.display_mode:
             self.thermal_scale_mode.set(self.thermal_camera.display_mode)
+
+        thermal_min, thermal_max = self.thermal_camera.get_temperature_range()
+        expected_min = f"{thermal_min:g}"
+        expected_max = f"{thermal_max:g}"
+        if self.thermal_camera.is_recording:
+            if self.thermal_min_text.get() != expected_min:
+                self.thermal_min_text.set(expected_min)
+            if self.thermal_max_text.get() != expected_max:
+                self.thermal_max_text.set(expected_max)
 
     def start_active_recordings(self):
         """Start the single synchronized camera and thermal recording pipeline."""

@@ -193,7 +193,13 @@ class GrayscaleThermalRenderer(ThermalRenderer):
         return min(finite_values), max(finite_values)
 
     def legend_celsius_range(self, frame=None):
-        """Return the dynamic grayscale endpoints as Celsius values."""
+        """Return fixed or frame-derived grayscale endpoints in Celsius."""
+        if self.display_min is not None:
+            return (
+                raw_to_celsius(self.display_min),
+                raw_to_celsius(self.display_max),
+            )
+
         if frame is None:
             return None
 
@@ -202,8 +208,10 @@ class GrayscaleThermalRenderer(ThermalRenderer):
         return raw_to_celsius(min_value), raw_to_celsius(max_value)
 
     def legend_extrema_celsius(self, frame=None):
-        """Disable fixed-range extrema markers for the dynamic grayscale scale."""
-        return None
+        """Show extrema only when the grayscale spectrum has fixed endpoints."""
+        if self.display_min is None:
+            return None
+        return super().legend_extrema_celsius(frame)
 
     def _color(
         self,
