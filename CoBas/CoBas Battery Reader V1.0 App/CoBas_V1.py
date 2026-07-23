@@ -12,7 +12,7 @@ import wave
 from datetime import datetime
 
 from Camera.Camera import Camera
-from Camera.thermal_camera.gui import ThermalCamera
+from Camera.thermal_camera import ThermalCamera
 from Style import COLORS, FONTS, WINDOW, PREVIEW, SPACING, apply_styles
 from Settings import SettingsWindow
 from About import show_about_window
@@ -21,6 +21,7 @@ from About import show_about_window
 APP_TITLE = "CoBas Battery Reader V1.0"
 APP_WM_CLASS = "cobas_battery_reader_v1"
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+PULSE_DURATION_SECONDS = 2.0
 
 
 class CoBasV1App:
@@ -79,16 +80,23 @@ class CoBasV1App:
         # Stores path of the current video file.
         self.current_video_path = None
         self.current_thermal_video_path = None
-        self.current_voice_path = None
 
         # Stores last processed video path to avoid processing the same video twice.
         self.last_processed_video_path = None
 
-        # Background pulse protocol generation process.
+        # Repeated two-second pulse sequence state.
         self.pulse_process = None
+        self.pulse_process_lock = threading.Lock()
         self.is_preparing_tracking = False
         self.tracking_start_token = 0
         self.pulse_playback_end_time = None
+        self.pulse_count_text = tk.StringVar(master=self.root, value="20")
+        self.pulse_count_spinbox = None
+        self.requested_pulse_count = 1
+        self.current_pulse_number = 0
+        self.pulse_sequence_active = False
+        self.pulse_recordings = []
+        self.current_recording_timestamp = None
 
         # Preview loop state.
         self.preview_loop_running = False
@@ -499,7 +507,7 @@ class CoBasV1App:
 
         self.record_timer_label = ttk.Label(
             bottom_bar,
-            text="Recording: 0 second",
+            text="Pulses: 0/20",
             style="Info.TLabel"
         )
         self.record_timer_label.pack(side="right")
@@ -525,6 +533,29 @@ class CoBasV1App:
             text="Tracking",
             style="PanelTitle.TLabel"
         ).pack(anchor="w", pady=(0, 3))
+
+        pulse_count_row = ttk.Frame(
+            controls_section,
+            style="Panel.TFrame"
+        )
+        pulse_count_row.pack(fill="x", pady=(0, 4))
+
+        ttk.Label(
+            pulse_count_row,
+            text="Pulse count",
+            style="PanelText.TLabel"
+        ).pack(side="left")
+
+        self.pulse_count_spinbox = ttk.Spinbox(
+            pulse_count_row,
+            from_=1,
+            to=999,
+            increment=1,
+            textvariable=self.pulse_count_text,
+            width=5,
+            justify="center"
+        )
+        self.pulse_count_spinbox.pack(side="right")
 
         # Start Tracking is green.
         # When camera is active, this button changes to red Stop Tracking.
@@ -869,20 +900,21 @@ class CoBasV1App:
             if self.thermal_max_text.get() != expected_max:
                 self.thermal_max_text.set(expected_max)
 
-    def start_active_recordings(self):
-        """Start the single synchronized camera and thermal recording pipeline."""
+    def start_active_recordings(self, record_audio=True):
+        """Start the synchronized regular and thermal video recorders."""
         if self.camera.is_recording or self.thermal_camera.is_recording:
             print("[INFO] A synchronized recording is already active.")
             return self.current_video_path, self.current_thermal_video_path
 
         self.set_recording_volume_to_maximum()
         recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.current_recording_timestamp = recording_timestamp
         self.current_video_path = None
         self.current_thermal_video_path = None
-        self.current_voice_path = None
 
         self.current_video_path = self.camera.start_recording(
-            timestamp=recording_timestamp
+            timestamp=recording_timestamp,
+            record_audio=record_audio
         )
 
         if self.current_video_path:
@@ -989,14 +1021,19 @@ class CoBasV1App:
                 self.update_thermal_feed
             )
 
-    def stop_active_recordings(self, target_duration_seconds=None):
+    def stop_active_recordings(
+        self,
+        target_duration_seconds=None,
+        audio_path_override=None,
+    ):
         """
-        Stop regular and thermal recorders, reusing the single captured WAV.
+        Stop regular and thermal recorders, reusing one synchronized WAV.
 
         Capture is stopped first on both recorders so video durations stay
-        synchronized before FFmpeg merge/finalization begins. When a pulse
-        duration is supplied, every camera video is conformed to that exact
-        generated-audio duration before capture outputs are exported.
+        synchronized before FFmpeg merge/finalization begins. The WAV can be
+        continuous microphone audio or the repeated-pulse timeline override.
+        When a target duration is supplied, every camera video is conformed to
+        that exact duration before capture outputs are exported.
         """
 
         saved_video_path = None
@@ -1009,6 +1046,9 @@ class CoBasV1App:
 
         if regular_was_recording:
             audio_path = self.camera.stop_recording_capture_phase()
+
+        if audio_path_override and os.path.exists(audio_path_override):
+            audio_path = audio_path_override
 
         if thermal_was_recording:
             saved_thermal_video_path = self.thermal_camera.stop_recording(
@@ -1024,13 +1064,9 @@ class CoBasV1App:
                 audio_path=audio_path,
                 keep_audio=True
             )
-            saved_voice_path = self.camera.last_saved_voice_path
 
             if saved_video_path:
                 self.current_video_path = saved_video_path
-
-            if saved_voice_path:
-                self.current_voice_path = saved_voice_path
 
         if target_duration_seconds is not None:
             synchronized_video_path = self.sync_video_duration(
@@ -1078,10 +1114,15 @@ class CoBasV1App:
 
         return saved_video_path, saved_thermal_video_path, saved_voice_path
 
-    def finalize_capture_session(self, target_duration_seconds=None):
+    def finalize_capture_session(
+        self,
+        target_duration_seconds=None,
+        audio_path_override=None,
+    ):
         """Stop and export one capture session through the single output pipeline."""
         saved_paths = self.stop_active_recordings(
-            target_duration_seconds=target_duration_seconds
+            target_duration_seconds=target_duration_seconds,
+            audio_path_override=audio_path_override,
         )
         saved_video_path, saved_thermal_video_path, _ = saved_paths
 
@@ -1482,7 +1523,7 @@ class CoBasV1App:
         video_path,
         thermal_video_path,
         scale_video_path,
-        voice_path,
+        pulse_voice_paths,
         temperature_log_path,
         temperature_average_path,
         output_folder
@@ -1529,27 +1570,31 @@ class CoBasV1App:
             ]
         )
 
-        voice_output = os.path.join(output_folder, "Voice.wav")
-        if voice_path and os.path.exists(voice_path):
-            self.move_capture_output(voice_path, voice_output)
-        else:
-            self.run_capture_ffmpeg(
-                "single voice extraction",
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    video_path,
-                    "-vn",
-                    "-ar",
-                    "48000",
-                    "-ac",
-                    "1",
-                    "-c:a",
-                    "pcm_s16le",
-                    voice_output,
-                ]
+        if pulse_voice_paths:
+            pulse_voice_folder = os.path.join(
+                output_folder,
+                "Voice_Recordings"
             )
+            os.makedirs(pulse_voice_folder, exist_ok=True)
+
+            for index, pulse_voice_path in enumerate(
+                pulse_voice_paths,
+                start=1,
+            ):
+                if not pulse_voice_path or not os.path.exists(pulse_voice_path):
+                    print(
+                        "[WARNING] Pulse voice recording is unavailable: "
+                        f"{pulse_voice_path}"
+                    )
+                    continue
+
+                self.move_capture_output(
+                    pulse_voice_path,
+                    os.path.join(
+                        pulse_voice_folder,
+                        f"Voice_{index:03d}.wav"
+                    )
+                )
 
         capture_moves = (
             (video_path, os.path.join(output_folder, "Camera_Video.mp4")),
@@ -1577,8 +1622,9 @@ class CoBasV1App:
         """
         Export the capture artifacts from the latest recording.
 
-        Outputs: camera frames, thermal frames, one voice, camera video,
-        thermal video, thermal-range video, and two temperature text files.
+        Outputs: camera frames, thermal frames, per-pulse voice recordings,
+        camera video, thermal video, thermal-range video, and two temperature
+        text files.
         """
 
         if video_path is None:
@@ -1599,7 +1645,11 @@ class CoBasV1App:
         scale_video_path = self.thermal_camera.scale_video_path
         temperature_log_path = self.thermal_camera.temperature_log_path
         temperature_average_path = self.thermal_camera.temperature_average_path
-        voice_path = self.current_voice_path
+        pulse_voice_paths = [
+            recording["path"]
+            for recording in self.pulse_recordings
+            if recording.get("path")
+        ]
 
         required_outputs = (
             (thermal_video_path, "thermal video"),
@@ -1642,7 +1692,7 @@ class CoBasV1App:
                     video_path,
                     thermal_video_path,
                     scale_video_path,
-                    voice_path,
+                    pulse_voice_paths,
                     temperature_log_path,
                     temperature_average_path,
                     output_folder
@@ -1651,7 +1701,10 @@ class CoBasV1App:
 
                 self.root.after(
                     0,
-                    lambda: self.handle_capture_outputs_finished(output_folder)
+                    lambda: self.handle_capture_outputs_finished(
+                        output_folder,
+                        len(pulse_voice_paths),
+                    )
                 )
 
             except Exception as e:
@@ -1675,7 +1728,11 @@ class CoBasV1App:
             daemon=True
         ).start()
 
-    def handle_capture_outputs_finished(self, output_folder):
+    def handle_capture_outputs_finished(
+        self,
+        output_folder,
+        pulse_recording_count=0,
+    ):
         """Report successful capture-only output generation."""
 
         self.set_processing_indicator(False)
@@ -1685,12 +1742,19 @@ class CoBasV1App:
             f"Status: Capture outputs saved in {output_folder}",
             "● IDLE"
         )
+        pulse_output_message = ""
+        if pulse_recording_count:
+            pulse_output_message = (
+                f"• Voice_Recordings "
+                f"({pulse_recording_count} pulse WAV files)\n"
+            )
+
         messagebox.showinfo(
             "Capture Outputs Saved",
             "Generated outputs:\n"
             "• Camera_Frames\n"
             "• Thermal_Frames\n"
-            "• Voice.wav\n"
+            f"{pulse_output_message}"
             "• Camera_Video.mp4\n"
             "• Thermal_Video.mp4\n"
             "• Thermal_Range_Video.mp4\n"
@@ -1699,326 +1763,468 @@ class CoBasV1App:
             f"Saved in: {output_folder}"
         )
 
-    def get_pulse_protocol_command(self, mode):
-        """
-        Return pulse protocol command and working folder for the given mode.
-        """
-
-        pulse_folder = os.path.join(
-            self.base_dir,
-            "Pulse Generation"
-        )
+    def get_pulse_command(self, recording_path):
+        """Return the command that generates, plays, and records one pulse."""
+        pulse_folder = os.path.join(self.base_dir, "Pulse Generation")
         pulse_script = os.path.join(
             pulse_folder,
             "pulse_protocol_generator.py"
         )
 
         if not os.path.exists(pulse_script):
-            print(f"[WARNING] Pulse protocol generator not found: {pulse_script}")
+            print(f"[WARNING] Pulse generator not found: {pulse_script}")
             return None, None
 
-        return [sys.executable, pulse_script, "--mode", mode], pulse_folder
+        command = [
+            sys.executable,
+            pulse_script,
+            "--mode",
+            "generate-play-record",
+            "--record-output",
+            os.path.abspath(recording_path),
+        ]
 
-    def get_pulse_protocol_audio_path(self):
-        """
-        Return the generated pulse protocol WAV path.
-        """
-
-        input_folder = os.path.join(
-            self.base_dir,
-            "Pulse Generation",
-            "Inputs"
-        )
-        expected_path = os.path.join(
-            input_folder,
-            "5_15sPause_BeaconProtocol.wav"
-        )
-
-        try:
-            candidates = [
-                os.path.join(input_folder, filename)
-                for filename in os.listdir(input_folder)
-                if filename.endswith("_15sPause_BeaconProtocol.wav")
-            ]
-        except OSError:
-            candidates = []
-
-        if not candidates:
-            return expected_path
-
-        # cycles_total is part of the generated filename. Selecting the newest
-        # matching WAV keeps duration synchronization correct if that setting
-        # is changed from its current value of five cycles.
-        return max(candidates, key=os.path.getmtime)
-
-    def get_pulse_protocol_duration_seconds(self):
-        """
-        Return the generated pulse protocol audio duration in seconds.
-        """
-
-        audio_path = self.get_pulse_protocol_audio_path()
-
-        if not os.path.exists(audio_path):
-            return None
-
-        try:
-            with wave.open(audio_path, "rb") as wf:
-                return wf.getnframes() / wf.getframerate()
-
-        except Exception as e:
-            print(f"[WARNING] Could not read pulse protocol duration: {e}")
-            return None
-
-    def generate_pulse_protocol_audio(self):
-        """
-        Generate pulse protocol audio before tracking starts.
-        """
-
-        command, pulse_folder = self.get_pulse_protocol_command("generate-only")
-
-        if command is None:
-            return False
-
-        try:
-            subprocess.run(
-                command,
-                cwd=pulse_folder,
-                check=True
+        if self.camera.microphone_device_id is not None:
+            command.extend(
+                [
+                    "--input-device",
+                    str(self.camera.microphone_device_id),
+                ]
             )
-            print("[INFO] Pulse protocol audio generated.")
-            return True
 
-        except Exception as e:
-            print(f"[WARNING] Could not generate pulse protocol audio: {e}")
-            return False
+        return command, pulse_folder
 
-    def start_pulse_protocol_playback(self):
+    def get_pulse_recording_path(self, pulse_number):
+        """Return the temporary WAV path for one pulse recording."""
+        timestamp = (
+            self.current_recording_timestamp
+            or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        )
+        return os.path.join(
+            self.captures_dir,
+            f"CoBas_V1_PulseVoice_{timestamp}_{pulse_number:03d}.wav"
+        )
+
+    @staticmethod
+    def write_silence_frames(wav_file, frame_count, frame_size):
+        """Write silence without allocating the entire interval in memory."""
+        remaining = max(0, int(frame_count))
+        silence_chunk = b"\0" * (4096 * frame_size)
+
+        while remaining:
+            chunk_frames = min(remaining, 4096)
+            wav_file.writeframesraw(
+                silence_chunk[:chunk_frames * frame_size]
+            )
+            remaining -= chunk_frames
+
+    def build_pulse_session_audio(self):
         """
-        Start playback for the already generated pulse protocol audio.
+        Build one timeline-aligned WAV for the continuous camera videos.
+
+        The individual two-second WAV files remain separate for export. Silence
+        fills the periods when the microphone was closed between pulses.
         """
-
-        if self.pulse_process is not None and self.pulse_process.poll() is None:
-            print("[INFO] Pulse protocol playback is already running.")
-            return self.pulse_process
-
-        command, pulse_folder = self.get_pulse_protocol_command("play-existing")
-
-        if command is None:
+        if (
+            not self.camera.is_recording
+            or self.camera.record_start_time is None
+        ):
             return None
+
+        available_recordings = [
+            recording
+            for recording in self.pulse_recordings
+            if os.path.exists(recording.get("path", ""))
+        ]
+
+        if not available_recordings:
+            return None
+
+        output_path = self.camera.temp_audio_path
+        if not output_path:
+            return None
+
+        first_path = available_recordings[0]["path"]
+        try:
+            with wave.open(first_path, "rb") as first_wav:
+                channels = first_wav.getnchannels()
+                sample_width = first_wav.getsampwidth()
+                sample_rate = first_wav.getframerate()
+        except Exception as error:
+            print(f"[WARNING] Could not inspect pulse recording: {error}")
+            return None
+
+        frame_size = channels * sample_width
+        current_frame = 0
+        session_duration = 0.0
+        if self.camera.record_start_time is not None:
+            session_duration = max(
+                0.0,
+                time.time() - self.camera.record_start_time
+            )
 
         try:
-            self.pulse_process = subprocess.Popen(
-                command,
-                cwd=pulse_folder,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1
-            )
-            print("[INFO] Pulse protocol playback started.")
-            return self.pulse_process
+            with wave.open(output_path, "wb") as output_wav:
+                output_wav.setnchannels(channels)
+                output_wav.setsampwidth(sample_width)
+                output_wav.setframerate(sample_rate)
 
-        except Exception as e:
-            self.pulse_process = None
-            print(f"[WARNING] Could not start pulse protocol playback: {e}")
+                for recording in sorted(
+                    available_recordings,
+                    key=lambda item: item["offset_seconds"],
+                ):
+                    target_frame = max(
+                        0,
+                        int(round(
+                            recording["offset_seconds"] * sample_rate
+                        )),
+                    )
+
+                    if target_frame > current_frame:
+                        self.write_silence_frames(
+                            output_wav,
+                            target_frame - current_frame,
+                            frame_size,
+                        )
+                        current_frame = target_frame
+
+                    with wave.open(recording["path"], "rb") as pulse_wav:
+                        pulse_format = (
+                            pulse_wav.getnchannels(),
+                            pulse_wav.getsampwidth(),
+                            pulse_wav.getframerate(),
+                        )
+                        expected_format = (
+                            channels,
+                            sample_width,
+                            sample_rate,
+                        )
+                        if pulse_format != expected_format:
+                            print(
+                                "[WARNING] Skipping pulse recording with "
+                                f"incompatible WAV format: {recording['path']}"
+                            )
+                            continue
+
+                        overlap_frames = max(
+                            0,
+                            current_frame - target_frame,
+                        )
+                        if overlap_frames:
+                            pulse_wav.setpos(
+                                min(overlap_frames, pulse_wav.getnframes())
+                            )
+
+                        pulse_frames = pulse_wav.readframes(
+                            pulse_wav.getnframes() - pulse_wav.tell()
+                        )
+                        output_wav.writeframesraw(pulse_frames)
+                        current_frame += len(pulse_frames) // frame_size
+
+                session_frames = int(round(
+                    session_duration * sample_rate
+                ))
+                if session_frames > current_frame:
+                    self.write_silence_frames(
+                        output_wav,
+                        session_frames - current_frame,
+                        frame_size,
+                    )
+
+            return output_path
+
+        except Exception as error:
+            print(f"[WARNING] Could not build pulse audio timeline: {error}")
             return None
 
-    def start_tracking_after_pulse_generation(self, start_token):
-        """
-        Generate audio first, then play it and start tracking as playback begins.
-        """
+    def start_pulse_sequence(self, start_token):
+        """Generate, play, and record the requested pulses one at a time."""
 
         def worker():
-            generated = self.generate_pulse_protocol_audio()
+            for pulse_number in range(1, self.requested_pulse_count + 1):
+                if start_token != self.tracking_start_token:
+                    return
+
+                recording_path = self.get_pulse_recording_path(pulse_number)
+                command, pulse_folder = self.get_pulse_command(recording_path)
+
+                if command is None:
+                    self.root.after(
+                        0,
+                        lambda: self.handle_pulse_sequence_failed(
+                            start_token,
+                            "Pulse generator was not found",
+                        )
+                    )
+                    return
+
+                try:
+                    with self.pulse_process_lock:
+                        if start_token != self.tracking_start_token:
+                            return
+
+                        pulse_process = subprocess.Popen(
+                            command,
+                            cwd=pulse_folder,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            bufsize=1,
+                        )
+                        self.pulse_process = pulse_process
+                except Exception as error:
+                    self.root.after(
+                        0,
+                        lambda error=error, pulse_number=pulse_number: (
+                            self.handle_pulse_sequence_failed(
+                                start_token,
+                                (
+                                    f"Pulse {pulse_number} could not start: "
+                                    f"{error}"
+                                ),
+                            )
+                        ),
+                    )
+                    return
+
+                pulse_offset = None
+                for line in pulse_process.stdout:
+                    line = line.strip()
+                    if line:
+                        print(f"[PULSE {pulse_number}] {line}")
+
+                    if "PLAYBACK_STARTED" in line:
+                        playback_started_at = time.time()
+                        try:
+                            playback_started_at = float(
+                                line.rsplit(maxsplit=1)[-1]
+                            )
+                        except (TypeError, ValueError):
+                            pass
+
+                        if self.camera.record_start_time is not None:
+                            pulse_offset = max(
+                                0.0,
+                                playback_started_at
+                                - self.camera.record_start_time,
+                            )
+                        else:
+                            pulse_offset = (
+                                (pulse_number - 1)
+                                * PULSE_DURATION_SECONDS
+                            )
+
+                        self.root.after(
+                            0,
+                            lambda pulse_number=pulse_number: (
+                                self.handle_pulse_started(
+                                    pulse_number,
+                                    start_token,
+                                )
+                            ),
+                        )
+
+                return_code = pulse_process.wait()
+                with self.pulse_process_lock:
+                    if self.pulse_process is pulse_process:
+                        self.pulse_process = None
+
+                if start_token != self.tracking_start_token:
+                    return
+
+                if (
+                    return_code != 0
+                    or pulse_offset is None
+                    or not os.path.exists(recording_path)
+                ):
+                    self.root.after(
+                        0,
+                        lambda pulse_number=pulse_number: (
+                            self.handle_pulse_sequence_failed(
+                                start_token,
+                                f"Pulse {pulse_number} playback or recording failed",
+                            )
+                        ),
+                    )
+                    return
+
+                self.pulse_recordings.append(
+                    {
+                        "path": recording_path,
+                        "offset_seconds": pulse_offset,
+                    }
+                )
+                self.root.after(
+                    0,
+                    lambda pulse_number=pulse_number: (
+                        self.handle_pulse_completed(
+                            pulse_number,
+                            start_token,
+                        )
+                    ),
+                )
 
             self.root.after(
                 0,
-                lambda: self.start_pulse_playback_and_tracking(
-                    generated,
-                    start_token
-                )
+                lambda: self.handle_pulse_sequence_finished(start_token)
             )
 
-        threading.Thread(
-            target=worker,
-            daemon=True
-        ).start()
+        threading.Thread(target=worker, daemon=True).start()
 
-    def start_pulse_playback_and_tracking(self, generated, start_token):
-        """
-        Start pulse playback, then wait for playback start before tracking.
-        """
-
-        self.is_preparing_tracking = False
-
+    def handle_pulse_started(self, pulse_number, start_token):
+        """Update the interface when one pulse begins."""
         if start_token != self.tracking_start_token:
             return
 
-        if not generated:
-            self.track_button.config(state="normal")
-            self.update_tracking_button()
-            self.update_status(
-                "Status: Pulse protocol could not be generated",
-                "● WARNING"
-            )
-            return
-
+        self.current_pulse_number = pulse_number
+        self.pulse_playback_end_time = (
+            time.time() + PULSE_DURATION_SECONDS
+        )
         self.update_status(
-            "Status: Pulse audio generated. Starting playback...",
-            "● STARTING"
+            (
+                f"Status: Playing and recording pulse {pulse_number} "
+                f"of {self.requested_pulse_count}"
+            ),
+            "● REC",
         )
 
-        pulse_process = self.start_pulse_protocol_playback()
-
-        if pulse_process is None:
-            self.track_button.config(state="normal")
-            self.update_tracking_button()
-            self.update_status(
-                "Status: Pulse protocol could not start; tracking not started",
-                "● WARNING"
-            )
+    def handle_pulse_completed(self, pulse_number, start_token):
+        """Report that one microphone stream was closed successfully."""
+        if start_token != self.tracking_start_token:
             return
 
-        def worker():
-            playback_started = False
-
-            for line in pulse_process.stdout:
-                if "PLAYBACK_STARTED" in line:
-                    playback_started = True
-                    self.root.after(
-                        0,
-                        lambda: self.begin_tracking_capture(
-                            pulse_process,
-                            start_token
-                        )
-                    )
-                    break
-
-            if not playback_started:
-                self.root.after(
-                    0,
-                    lambda: self.handle_pulse_playback_start_failed(pulse_process)
-                )
-                return
-
-            pulse_process.wait()
-            self.root.after(
-                0,
-                lambda: self.handle_pulse_playback_finished(pulse_process)
-            )
-
-        threading.Thread(
-            target=worker,
-            daemon=True
-        ).start()
-
-    def handle_pulse_playback_start_failed(self, pulse_process):
-        """
-        Reset UI if playback exits before confirming it started.
-        """
-
-        if self.pulse_process is not pulse_process:
-            return
-
-        self.pulse_process = None
-        self.track_button.config(state="normal")
-        self.update_tracking_button()
-        self.update_status(
-            "Status: Pulse playback failed before tracking started",
-            "● WARNING"
-        )
-
-    def handle_pulse_playback_finished(self, pulse_process):
-        """
-        Stop automatic recording and tracking after pulse playback ends.
-        """
-
-        if self.pulse_process is not pulse_process:
-            return
-
-        pulse_duration_seconds = self.get_pulse_protocol_duration_seconds()
-        self.pulse_process = None
         self.pulse_playback_end_time = None
+        self.record_timer_label.config(
+            text=(
+                f"Pulses: {pulse_number}/{self.requested_pulse_count}"
+            )
+        )
 
-        if not self.camera.is_tracking:
+        if pulse_number < self.requested_pulse_count:
+            self.update_status(
+                (
+                    f"Status: Pulse {pulse_number} recorded; "
+                    f"preparing pulse {pulse_number + 1}"
+                ),
+                "● REC",
+            )
+
+    def handle_pulse_sequence_failed(self, start_token, message):
+        """Stop the cameras safely if a pulse cannot be played or recorded."""
+        if start_token != self.tracking_start_token:
             return
 
-        self.cancel_preview_loop()
+        print(f"[WARNING] {message}")
+        self.finish_pulse_sequence(
+            completion_message=message,
+            indicator_text="● WARNING",
+        )
 
-        saved_video_path, saved_thermal_video_path, saved_voice_path = (
+    def handle_pulse_sequence_finished(self, start_token):
+        """Finalize the continuous camera session after the last pulse."""
+        if start_token != self.tracking_start_token:
+            return
+
+        self.finish_pulse_sequence(
+            completion_message=(
+                f"Completed {len(self.pulse_recordings)} "
+                "pulse recordings"
+            ),
+            indicator_text="● IDLE",
+        )
+
+    def finish_pulse_sequence(self, completion_message, indicator_text):
+        """Stop both cameras once and export the repeated-pulse session."""
+        self.is_preparing_tracking = False
+        self.pulse_sequence_active = False
+        self.pulse_playback_end_time = None
+        with self.pulse_process_lock:
+            self.pulse_process = None
+        self.cancel_preview_loop()
+        self.cancel_thermal_preview_loop()
+
+        session_audio_path = self.build_pulse_session_audio()
+        saved_video_path, saved_thermal_video_path, _ = (
             self.finalize_capture_session(
-                target_duration_seconds=pulse_duration_seconds
+                audio_path_override=session_audio_path
             )
         )
 
         self.camera.stop_camera()
         self.thermal_camera.stop_camera()
-        self.cancel_thermal_preview_loop()
 
         self.video_label.config(
             image="",
-            text="Timed recording complete.\n\nClick 'Start Tracking' to start again.",
+            text=(
+                "Pulse recording complete.\n\n"
+                "Click 'Start Tracking' to start again."
+            ),
             bg=COLORS["preview_bg"],
-            fg=COLORS["muted_text"]
+            fg=COLORS["muted_text"],
         )
         self.video_label.image = None
-
         self.thermal_video_label.config(
             image="",
-            text="Timed thermal recording complete.\n\nClick 'Start Tracking' to start again.",
+            text=(
+                "Thermal recording complete.\n\n"
+                "Click 'Start Tracking' to start again."
+            ),
             bg=COLORS["preview_bg"],
-            fg=COLORS["muted_text"]
+            fg=COLORS["muted_text"],
         )
         self.thermal_video_label.image = None
 
         self.record_button.config(
             text="Capture Video",
-            style="Capture.TButton"
+            style="Capture.TButton",
+            state="normal",
         )
-        self.record_timer_label.config(text="Recording: 0 second")
+        self.record_timer_label.config(
+            text=(
+                f"Pulses recorded: {len(self.pulse_recordings)}"
+            )
+        )
+        self.pulse_count_spinbox.config(state="normal")
         self.track_button.config(state="normal")
         self.update_tracking_button()
         self.refresh_info_panel()
 
-        if saved_video_path:
-            status_message = f"Status: Timed recording complete. Video saved to {saved_video_path}"
-            if saved_voice_path:
-                status_message = f"{status_message}; voice saved to {saved_voice_path}"
+        status_message = f"Status: {completion_message}"
+        if saved_video_path and saved_thermal_video_path:
+            status_message += "; camera and thermal videos saved"
+        self.update_status(status_message, indicator_text)
 
-            self.update_status(status_message, "● IDLE")
-        else:
-            self.update_status(
-                "Status: Timed recording complete",
-                "● IDLE"
-            )
+    def stop_pulse_sequence_process(self):
+        """Stop the active pulse playback/recording subprocess."""
+        with self.pulse_process_lock:
+            pulse_process = self.pulse_process
 
-    def stop_pulse_protocol_generation(self):
-        """
-        Stop pulse protocol generation if it is still running.
-        """
-
-        if self.pulse_process is None:
+        if pulse_process is None:
             return
 
-        if self.pulse_process.poll() is not None:
-            self.pulse_process = None
+        if pulse_process.poll() is not None:
+            with self.pulse_process_lock:
+                if self.pulse_process is pulse_process:
+                    self.pulse_process = None
             return
 
         try:
-            self.pulse_process.terminate()
-            self.pulse_process.wait(timeout=2)
-            print("[INFO] Pulse protocol generation stopped.")
+            pulse_process.terminate()
+            pulse_process.wait(timeout=2)
+            print("[INFO] Pulse playback and recording stopped.")
 
         except subprocess.TimeoutExpired:
-            self.pulse_process.kill()
-            self.pulse_process.wait(timeout=2)
-            print("[INFO] Pulse protocol generation killed.")
+            pulse_process.kill()
+            pulse_process.wait(timeout=2)
+            print("[INFO] Pulse playback and recording killed.")
 
-        except Exception as e:
-            print(f"[WARNING] Could not stop pulse protocol generation: {e}")
+        except Exception as error:
+            print(f"[WARNING] Could not stop pulse process: {error}")
 
         finally:
-            self.pulse_process = None
+            with self.pulse_process_lock:
+                if self.pulse_process is pulse_process:
+                    self.pulse_process = None
 
     # --------------------------------------------------
     # External Windows
@@ -2129,23 +2335,42 @@ class CoBasV1App:
 
     def start_tracking(self):
         """
-        Start camera preview safely.
+        Start a user-configured repeated two-second pulse capture.
         """
 
         print("Start Tracking clicked")
+
+        try:
+            requested_pulse_count = int(self.pulse_count_text.get())
+            if requested_pulse_count < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            messagebox.showwarning(
+                "Invalid Pulse Count",
+                "Enter a whole number greater than zero for the pulse count."
+            )
+            self.pulse_count_spinbox.focus_set()
+            return
 
         # Prevent duplicate preview loops before starting.
         self.cancel_preview_loop()
         self.cancel_thermal_preview_loop()
 
         self.is_preparing_tracking = True
-        self.tracking_start_token += 1
-        start_token = self.tracking_start_token
+        self.pulse_sequence_active = True
+        with self.pulse_process_lock:
+            self.tracking_start_token += 1
+            start_token = self.tracking_start_token
+        self.requested_pulse_count = requested_pulse_count
+        self.current_pulse_number = 0
+        self.pulse_recordings = []
+        self.current_recording_timestamp = None
         self.current_video_path = None
         self.current_thermal_video_path = None
-        self.current_voice_path = None
 
         self.start_thermal_camera_feed()
+        self.pulse_count_spinbox.config(state="disabled")
+        self.record_button.config(state="disabled")
 
         self.track_button.config(
             text="Preparing...",
@@ -2155,7 +2380,10 @@ class CoBasV1App:
 
         self.video_label.config(
             image="",
-            text="Generating pulse audio...\n\nTracking will start when playback starts.",
+            text=(
+                "Preparing continuous camera recording...\n\n"
+                f"{requested_pulse_count} pulses requested."
+            ),
             bg=COLORS["preview_bg"],
             fg=COLORS["muted_text"]
         )
@@ -2163,40 +2391,38 @@ class CoBasV1App:
 
         self.thermal_video_label.config(
             image="",
-            text="Preparing thermal camera...\n\nRecording starts with pulse playback.",
+            text=(
+                "Preparing thermal camera...\n\n"
+                "It will record from the first pulse through the last."
+            ),
             bg=COLORS["preview_bg"],
             fg=COLORS["muted_text"]
         )
         self.thermal_video_label.image = None
 
         self.update_status(
-            "Status: Generating pulse audio and preparing thermal camera...",
+            (
+                "Status: Preparing cameras for "
+                f"{requested_pulse_count} pulse recordings..."
+            ),
             "● STARTING"
         )
 
-        self.start_tracking_after_pulse_generation(start_token)
+        self.root.after(
+            0,
+            lambda: self.begin_tracking_capture(start_token)
+        )
 
-    def begin_tracking_capture(self, pulse_process, start_token):
+    def begin_tracking_capture(self, start_token):
         """
-        Start camera tracking and recording after pulse playback starts.
+        Start both continuous camera recorders before the first pulse.
         """
 
         if start_token != self.tracking_start_token:
             return
 
-        if self.pulse_process is not pulse_process:
-            return
-
-        self.track_button.config(state="normal")
-        pulse_duration_seconds = self.get_pulse_protocol_duration_seconds()
-
-        if pulse_duration_seconds is not None:
-            self.pulse_playback_end_time = time.time() + pulse_duration_seconds
-        else:
-            self.pulse_playback_end_time = None
-
         self.update_status(
-            "Status: Pulse playback started. Starting camera...",
+            "Status: Starting continuous camera recording...",
             "● STARTING"
         )
 
@@ -2220,16 +2446,22 @@ class CoBasV1App:
             # Change Start Tracking button into Stop Tracking.
             self.update_tracking_button()
 
-            # Automatically start the single synchronized recording pipeline.
-            self.start_active_recordings()
+            # Microphone capture is handled separately for each pulse.
+            self.start_active_recordings(record_audio=False)
 
             if self.current_video_path:
+                self.is_preparing_tracking = False
+                self.track_button.config(state="normal")
                 self.record_button.config(
                     text="Stop Recording",
-                    style="VideoStop.TButton"
+                    style="VideoStop.TButton",
+                    state="disabled",
                 )
                 self.update_status(
-                    "Status: Recording regular and thermal video during pulse playback",
+                    (
+                        "Status: Cameras recording continuously; "
+                        "starting pulse 1"
+                    ),
                     "● REC"
                 )
 
@@ -2239,7 +2471,21 @@ class CoBasV1App:
                         "Status: Regular recording active; thermal recording unavailable",
                         "● WARNING"
                     )
+
+                # Start refreshing frames before pulse playback begins so the
+                # regular video writer receives frames for the whole sequence.
+                self.update_camera_feed()
+                self.start_pulse_sequence(start_token)
             else:
+                self.is_preparing_tracking = False
+                self.pulse_sequence_active = False
+                self.pulse_count_spinbox.config(state="normal")
+                self.record_button.config(state="normal")
+                self.track_button.config(state="normal")
+                self.camera.stop_camera()
+                self.thermal_camera.stop_camera()
+                self.cancel_thermal_preview_loop()
+                self.update_tracking_button()
                 print("[WARNING] Could not start automatic video recording.")
                 self.record_button.config(
                     text="Capture Video",
@@ -2250,13 +2496,15 @@ class CoBasV1App:
                     "● WARNING"
                 )
 
-            # Start refreshing frames after recording is initialized.
-            self.update_camera_feed()
-
         else:
-            self.stop_pulse_protocol_generation()
+            self.is_preparing_tracking = False
+            self.pulse_sequence_active = False
+            self.stop_pulse_sequence_process()
             self.thermal_camera.stop_camera()
             self.cancel_thermal_preview_loop()
+            self.pulse_count_spinbox.config(state="normal")
+            self.record_button.config(state="normal")
+            self.track_button.config(state="normal")
 
             # Keep button as Start Tracking if camera failed.
             self.update_tracking_button()
@@ -2293,18 +2541,25 @@ class CoBasV1App:
         """
 
         self.is_preparing_tracking = False
-        self.tracking_start_token += 1
+        with self.pulse_process_lock:
+            self.tracking_start_token += 1
         self.pulse_playback_end_time = None
+        self.pulse_sequence_active = False
         self.track_button.config(state="normal")
 
         # Cancel preview update loop first.
         self.cancel_preview_loop()
         self.cancel_thermal_preview_loop()
 
-        # Stop pulse protocol generation alongside recording/tracking.
-        self.stop_pulse_protocol_generation()
+        # Stop the current pulse before closing the continuous camera session.
+        self.stop_pulse_sequence_process()
 
-        saved_video_path, saved_thermal_video_path, saved_voice_path = self.finalize_capture_session()
+        session_audio_path = self.build_pulse_session_audio()
+        saved_video_path, saved_thermal_video_path, _ = (
+            self.finalize_capture_session(
+                audio_path_override=session_audio_path
+            )
+        )
 
         # Release camera through backend.
         self.camera.stop_camera()
@@ -2330,9 +2585,13 @@ class CoBasV1App:
         # Reset record button and timer.
         self.record_button.config(
             text="Capture Video",
-            style="Capture.TButton"
+            style="Capture.TButton",
+            state="normal",
         )
-        self.record_timer_label.config(text="Recording: 0 second")
+        self.record_timer_label.config(
+            text=f"Pulses recorded: {len(self.pulse_recordings)}"
+        )
+        self.pulse_count_spinbox.config(state="normal")
 
         self.update_status(
             "Status: Tracking stopped",
@@ -2447,20 +2706,26 @@ class CoBasV1App:
 
         # Update recording timer while recording.
         if self.camera.is_recording:
-            if self.pulse_playback_end_time is not None:
-                remaining = max(
-                    0,
-                    int(self.pulse_playback_end_time - time.time() + 0.999)
-                )
-                second_text = "second" if remaining == 1 else "seconds"
+            if (
+                self.pulse_sequence_active
+                and self.pulse_playback_end_time is not None
+            ):
                 self.record_timer_label.config(
-                    text=f"Pulse remaining: {remaining} {second_text}"
+                    text=(
+                        f"Pulse {self.current_pulse_number}/"
+                        f"{self.requested_pulse_count}"
+                    )
+                )
+            elif self.pulse_sequence_active:
+                self.record_timer_label.config(
+                    text=(
+                        f"Pulses: {len(self.pulse_recordings)}/"
+                        f"{self.requested_pulse_count}"
+                    )
                 )
             else:
-                seconds = self.camera.get_recording_seconds()
-                second_text = "second" if seconds == 1 else "seconds"
                 self.record_timer_label.config(
-                    text=f"Recording: {seconds} {second_text}"
+                    text="Recording active"
                 )
 
         # Schedule next frame update.
@@ -2574,6 +2839,13 @@ class CoBasV1App:
         Start or stop video recording with audio.
         """
 
+        if self.pulse_sequence_active:
+            messagebox.showinfo(
+                "Pulse Sequence Active",
+                "Use 'Stop Tracking' to stop the repeated-pulse session."
+            )
+            return
+
         # Camera must be active before recording.
         if not self.camera.is_tracking:
             messagebox.showwarning(
@@ -2610,14 +2882,16 @@ class CoBasV1App:
 
         # Stop recording.
         else:
-            saved_video_path, saved_thermal_video_path, saved_voice_path = self.finalize_capture_session()
+            saved_video_path, saved_thermal_video_path, _ = (
+                self.finalize_capture_session()
+            )
 
             self.record_button.config(
                 text="Capture Video",
                 style="Capture.TButton"
             )
 
-            self.record_timer_label.config(text="Recording: 0 second")
+            self.record_timer_label.config(text="Recording stopped")
 
             if saved_video_path:
                 self.current_video_path = saved_video_path
@@ -2625,16 +2899,10 @@ class CoBasV1App:
                 if saved_thermal_video_path:
                     self.current_thermal_video_path = saved_thermal_video_path
 
-                if saved_voice_path:
-                    self.update_status(
-                        f"Status: Regular and thermal videos saved with voice at {saved_voice_path}",
-                        "● LIVE"
-                    )
-                else:
-                    self.update_status(
-                        "Status: Regular and thermal videos saved with audio",
-                        "● LIVE"
-                    )
+                self.update_status(
+                    "Status: Regular and thermal videos saved with audio",
+                    "● LIVE"
+                )
             else:
                 self.update_status(
                     "Status: Recording stopped, but file could not be saved",
@@ -2699,11 +2967,15 @@ class CoBasV1App:
         self.cancel_preview_loop()
         self.cancel_thermal_preview_loop()
 
-        # Stop pulse generation if app closes while tracking.
-        self.stop_pulse_protocol_generation()
+        # Stop pulse playback/recording if app closes during a sequence.
+        with self.pulse_process_lock:
+            self.tracking_start_token += 1
+        self.pulse_sequence_active = False
+        self.stop_pulse_sequence_process()
 
         # Finalize any active recordings before releasing camera resources.
-        self.stop_active_recordings()
+        session_audio_path = self.build_pulse_session_audio()
+        self.stop_active_recordings(audio_path_override=session_audio_path)
 
         # Release camera and recording resources.
         self.camera.stop_camera()

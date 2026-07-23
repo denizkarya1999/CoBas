@@ -1,33 +1,111 @@
-"""Map the default 15–30 °C display range to RGB heat-map colors."""
+"""Map temperatures from 0 °C through 60 °C to fixed RGB colors."""
 
 import math
 from types import MappingProxyType
 
 
-def _index_colors_by_temperature(colors, min_celsius, max_celsius):
-    """Return an immutable temperature lookup for evenly spaced colors."""
-    step = (max_celsius - min_celsius) / (len(colors) - 1)
-    return MappingProxyType(
-        {
-            min_celsius + index * step: color
-            for index, color in enumerate(colors)
-        }
+def _nearest_available_rgb(ideal_rgb, used_colors, reserved_colors):
+    """Return the closest unused 8-bit RGB value to a fractional RGB target."""
+    rounded_rgb = tuple(round(channel) for channel in ideal_rgb)
+
+    # Most interpolated colors are already unique. When 8-bit rounding causes
+    # a collision, search the immediately surrounding RGB values. Reserving
+    # the whole-degree anchors ensures those documented colors stay unchanged.
+    for radius in range(256):
+        channel_ranges = [
+            range(
+                max(0, channel - radius),
+                min(255, channel + radius) + 1,
+            )
+            for channel in rounded_rgb
+        ]
+        candidates = []
+        for red in channel_ranges[0]:
+            for green in channel_ranges[1]:
+                for blue in channel_ranges[2]:
+                    candidate = (red, green, blue)
+                    if candidate in used_colors or candidate in reserved_colors:
+                        continue
+                    distance = sum(
+                        (actual - ideal) ** 2
+                        for actual, ideal in zip(candidate, ideal_rgb)
+                    )
+                    candidates.append((distance, candidate))
+
+        if candidates:
+            return min(candidates)[1]
+
+    raise RuntimeError("unable to allocate a unique thermal RGB color")
+
+
+def _build_high_resolution_scale(
+    anchors,
+    min_celsius,
+    max_celsius,
+    resolution_celsius,
+):
+    """Build an immutable scale with one unique RGB value per interval."""
+    steps_per_celsius = round(1.0 / resolution_celsius)
+    total_steps = round(
+        (max_celsius - min_celsius) / resolution_celsius
     )
+    reserved_colors = frozenset(anchors.values())
+    used_colors = set()
+    scale = {}
+
+    for scale_index in range(total_steps + 1):
+        degree_offset, substep = divmod(scale_index, steps_per_celsius)
+        lower_celsius = min_celsius + degree_offset
+
+        if substep == 0:
+            color = anchors[lower_celsius]
+        else:
+            upper_celsius = lower_celsius + 1
+            weight = substep / steps_per_celsius
+            lower_rgb = anchors[lower_celsius]
+            upper_rgb = anchors[upper_celsius]
+            ideal_rgb = tuple(
+                lower + (upper - lower) * weight
+                for lower, upper in zip(lower_rgb, upper_rgb)
+            )
+            color = _nearest_available_rgb(
+                ideal_rgb,
+                used_colors,
+                reserved_colors,
+            )
+
+        if color in used_colors:
+            raise RuntimeError(
+                "thermal color scale contains a duplicate RGB value"
+            )
+
+        temperature = round(
+            min_celsius + scale_index * resolution_celsius,
+            10,
+        )
+        scale[temperature] = color
+        used_colors.add(color)
+
+    return MappingProxyType(scale)
 
 
 class CelsiusHeatMap:
-    """Map a configurable Celsius range across the complete RGB palette."""
+    """Provide unique fixed RGB colors at 0.05 °C intervals from 0–60 °C."""
 
-    # These endpoints control display sensitivity only. Sensor conversion still
-    # reports physical Celsius values; values outside this range are clamped by
-    # the renderer to the nearest endpoint color.
-    MIN_CELSIUS = 15
-    MAX_CELSIUS = 30
+    MIN_CELSIUS = 0
+    MAX_CELSIUS = 60
+    DEFAULT_DISPLAY_MIN_CELSIUS = 15
+    DEFAULT_DISPLAY_MAX_CELSIUS = 30
+    # The camera's specified NETD is 0.065 K RMS at 2 Hz. A 0.05 °C color
+    # interval is slightly finer, so sensor-significant changes cannot collapse
+    # into the same color interval.
+    SENSOR_NETD_CELSIUS = 0.065
+    COLOR_RESOLUTION_CELSIUS = 0.05
 
-    # Keep all 61 colors from the former 0–60 °C scale. They now act as evenly
-    # spaced palette stops across 15–30 °C, so the visual color range remains
-    # unchanged while a 0.25 °C change advances by one original color step.
-    _COLORS_BY_PALETTE_INDEX = MappingProxyType(
+    # Every whole Celsius degree owns one RGB color. Selecting a narrower
+    # display range must crop this scale, not stretch all colors over the
+    # selected endpoints.
+    ANCHOR_COLORS_BY_CELSIUS = MappingProxyType(
         {
             # Palette stops 0–7: very dark navy blue to dark blue.
             0: (0, 0, 48),
@@ -101,49 +179,18 @@ class CelsiusHeatMap:
             60: (255, 255, 255),
         }
     )
-    COLOR_STOPS = tuple(_COLORS_BY_PALETTE_INDEX.values())
-    CELSIUS_PER_COLOR_STEP = (MAX_CELSIUS - MIN_CELSIUS) / (
-        len(COLOR_STOPS) - 1
-    )
-    COLORS_BY_CELSIUS = _index_colors_by_temperature(
-        COLOR_STOPS,
+    COLORS_BY_CELSIUS = _build_high_resolution_scale(
+        ANCHOR_COLORS_BY_CELSIUS,
         MIN_CELSIUS,
         MAX_CELSIUS,
+        COLOR_RESOLUTION_CELSIUS,
     )
+    COLOR_STOPS = tuple(COLORS_BY_CELSIUS.values())
+    CELSIUS_PER_COLOR_STEP = COLOR_RESOLUTION_CELSIUS
 
-    def __init__(self, min_celsius=None, max_celsius=None):
-        """Create a heat map, using 15–30 °C when no range is supplied."""
-        if min_celsius is None:
-            min_celsius = self.MIN_CELSIUS
-        if max_celsius is None:
-            max_celsius = self.MAX_CELSIUS
-
-        try:
-            min_celsius = float(min_celsius)
-            max_celsius = float(max_celsius)
-        except (TypeError, ValueError) as exc:
-            raise TypeError("temperature range values must be real numbers") from exc
-
-        if not math.isfinite(min_celsius) or not math.isfinite(max_celsius):
-            raise ValueError("temperature range values must be finite")
-        if max_celsius <= min_celsius:
-            raise ValueError("maximum temperature must be greater than minimum")
-
-        # Store the selected endpoints on this instance. Class-level constants
-        # remain available as defaults for existing callers and future dialogs.
-        self.MIN_CELSIUS = min_celsius
-        self.MAX_CELSIUS = max_celsius
-        self.CELSIUS_PER_COLOR_STEP = (
-            max_celsius - min_celsius
-        ) / (len(self.COLOR_STOPS) - 1)
-        self.COLORS_BY_CELSIUS = _index_colors_by_temperature(
-            self.COLOR_STOPS,
-            min_celsius,
-            max_celsius,
-        )
-
-        # The public lookup maps each evenly spaced temperature stop to an RGB
-        # tuple and remains immutable so callers cannot change shared colors.
+    def __init__(self):
+        # Keep the public lookup immutable so callers cannot change shared
+        # Celsius-to-color associations.
         self.mapping = self.COLORS_BY_CELSIUS
 
     def rgb_for_celsius(self, celsius):
@@ -161,28 +208,21 @@ class CelsiusHeatMap:
                 f"and {self.MAX_CELSIUS:g} °C"
             )
 
-        # Convert the requested temperature into a fractional palette index.
-        # The selected minimum maps to stop 0 and the selected maximum maps to
-        # stop 60 without changing any of the original RGB colors.
-        palette_position = (
+        # Quantize to the nearest 0.05 °C color interval. This is finer than the
+        # camera's specified 0.065 K NETD while remaining deterministic and
+        # avoiding duplicate RGB colors caused by ordinary 8-bit interpolation.
+        color_position = (
             (temperature - self.MIN_CELSIUS)
-            / (self.MAX_CELSIUS - self.MIN_CELSIUS)
-            * (len(self.COLOR_STOPS) - 1)
+            / self.COLOR_RESOLUTION_CELSIUS
         )
-        lower_index = math.floor(palette_position)
-        upper_index = math.ceil(palette_position)
-        lower_rgb = self.COLOR_STOPS[lower_index]
-        if lower_index == upper_index:
-            return lower_rgb
-
-        # Temperatures between two stops blend their neighboring colors to keep
-        # the output smooth rather than jumping abruptly between colors.
-        upper_rgb = self.COLOR_STOPS[upper_index]
-        weight = palette_position - lower_index
-        return tuple(
-            round(lower + (upper - lower) * weight)
-            for lower, upper in zip(lower_rgb, upper_rgb)
+        color_index = max(
+            0,
+            min(
+                len(self.COLOR_STOPS) - 1,
+                math.floor(color_position + 0.5),
+            ),
         )
+        return self.COLOR_STOPS[color_index]
 
     def __getitem__(self, celsius):
         """Allow ``heat_map[temperature]`` lookup syntax."""

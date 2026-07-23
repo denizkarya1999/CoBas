@@ -1,7 +1,6 @@
 import cv2
 import os
 import queue
-import shutil
 import time
 import threading
 import subprocess
@@ -60,13 +59,12 @@ class Camera:
         self.audio_available = True
         self.audio_chunks_written = 0
         self.audio_chunks_dropped = 0
+        self.record_audio_with_video = False
 
         # Recording paths
         self.temp_video_path = None
         self.temp_audio_path = None
         self.final_video_path = None
-        self.voice_audio_path = None
-        self.last_saved_voice_path = None
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -399,9 +397,9 @@ class Camera:
     # Video Recording with Audio
     # --------------------------------------------------
 
-    def start_recording(self, timestamp=None):
+    def start_recording(self, timestamp=None, record_audio=True):
         """
-        Start video and microphone audio recording.
+        Start video recording, optionally with continuous microphone audio.
         """
 
         if self.cap is None or not self.cap.isOpened():
@@ -427,12 +425,6 @@ class Camera:
             f"CoBas_V1_TempAudio_{timestamp}.wav"
         )
 
-        self.voice_audio_path = os.path.join(
-            self.output_dir,
-            f"CoBas_V1_Voice_{timestamp}.wav"
-        )
-        self.last_saved_voice_path = None
-
         self.final_video_path = os.path.join(
             self.output_dir,
             f"CoBas_V1_Video_{timestamp}.mp4"
@@ -452,7 +444,9 @@ class Camera:
             self.video_writer = None
             return None
 
-        self._start_audio_recording()
+        self.record_audio_with_video = bool(record_audio)
+        if self.record_audio_with_video:
+            self._start_audio_recording()
 
         self.is_recording = True
         self.record_start_time = time.time()
@@ -492,10 +486,14 @@ class Camera:
 
         self.video_writer = None
 
-        audio_path = self._stop_audio_recording()
+        if self.record_audio_with_video:
+            audio_path = self._stop_audio_recording()
+        else:
+            audio_path = None
 
         self.is_recording = False
         self.record_start_time = None
+        self.record_audio_with_video = False
 
         return audio_path
 
@@ -520,8 +518,6 @@ class Camera:
 
             return None
 
-        self.last_saved_voice_path = self._save_voice_copy(audio_path)
-
         merged_path = self._merge_video_audio(
             self.temp_video_path,
             audio_path,
@@ -531,20 +527,6 @@ class Camera:
         )
 
         return merged_path
-
-    def _save_voice_copy(self, audio_path):
-        if not audio_path or not os.path.exists(audio_path):
-            return None
-
-        if not self.voice_audio_path:
-            return None
-
-        try:
-            shutil.copyfile(audio_path, self.voice_audio_path)
-            return self.voice_audio_path
-        except Exception as e:
-            print(f"Voice copy save failed: {e}")
-            return None
 
     def _merge_video_audio(
         self,

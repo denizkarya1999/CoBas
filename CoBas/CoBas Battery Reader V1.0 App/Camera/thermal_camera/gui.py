@@ -4,7 +4,6 @@ import os
 import queue
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from datetime import datetime
@@ -12,22 +11,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from . import celsius_heat_map as backend_heat_map
-
-# The copied thermal backend imports celsius_heat_map by its standalone
-# top-level name. Register this package's copied module before loading the
-# backend so the same source works both standalone and inside CoBas.
-sys.modules["celsius_heat_map"] = backend_heat_map
-
 from . import thermal_camera_logic as backend_logic
 
-
-# The copied grayscale backend imports thermal_camera_logic by its original
-# top-level name. Point that name at this package's copied backend before the
-# grayscale module is loaded, so both modes share the same local implementation.
-sys.modules["thermal_camera_logic"] = backend_logic
-
-from .grayscale_camera_logic import (  # noqa: E402
+from .grayscale_camera_logic import (
     GrayscaleThermalRenderer as BackendGrayscaleThermalRenderer,
 )
 
@@ -171,7 +157,7 @@ class _PreviewRendererMixin:
             marker_data,
             label_positions,
         ):
-            label = f"{name} {temperature:.1f}°"
+            label = f"{name} {temperature:.2f}°"
             text_box = draw.textbbox((0, 0), label, font=marker_font)
             text_width = text_box[2] - text_box[0]
             text_height = text_box[3] - text_box[1]
@@ -257,13 +243,13 @@ class _PreviewRendererMixin:
             fraction = index / (LEGEND_TICK_COUNT - 1)
             y = int(round(bar_top + fraction * bar_height))
             if celsius_range is None:
-                label = "--.- °C"
+                label = "--.-- °C"
             else:
                 min_celsius, max_celsius = celsius_range
                 temperature = max_celsius + (
                     min_celsius - max_celsius
                 ) * fraction
-                label = f"{temperature:.1f} °C"
+                label = f"{temperature:.2f} °C"
             draw.line(
                 (bar_right, y, bar_right + tick_length, y),
                 fill=LEGEND_FOREGROUND,
@@ -387,9 +373,10 @@ class ColoredThermalRenderer(
 
     def temperature_legend_title(self):
         min_celsius, max_celsius = self.legend_celsius_range()
+        color_resolution = self.COLOR_RESOLUTION_CELSIUS
         return (
-            f"FIXED {min_celsius:g}–{max_celsius:g} °C RANGE\n"
-            "WHITE HOT · BLUE COLD"
+            f"0–60 °C · {color_resolution:.2f} °C COLORS\n"
+            f"DISPLAYING {min_celsius:g}–{max_celsius:g} °C"
         )
 
 

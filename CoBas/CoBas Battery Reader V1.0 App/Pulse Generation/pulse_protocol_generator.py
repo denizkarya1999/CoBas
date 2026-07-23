@@ -1,201 +1,204 @@
-"""Generate and play the CoBas recording pulse protocol."""
+"""Generate, play, and optionally record one two-second CoBas chirp pulse."""
 
 import argparse
 import os
+import time
 import wave
 
 import numpy as np
 import sounddevice as sd
-from tqdm import tqdm
 
 
-# ==========================================================
-# USER SETTINGS
-# ==========================================================
+SAMPLE_RATE = 48_000
+PULSE_DURATION_SECONDS = 2.0
+START_FREQUENCY = 15_000.0
+END_FREQUENCY = 19_200.0
+AMPLITUDE = 0.85
+FADE_MILLISECONDS = 5.0
 
-sample_rate = 48000
-
-# --- Alignment structure ---
-initial_silence_sec = 30.0
-beacon_freq = 10000
-beacon_duration_sec = 2.0
-guard_silence_sec = 1.5
-tail_silence_sec = 5.0
-
-# --- Chirp pulse train ---
-pulse_duration = 0.10
-gap_duration = 0.05
-start_freq = 15000.0
-end_freq = 19200.0
-amplitude = 0.85
-fade_ms = 5.0
-
-cycles_total = 5
-active_secs = 60.0
-
-# ==========================================================
-# SAVE INTO INPUTS FOLDER
-# ==========================================================
-
-input_dir = "Inputs"
-os.makedirs(input_dir, exist_ok=True)
-
-output_file = f"{cycles_total}_15sPause_BeaconProtocol.wav"
-output_path = os.path.join(input_dir, output_file)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(SCRIPT_DIR, "Inputs")
+OUTPUT_PATH = os.path.join(INPUT_DIR, "2_second_pulse.wav")
 
 
-# ==========================================================
-# UTILITY FUNCTIONS
-# ==========================================================
+def apply_fade(signal, fade_milliseconds=FADE_MILLISECONDS):
+    """Fade both ends of a pulse to prevent playback clicks."""
+    fade_samples = int(
+        round(fade_milliseconds * 1e-3 * SAMPLE_RATE)
+    )
 
-def silence(sec):
-    return np.zeros(int(round(sec * sample_rate)), dtype=np.float32)
+    if fade_samples == 0 or 2 * fade_samples >= signal.size:
+        return signal
 
-
-def tone(freq, sec):
-    t = np.arange(int(round(sec * sample_rate)), dtype=np.float32) / sample_rate
-    return (amplitude * np.sin(2.0 * np.pi * freq * t)).astype(np.float32)
-
-
-def apply_fade(x, fade_ms):
-    fade_samp = int(round(fade_ms * 1e-3 * sample_rate))
-
-    if fade_samp == 0 or 2 * fade_samp >= x.size:
-        return x
-
-    w = np.ones_like(x)
-    w[:fade_samp] = np.linspace(0.0, 1.0, fade_samp, dtype=np.float32)
-    w[-fade_samp:] = np.linspace(1.0, 0.0, fade_samp, dtype=np.float32)
-
-    return x * w
-
-
-def build_signal():
-    with tqdm(total=7, desc="Generating Protocol") as pbar:
-        beacon_tone = apply_fade(tone(beacon_freq, beacon_duration_sec), fade_ms)
-        pbar.update(1)
-
-        ns_pulse = int(round(sample_rate * pulse_duration))
-        t = np.arange(ns_pulse, dtype=np.float32) / sample_rate
-
-        k = (end_freq - start_freq) / pulse_duration
-        phase = 2.0 * np.pi * (start_freq * t + 0.5 * k * t * t)
-
-        pulse = (amplitude * np.sin(phase)).astype(np.float32)
-        pulse = apply_fade(pulse, fade_ms)
-        pbar.update(1)
-
-        gap = silence(gap_duration)
-        small_cycle = np.concatenate([pulse, gap])
-        pbar.update(1)
-
-        ns_active = int(round(active_secs * sample_rate))
-        cycles_in_block = ns_active // small_cycle.size
-        residual = ns_active - cycles_in_block * small_cycle.size
-
-        active_block = np.concatenate(
-            [small_cycle] * cycles_in_block +
-            ([small_cycle[:residual]] if residual else [])
-        )
-        pbar.update(1)
-
-        chirps = np.concatenate([active_block] * cycles_total)
-        pbar.update(1)
-
-        full_signal = np.concatenate([
-            silence(initial_silence_sec),
-            beacon_tone,
-            silence(guard_silence_sec),
-            chirps,
-            silence(guard_silence_sec),
-            beacon_tone,
-            silence(tail_silence_sec)
-        ])
-        pbar.update(1)
-
-        pcm = np.rint(
-            np.clip(full_signal, -1.0, 1.0) * 32767.0
-        ).astype(np.int16)
-        pbar.update(1)
-
-    return full_signal, pcm
+    window = np.ones_like(signal)
+    window[:fade_samples] = np.linspace(
+        0.0,
+        1.0,
+        fade_samples,
+        dtype=np.float32,
+    )
+    window[-fade_samples:] = np.linspace(
+        1.0,
+        0.0,
+        fade_samples,
+        dtype=np.float32,
+    )
+    return signal * window
 
 
-def write_wav(pcm):
-    with wave.open(output_path, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm.tobytes())
+def build_pulse():
+    """Build one linear chirp lasting exactly two seconds."""
+    sample_count = int(round(SAMPLE_RATE * PULSE_DURATION_SECONDS))
+    time_axis = np.arange(sample_count, dtype=np.float32) / SAMPLE_RATE
+    sweep_rate = (
+        END_FREQUENCY - START_FREQUENCY
+    ) / PULSE_DURATION_SECONDS
+    phase = 2.0 * np.pi * (
+        START_FREQUENCY * time_axis
+        + 0.5 * sweep_rate * time_axis * time_axis
+    )
+    signal = (AMPLITUDE * np.sin(phase)).astype(np.float32)
+    return apply_fade(signal)
+
+
+def write_wav(path, signal):
+    """Write a floating-point mono signal as a 16-bit WAV."""
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    pcm = np.rint(
+        np.clip(signal, -1.0, 1.0) * 32767.0
+    ).astype(np.int16)
+
+    with wave.open(path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(pcm.tobytes())
 
 
 def read_wav(path):
-    with wave.open(path, "rb") as wf:
-        channels = wf.getnchannels()
-        rate = wf.getframerate()
-        frames = wf.readframes(wf.getnframes())
+    """Read a mono 16-bit WAV into a floating-point signal."""
+    with wave.open(path, "rb") as wav_file:
+        channels = wav_file.getnchannels()
+        sample_width = wav_file.getsampwidth()
+        rate = wav_file.getframerate()
+        frames = wav_file.readframes(wav_file.getnframes())
 
-    signal = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels != 1 or sample_width != 2:
+        raise ValueError("The pulse WAV must be mono and 16-bit.")
 
-    if channels > 1:
-        signal = signal.reshape(-1, channels)
-
-    return signal, rate
-
-
-def generate_protocol():
-    full_signal, pcm = build_signal()
-    write_wav(pcm)
-
-    total_duration = full_signal.size / sample_rate
-
-    print(f"Wrote: {output_path}")
-    print(f"Total duration: {total_duration:.2f} s ({total_duration / 60:.2f} min)")
-
-    return full_signal
+    signal = np.frombuffer(frames, dtype=np.int16).astype(np.float32)
+    return signal / 32768.0, rate
 
 
-def play_protocol(signal=None, rate=sample_rate):
+def generate_pulse():
+    """Generate and save a fresh copy of the two-second pulse."""
+    signal = build_pulse()
+    write_wav(OUTPUT_PATH, signal)
+    print(f"Wrote: {OUTPUT_PATH}")
+    print(f"Pulse duration: {signal.size / SAMPLE_RATE:.2f} seconds")
+    return signal
+
+
+def play_pulse(signal=None, rate=SAMPLE_RATE):
+    """Play one pulse without opening an input stream."""
     if signal is None:
-        signal, rate = read_wav(output_path)
-
-    print("Playing pulse protocol...")
-    print("PLAYBACK_STARTED", flush=True)
+        signal, rate = read_wav(OUTPUT_PATH)
 
     try:
-        sd.play(signal, samplerate=rate, blocking=True)
+        playback_started_at = time.time()
+        sd.play(signal, samplerate=rate, blocking=False)
+        print(
+            f"PLAYBACK_STARTED {playback_started_at:.9f}",
+            flush=True,
+        )
+        sd.wait()
+        print("PULSE_FINISHED", flush=True)
+    finally:
         sd.stop()
-        print("Pulse protocol playback finished.")
 
-    except KeyboardInterrupt:
-        sd.stop()
-        print("Pulse protocol playback stopped.")
 
-    except Exception as e:
+def play_and_record_pulse(
+    signal,
+    recording_path,
+    input_device=None,
+):
+    """
+    Play and record one pulse through a single duplex stream.
+
+    sounddevice creates the input and output streams together, records exactly
+    the number of samples in the pulse, and closes both when playback finishes.
+    """
+    playback = np.asarray(signal, dtype=np.float32).reshape(-1, 1)
+
+    try:
+        playback_started_at = time.time()
+        recording = sd.playrec(
+            playback,
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            device=(input_device, None),
+            blocking=False,
+        )
+        print(
+            f"PLAYBACK_STARTED {playback_started_at:.9f}",
+            flush=True,
+        )
+        sd.wait()
+        write_wav(recording_path, recording.reshape(-1))
+        print(f"PULSE_FINISHED {recording_path}", flush=True)
+    finally:
         sd.stop()
-        print(f"Pulse protocol playback failed: {e}")
-        raise
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate and play pulse protocol audio.")
+    parser = argparse.ArgumentParser(
+        description="Generate and use one two-second CoBas chirp pulse."
+    )
     parser.add_argument(
         "--mode",
-        choices=["generate-and-play", "generate-only", "play-existing"],
-        default="generate-and-play"
+        choices=[
+            "generate-only",
+            "play-existing",
+            "generate-and-play",
+            "generate-play-record",
+        ],
+        default="generate-and-play",
+    )
+    parser.add_argument(
+        "--record-output",
+        help="WAV path for microphone audio captured during the pulse.",
+    )
+    parser.add_argument(
+        "--input-device",
+        type=int,
+        default=None,
+        help="sounddevice input-device index; defaults to the system input.",
     )
     args = parser.parse_args()
 
     if args.mode == "generate-only":
-        generate_protocol()
+        generate_pulse()
         return
 
     if args.mode == "play-existing":
-        play_protocol()
+        play_pulse()
         return
 
-    signal = generate_protocol()
-    play_protocol(signal)
+    signal = generate_pulse()
+
+    if args.mode == "generate-play-record":
+        if not args.record_output:
+            parser.error("--record-output is required for generate-play-record")
+        play_and_record_pulse(
+            signal,
+            args.record_output,
+            input_device=args.input_device,
+        )
+        return
+
+    play_pulse(signal)
 
 
 if __name__ == "__main__":

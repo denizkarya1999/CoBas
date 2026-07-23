@@ -1,28 +1,23 @@
 """Grayscale rendering for the MLX90642 thermal camera."""
 
 import math
-import sys
-from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
-# Import the shared thermal-camera implementation.
-# ---------------------------------------------------------------------------
-
-# Locate the project folder containing thermal_camera_logic.py.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-# Add the project folder to Python's module search path only once.
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-# Import the sensor dimensions and the common renderer base class.
-from thermal_camera_logic import (  # noqa: E402
-    SENSOR_HEIGHT,
-    SENSOR_WIDTH,
-    ThermalRenderer,
-    raw_to_celsius,
-)
+# Use package-relative imports in CoBas while retaining direct execution support.
+try:
+    from .thermal_camera_logic import (
+        SENSOR_HEIGHT,
+        SENSOR_WIDTH,
+        ThermalRenderer,
+        raw_to_celsius,
+    )
+except ImportError:
+    from thermal_camera_logic import (
+        SENSOR_HEIGHT,
+        SENSOR_WIDTH,
+        ThermalRenderer,
+        raw_to_celsius,
+    )
 
 
 class GrayscaleThermalRenderer(ThermalRenderer):

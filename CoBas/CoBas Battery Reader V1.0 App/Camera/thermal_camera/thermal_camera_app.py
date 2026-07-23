@@ -13,32 +13,56 @@ import tkinter as tk
 
 # Import moved symbols explicitly so existing callers can continue importing
 # them from thermal_camera_app while their implementations live in logic.
-from thermal_camera_logic import (
-    CameraWorker,
-    DriverError,
-    FfmpegRecorder,
-    LIB,
-    MLX90642Camera,
-    MockCamera,
-    PALETTE,
-    RECORD_FPS,
-    RECORD_HEIGHT,
-    RECORD_WIDTH,
-    ROOT,
-    SENSOR_HEIGHT,
-    SENSOR_PIXELS,
-    SENSOR_WIDTH,
-    SHARED_LIB,
-    ThermalRenderer,
-    build_shared_library,
-    frame_statistics,
-    raw_to_celsius,
-    signed_word,
-)
+try:
+    from .thermal_camera_logic import (
+        CameraWorker,
+        DriverError,
+        FfmpegRecorder,
+        LIB,
+        MLX90642Camera,
+        MockCamera,
+        PALETTE,
+        RECORD_FPS,
+        RECORD_HEIGHT,
+        RECORD_WIDTH,
+        ROOT,
+        SENSOR_HEIGHT,
+        SENSOR_PIXELS,
+        SENSOR_WIDTH,
+        SHARED_LIB,
+        ThermalRenderer,
+        build_shared_library,
+        frame_statistics,
+        raw_to_celsius,
+        signed_word,
+    )
+except ImportError:
+    from thermal_camera_logic import (
+        CameraWorker,
+        DriverError,
+        FfmpegRecorder,
+        LIB,
+        MLX90642Camera,
+        MockCamera,
+        PALETTE,
+        RECORD_FPS,
+        RECORD_HEIGHT,
+        RECORD_WIDTH,
+        ROOT,
+        SENSOR_HEIGHT,
+        SENSOR_PIXELS,
+        SENSOR_WIDTH,
+        SHARED_LIB,
+        ThermalRenderer,
+        build_shared_library,
+        frame_statistics,
+        raw_to_celsius,
+        signed_word,
+    )
 
 
 # The reusable legend is shared by the regular and grayscale camera windows.
-LEGEND_GRADIENT_STEPS = 96
+LEGEND_GRADIENT_STEPS = 320
 LEGEND_TICK_COUNT = 5
 LEGEND_PANEL_WIDTH = 178
 LEGEND_GAP = 24
@@ -65,12 +89,15 @@ class TemperatureRangeDialog(simpledialog.Dialog):
     def body(self, parent):
         """Build the two-field form and focus the minimum entry."""
         parent.columnconfigure(1, weight=1)
+        color_resolution = ThermalRenderer.COLOR_RESOLUTION_CELSIUS
 
         ttk.Label(
             parent,
             text=(
-                "Choose the temperatures represented by the coldest and "
-                "hottest palette colors."
+                "Choose the displayed portion of the fixed 0–60 °C color "
+                f"map. Each {color_resolution:.2f} °C interval has a unique "
+                "color; temperatures outside the displayed range use its "
+                "endpoint colors."
             ),
             wraplength=360,
             justify="left",
@@ -147,6 +174,17 @@ class TemperatureRangeDialog(simpledialog.Dialog):
             messagebox.showerror(
                 "Invalid Temperature Range",
                 "Maximum temperature must be greater than minimum temperature.",
+                parent=self,
+            )
+            return False
+
+        scale_min = ThermalRenderer.COLOR_SCALE_MIN_CELSIUS
+        scale_max = ThermalRenderer.COLOR_SCALE_MAX_CELSIUS
+        if minimum < scale_min or maximum > scale_max:
+            messagebox.showerror(
+                "Invalid Temperature Range",
+                f"Enter a range within the fixed {scale_min:g}–"
+                f"{scale_max:g} °C color scale.",
                 parent=self,
             )
             return False
@@ -351,9 +389,10 @@ class ThermalCameraApp(tk.Tk):
     def _temperature_legend_title(self):
         """Describe the endpoints of the regular thermal palette."""
         min_celsius, max_celsius = self.renderer.legend_celsius_range()
+        color_resolution = self.renderer.COLOR_RESOLUTION_CELSIUS
         return (
-            f"FIXED {min_celsius:g}–{max_celsius:g} °C RANGE\n"
-            "WHITE HOT · BLUE COLD"
+            f"0–60 °C · {color_resolution:.2f} °C COLORS\n"
+            f"DISPLAYING {min_celsius:g}–{max_celsius:g} °C"
         )
 
     def _create_temperature_legend(self):
@@ -409,7 +448,7 @@ class ThermalCameraApp(tk.Tk):
                 0,
                 anchor="w",
                 fill="#f3f5f8",
-                text="--.- °C",
+                text="--.-- °C",
                 font=("TkDefaultFont", 10),
                 tags=(legend_tag,),
             )
@@ -448,7 +487,7 @@ class ThermalCameraApp(tk.Tk):
                 0,
                 anchor="e",
                 fill=color,
-                text=f"{name} --.-°",
+                text=f"{name} --.--°",
                 font=("TkDefaultFont", 8, "bold"),
                 tags=(legend_tag, "temperature_extrema"),
                 state="hidden",
@@ -537,7 +576,7 @@ class ThermalCameraApp(tk.Tk):
             self.canvas.coords(text_item, bar_left - 10, label_y)
             self.canvas.itemconfigure(
                 text_item,
-                text=f"{name} {temperature:.1f}°",
+                text=f"{name} {temperature:.2f}°",
                 state="normal",
             )
             self.canvas.itemconfigure(line_item, state="normal")
@@ -606,13 +645,13 @@ class ThermalCameraApp(tk.Tk):
             self.canvas.coords(line_item, bar_right, y, bar_right + 8, y)
 
             if celsius_range is None:
-                label = "--.- °C"
+                label = "--.-- °C"
             else:
                 min_celsius, max_celsius = celsius_range
                 temperature = max_celsius + (
                     min_celsius - max_celsius
                 ) * fraction
-                label = f"{temperature:.1f} °C"
+                label = f"{temperature:.2f} °C"
 
             self.canvas.coords(text_item, bar_right + 14, y)
             self.canvas.itemconfigure(text_item, text=label)

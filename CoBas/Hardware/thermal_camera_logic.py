@@ -10,7 +10,12 @@ import threading
 import time
 from pathlib import Path
 
-from celsius_heat_map import CelsiusHeatMap
+try:
+    # Package import used by the integrated CoBas application.
+    from .celsius_heat_map import CelsiusHeatMap
+except ImportError:
+    # Standalone Hardware scripts place this directory directly on sys.path.
+    from celsius_heat_map import CelsiusHeatMap
 
 
 ROOT = Path(__file__).resolve().parent
@@ -30,8 +35,8 @@ RECORD_WIDTH = int(os.environ.get("MLX90642_RECORD_WIDTH", "640"))
 RECORD_HEIGHT = int(os.environ.get("MLX90642_RECORD_HEIGHT", "480"))
 RECORD_FPS = int(os.environ.get("MLX90642_RECORD_FPS", "8"))
 
-# Keep the public palette name for existing callers. The same 61 RGB colors are
-# evenly spaced across the default 15–30 °C display range.
+# Keep the public palette name for existing callers. It contains one unique RGB
+# value for every 0.05 °C interval on the fixed 0–60 °C color scale.
 PALETTE = list(CelsiusHeatMap.COLORS_BY_CELSIUS.values())
 
 
@@ -219,10 +224,45 @@ class CameraWorker(threading.Thread):
 
 
 class ThermalRenderer:
+    COLOR_SCALE_MIN_CELSIUS = CelsiusHeatMap.MIN_CELSIUS
+    COLOR_SCALE_MAX_CELSIUS = CelsiusHeatMap.MAX_CELSIUS
+    COLOR_RESOLUTION_CELSIUS = CelsiusHeatMap.COLOR_RESOLUTION_CELSIUS
+    SENSOR_NETD_CELSIUS = CelsiusHeatMap.SENSOR_NETD_CELSIUS
+    DEFAULT_MIN_CELSIUS = CelsiusHeatMap.DEFAULT_DISPLAY_MIN_CELSIUS
+    DEFAULT_MAX_CELSIUS = CelsiusHeatMap.DEFAULT_DISPLAY_MAX_CELSIUS
+
     def __init__(self, min_celsius=None, max_celsius=None):
-        # A renderer owns its display range. This keeps GUI-selected endpoints
-        # local to one camera window instead of changing module-wide state.
-        self.heat_map = CelsiusHeatMap(min_celsius, max_celsius)
+        # The heat map always owns the physical 0–60 °C color associations. A
+        # renderer's selected range only crops that scale and clamps pixels
+        # outside the visible interval to its endpoint colors.
+        self.heat_map = CelsiusHeatMap()
+        if min_celsius is None:
+            min_celsius = self.DEFAULT_MIN_CELSIUS
+        if max_celsius is None:
+            max_celsius = self.DEFAULT_MAX_CELSIUS
+
+        try:
+            min_celsius = float(min_celsius)
+            max_celsius = float(max_celsius)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("temperature range values must be real numbers") from exc
+
+        if not math.isfinite(min_celsius) or not math.isfinite(max_celsius):
+            raise ValueError("temperature range values must be finite")
+        if max_celsius <= min_celsius:
+            raise ValueError("maximum temperature must be greater than minimum")
+        if (
+            min_celsius < self.COLOR_SCALE_MIN_CELSIUS
+            or max_celsius > self.COLOR_SCALE_MAX_CELSIUS
+        ):
+            raise ValueError(
+                "temperature range must stay within the fixed "
+                f"{self.COLOR_SCALE_MIN_CELSIUS:g}–"
+                f"{self.COLOR_SCALE_MAX_CELSIUS:g} °C color scale"
+            )
+
+        self.min_celsius = min_celsius
+        self.max_celsius = max_celsius
         # Coordinate maps depend only on output dimensions, so cache them across
         # frames and avoid repeating bilinear setup at recording frame rate.
         self._maps = {}
@@ -230,16 +270,21 @@ class ThermalRenderer:
     def scale_color(self, normalized):
         """Return the RGB color at one normalized point on this renderer's scale."""
         normalized = max(0.0, min(1.0, float(normalized)))
-        min_celsius = self.heat_map.MIN_CELSIUS
-        max_celsius = self.heat_map.MAX_CELSIUS
-        temperature = min_celsius + normalized * (max_celsius - min_celsius)
+        temperature = self.min_celsius + normalized * (
+            self.max_celsius - self.min_celsius
+        )
         # Passing the fixed Celsius endpoints also lets renderer variants reuse
         # this method while supplying their own _color implementation.
-        return self._color(temperature, min_celsius, max_celsius, {})
+        return self._color(
+            temperature,
+            self.min_celsius,
+            self.max_celsius,
+            {},
+        )
 
     def legend_celsius_range(self, frame=None):
-        """Return the fixed Celsius endpoints represented by the heat map."""
-        return self.heat_map.MIN_CELSIUS, self.heat_map.MAX_CELSIUS
+        """Return the selected endpoints cropped from the fixed color scale."""
+        return self.min_celsius, self.max_celsius
 
     def legend_extrema_celsius(self, frame=None):
         """Return the current frame's minimum and maximum Celsius values."""
@@ -290,12 +335,10 @@ class ThermalRenderer:
         return x_map, y_map
 
     def _color(self, value, min_value, max_value, color_cache):
-        # Temperatures outside the configured display window use the nearest
-        # endpoint color: cold navy at the minimum or hot white at the maximum.
-        temperature = max(
-            self.heat_map.MIN_CELSIUS,
-            min(self.heat_map.MAX_CELSIUS, value),
-        )
+        # Clamp to the selected window, then look up that physical temperature
+        # on the fixed 0–60 °C map. For example, 15–30 °C uses palette colors
+        # 15 through 30 rather than remapping navy through white.
+        temperature = max(self.min_celsius, min(self.max_celsius, value))
         cached = color_cache.get(temperature)
         if cached is not None:
             return cached
