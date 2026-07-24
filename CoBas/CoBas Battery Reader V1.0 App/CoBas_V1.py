@@ -22,6 +22,11 @@ APP_TITLE = "CoBas Battery Reader V1.0"
 APP_WM_CLASS = "cobas_battery_reader_v1"
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 PULSE_DURATION_SECONDS = 2.0
+DATASET_FRAME_INTERVAL_SECONDS = 0.5
+DATASET_FRAMES_PER_SECOND = 1.0 / DATASET_FRAME_INTERVAL_SECONDS
+DATASET_FRAMES_PER_PULSE = int(
+    PULSE_DURATION_SECONDS / DATASET_FRAME_INTERVAL_SECONDS
+)
 
 
 class CoBasV1App:
@@ -96,6 +101,7 @@ class CoBasV1App:
         self.current_pulse_number = 0
         self.pulse_sequence_active = False
         self.pulse_recordings = []
+        self.pulse_sequence_started_at = None
         self.current_recording_timestamp = None
 
         # Preview loop state.
@@ -753,7 +759,10 @@ class CoBasV1App:
 
         self.fps_info_label = ttk.Label(
             info_section,
-            text="FPS: 20",
+            text=(
+                f"Regular Camera FPS: {self.camera.record_fps:g}\n"
+                f"Thermal Camera FPS: {self.thermal_camera.record_fps:g}"
+            ),
             style="PanelText.TLabel",
             wraplength=180
         )
@@ -900,14 +909,21 @@ class CoBasV1App:
             if self.thermal_max_text.get() != expected_max:
                 self.thermal_max_text.set(expected_max)
 
-    def start_active_recordings(self, record_audio=True):
+    def start_active_recordings(
+        self,
+        record_audio=True,
+        recording_timestamp=None,
+    ):
         """Start the synchronized regular and thermal video recorders."""
         if self.camera.is_recording or self.thermal_camera.is_recording:
             print("[INFO] A synchronized recording is already active.")
             return self.current_video_path, self.current_thermal_video_path
 
         self.set_recording_volume_to_maximum()
-        recording_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        if recording_timestamp is None:
+            recording_timestamp = datetime.now().strftime(
+                "%Y%m%d_%H%M%S_%f"
+            )
         self.current_recording_timestamp = recording_timestamp
         self.current_video_path = None
         self.current_thermal_video_path = None
@@ -1025,6 +1041,7 @@ class CoBasV1App:
         self,
         target_duration_seconds=None,
         audio_path_override=None,
+        capture_window_start_time=None,
     ):
         """
         Stop regular and thermal recorders, reusing one synchronized WAV.
@@ -1033,7 +1050,9 @@ class CoBasV1App:
         synchronized before FFmpeg merge/finalization begins. The WAV can be
         continuous microphone audio or the repeated-pulse timeline override.
         When a target duration is supplied, every camera video is conformed to
-        that exact duration before capture outputs are exported.
+        that exact duration before capture outputs are exported. A capture
+        window start removes recorder setup lead-in while keeping the regular
+        and thermal datasets on the same pulse timeline.
         """
 
         saved_video_path = None
@@ -1043,6 +1062,33 @@ class CoBasV1App:
 
         regular_was_recording = self.camera.is_recording
         thermal_was_recording = self.thermal_camera.is_recording
+        capture_stop_time = time.time()
+        regular_record_start_time = self.camera.record_start_time
+        thermal_record_start_time = self.thermal_camera.record_start_time
+
+        def wall_timing(record_start_time):
+            if record_start_time is None:
+                return 0.0, None
+
+            recording_duration = max(
+                0.0,
+                capture_stop_time - record_start_time,
+            )
+            if capture_window_start_time is None:
+                return 0.0, recording_duration
+
+            start_offset = max(
+                0.0,
+                capture_window_start_time - record_start_time,
+            )
+            return start_offset, recording_duration
+
+        regular_start_offset, regular_wall_duration = wall_timing(
+            regular_record_start_time
+        )
+        thermal_start_offset, thermal_wall_duration = wall_timing(
+            thermal_record_start_time
+        )
 
         if regular_was_recording:
             audio_path = self.camera.stop_recording_capture_phase()
@@ -1073,6 +1119,9 @@ class CoBasV1App:
                 saved_video_path,
                 target_duration_seconds,
                 tolerance_seconds=0.001,
+                wall_start_offset_seconds=regular_start_offset,
+                wall_recording_duration_seconds=regular_wall_duration,
+                audio_start_offset_seconds=regular_start_offset,
             )
             if synchronized_video_path:
                 saved_video_path = synchronized_video_path
@@ -1082,6 +1131,9 @@ class CoBasV1App:
                 saved_thermal_video_path,
                 target_duration_seconds,
                 tolerance_seconds=0.001,
+                wall_start_offset_seconds=thermal_start_offset,
+                wall_recording_duration_seconds=thermal_wall_duration,
+                audio_start_offset_seconds=regular_start_offset,
             )
             if synchronized_thermal_path:
                 saved_thermal_video_path = synchronized_thermal_path
@@ -1093,6 +1145,8 @@ class CoBasV1App:
                     scale_video_path,
                     target_duration_seconds,
                     tolerance_seconds=0.001,
+                    wall_start_offset_seconds=thermal_start_offset,
+                    wall_recording_duration_seconds=thermal_wall_duration,
                 )
 
         elif saved_video_path and saved_thermal_video_path:
@@ -1118,11 +1172,13 @@ class CoBasV1App:
         self,
         target_duration_seconds=None,
         audio_path_override=None,
+        capture_window_start_time=None,
     ):
         """Stop and export one capture session through the single output pipeline."""
         saved_paths = self.stop_active_recordings(
             target_duration_seconds=target_duration_seconds,
             audio_path_override=audio_path_override,
+            capture_window_start_time=capture_window_start_time,
         )
         saved_video_path, saved_thermal_video_path, _ = saved_paths
 
@@ -1256,13 +1312,17 @@ class CoBasV1App:
         video_path,
         target_duration_seconds,
         tolerance_seconds=0.05,
+        wall_start_offset_seconds=0.0,
+        wall_recording_duration_seconds=None,
+        audio_start_offset_seconds=None,
     ):
         """
-        Force video duration to match target duration exactly.
+        Align a captured video window and force it to the target duration.
 
         Camera encoders can produce different media durations from the same
-        wall-clock capture interval. Retiming spreads the available frames
-        across the requested duration instead of freezing the last frame.
+        wall-clock capture interval. The wall-clock start offset is translated
+        into the video's timeline before trimming, then the selected frames are
+        retimed across the requested duration instead of freezing one frame.
         """
 
         if not video_path or not os.path.exists(video_path):
@@ -1276,9 +1336,32 @@ class CoBasV1App:
         if current_duration is None:
             return video_path
 
+        media_start_offset = max(0.0, wall_start_offset_seconds)
+        media_seconds_per_wall_second = 1.0
+        if (
+            wall_recording_duration_seconds is not None
+            and wall_recording_duration_seconds > 0
+        ):
+            media_seconds_per_wall_second = (
+                current_duration / wall_recording_duration_seconds
+            )
+            media_start_offset *= media_seconds_per_wall_second
+        media_start_offset = min(
+            media_start_offset,
+            max(0.0, current_duration - 0.001),
+        )
+        available_duration = max(
+            0.001, current_duration - media_start_offset
+        )
+        selected_duration = min(
+            available_duration,
+            target_duration_seconds * media_seconds_per_wall_second,
+        )
+
         has_audio = self.video_has_audio_stream(video_path)
         video_matches_target = (
-            abs(current_duration - target_duration_seconds)
+            media_start_offset <= tolerance_seconds
+            and abs(current_duration - target_duration_seconds)
             <= tolerance_seconds
         )
 
@@ -1301,7 +1384,9 @@ class CoBasV1App:
             return video_path
 
         target_text = f"{target_duration_seconds:.3f}"
-        duration_scale = target_duration_seconds / current_duration
+        start_text = f"{media_start_offset:.6f}"
+        selected_text = f"{selected_duration:.6f}"
+        duration_scale = target_duration_seconds / selected_duration
         scale_text = f"{duration_scale:.9f}"
 
         base, ext = os.path.splitext(video_path)
@@ -1312,6 +1397,8 @@ class CoBasV1App:
             "-y",
             "-i", video_path,
             "-vf", (
+                f"trim=start={start_text}:duration={selected_text},"
+                "setpts=PTS-STARTPTS,"
                 f"setpts={scale_text}*PTS,"
                 f"tpad=stop_mode=clone:stop_duration={target_text},"
                 "fps=fps=source_fps,"
@@ -1324,11 +1411,20 @@ class CoBasV1App:
         ]
 
         if has_audio:
+            if audio_start_offset_seconds is None:
+                audio_start_offset_seconds = wall_start_offset_seconds
+            audio_start_text = (
+                f"{max(0.0, audio_start_offset_seconds):.6f}"
+            )
             command.extend(
                 [
                     "-map", "0:v:0",
                     "-map", "0:a:0",
-                    "-af", f"apad,atrim=duration={target_text}",
+                    "-af", (
+                        f"atrim=start={audio_start_text},"
+                        "asetpts=PTS-STARTPTS,apad,"
+                        f"atrim=duration={target_text}"
+                    ),
                     "-c:a", "aac",
                 ]
             )
@@ -1492,7 +1588,10 @@ class CoBasV1App:
         )
 
         self.fps_info_label.config(
-            text=f"FPS: {self.camera.record_fps}"
+            text=(
+                f"Regular Camera FPS: {self.camera.record_fps:g}\n"
+                f"Thermal Camera FPS: {self.thermal_camera.record_fps:g}"
+            )
         )
 
         self.zoom_label.config(
@@ -1526,7 +1625,8 @@ class CoBasV1App:
         pulse_voice_paths,
         temperature_log_path,
         temperature_average_path,
-        output_folder
+        output_folder,
+        expected_image_count=None,
     ):
         """Generate all requested capture artifacts without an external script."""
         if os.path.isdir(output_folder):
@@ -1537,6 +1637,13 @@ class CoBasV1App:
         os.makedirs(camera_frames, exist_ok=True)
         os.makedirs(thermal_frames, exist_ok=True)
 
+        frame_limit_arguments = []
+        if expected_image_count is not None:
+            frame_limit_arguments = [
+                "-frames:v",
+                str(expected_image_count),
+            ]
+
         self.run_capture_ffmpeg(
             "camera frame extraction",
             [
@@ -1545,11 +1652,12 @@ class CoBasV1App:
                 "-i",
                 video_path,
                 "-vf",
-                "fps=0.5",
+                f"fps={DATASET_FRAMES_PER_SECOND:g}",
                 "-start_number",
                 "0",
                 "-qscale:v",
                 "2",
+                *frame_limit_arguments,
                 os.path.join(camera_frames, "Camera_Frame_%03d.jpg"),
             ]
         )
@@ -1561,14 +1669,27 @@ class CoBasV1App:
                 "-i",
                 thermal_video_path,
                 "-vf",
-                "fps=0.5",
+                f"fps={DATASET_FRAMES_PER_SECOND:g}",
                 "-start_number",
                 "0",
                 "-qscale:v",
                 "2",
+                *frame_limit_arguments,
                 os.path.join(thermal_frames, "Thermal_Frame_%03d.jpg"),
             ]
         )
+
+        if expected_image_count is not None:
+            extracted_counts = {
+                "regular": len(os.listdir(camera_frames)),
+                "thermal": len(os.listdir(thermal_frames)),
+            }
+            for label, extracted_count in extracted_counts.items():
+                if extracted_count != expected_image_count:
+                    raise RuntimeError(
+                        f"Expected {expected_image_count} {label} images, "
+                        f"but extracted {extracted_count}."
+                    )
 
         if pulse_voice_paths:
             pulse_voice_folder = os.path.join(
@@ -1650,6 +1771,11 @@ class CoBasV1App:
             for recording in self.pulse_recordings
             if recording.get("path")
         ]
+        expected_image_count = None
+        if pulse_voice_paths:
+            expected_image_count = (
+                len(pulse_voice_paths) * DATASET_FRAMES_PER_PULSE
+            )
 
         required_outputs = (
             (thermal_video_path, "thermal video"),
@@ -1695,7 +1821,8 @@ class CoBasV1App:
                     pulse_voice_paths,
                     temperature_log_path,
                     temperature_average_path,
-                    output_folder
+                    output_folder,
+                    expected_image_count=expected_image_count,
                 )
                 print(f"[INFO] Capture outputs saved in: {output_folder}")
 
@@ -1704,6 +1831,7 @@ class CoBasV1App:
                     lambda: self.handle_capture_outputs_finished(
                         output_folder,
                         len(pulse_voice_paths),
+                        expected_image_count,
                     )
                 )
 
@@ -1732,6 +1860,7 @@ class CoBasV1App:
         self,
         output_folder,
         pulse_recording_count=0,
+        image_count_per_camera=None,
     ):
         """Report successful capture-only output generation."""
 
@@ -1748,12 +1877,22 @@ class CoBasV1App:
                 f"• Voice_Recordings "
                 f"({pulse_recording_count} pulse WAV files)\n"
             )
+        image_output_message = ""
+        if image_count_per_camera is not None:
+            image_output_message = (
+                f"• Camera_Frames ({image_count_per_camera} images)\n"
+                f"• Thermal_Frames ({image_count_per_camera} images)\n"
+            )
+        else:
+            image_output_message = (
+                "• Camera_Frames\n"
+                "• Thermal_Frames\n"
+            )
 
         messagebox.showinfo(
             "Capture Outputs Saved",
             "Generated outputs:\n"
-            "• Camera_Frames\n"
-            "• Thermal_Frames\n"
+            f"{image_output_message}"
             f"{pulse_output_message}"
             "• Camera_Video.mp4\n"
             "• Thermal_Video.mp4\n"
@@ -1763,8 +1902,8 @@ class CoBasV1App:
             f"Saved in: {output_folder}"
         )
 
-    def get_pulse_command(self, recording_path):
-        """Return the command that generates, plays, and records one pulse."""
+    def get_pulse_command(self):
+        """Return the command for one continuous repeated-pulse sequence."""
         pulse_folder = os.path.join(self.base_dir, "Pulse Generation")
         pulse_script = os.path.join(
             pulse_folder,
@@ -1780,8 +1919,11 @@ class CoBasV1App:
             pulse_script,
             "--mode",
             "generate-play-record",
-            "--record-output",
-            os.path.abspath(recording_path),
+            "--count",
+            str(self.requested_pulse_count),
+            "--record-output-template",
+            os.path.abspath(self.get_pulse_recording_template()),
+            "--wait-for-start",
         ]
 
         if self.camera.microphone_device_id is not None:
@@ -1794,15 +1936,21 @@ class CoBasV1App:
 
         return command, pulse_folder
 
-    def get_pulse_recording_path(self, pulse_number):
-        """Return the temporary WAV path for one pulse recording."""
+    def get_pulse_recording_template(self):
+        """Return the temporary WAV template for a repeated-pulse session."""
         timestamp = (
             self.current_recording_timestamp
             or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         )
         return os.path.join(
             self.captures_dir,
-            f"CoBas_V1_PulseVoice_{timestamp}_{pulse_number:03d}.wav"
+            f"CoBas_V1_PulseVoice_{timestamp}_{{pulse:03d}}.wav"
+        )
+
+    def get_pulse_recording_path(self, pulse_number):
+        """Return the temporary WAV path for one pulse recording."""
+        return self.get_pulse_recording_template().format(
+            pulse=pulse_number
         )
 
     @staticmethod
@@ -1938,131 +2086,189 @@ class CoBasV1App:
             return None
 
     def start_pulse_sequence(self, start_token):
-        """Generate, play, and record the requested pulses one at a time."""
+        """Run one gap-free process for all requested two-second pulses."""
 
         def worker():
-            for pulse_number in range(1, self.requested_pulse_count + 1):
-                if start_token != self.tracking_start_token:
-                    return
+            if start_token != self.tracking_start_token:
+                return
 
-                recording_path = self.get_pulse_recording_path(pulse_number)
-                command, pulse_folder = self.get_pulse_command(recording_path)
-
-                if command is None:
-                    self.root.after(
-                        0,
-                        lambda: self.handle_pulse_sequence_failed(
-                            start_token,
-                            "Pulse generator was not found",
-                        )
+            command, pulse_folder = self.get_pulse_command()
+            if command is None:
+                self.root.after(
+                    0,
+                    lambda: self.handle_pulse_sequence_failed(
+                        start_token,
+                        "Pulse generator was not found",
                     )
-                    return
+                )
+                return
 
+            try:
+                with self.pulse_process_lock:
+                    if start_token != self.tracking_start_token:
+                        return
+
+                    pulse_process = subprocess.Popen(
+                        command,
+                        cwd=pulse_folder,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    self.pulse_process = pulse_process
+            except Exception as error:
+                self.root.after(
+                    0,
+                    lambda error=error: self.handle_pulse_sequence_failed(
+                        start_token,
+                        f"Pulse sequence could not start: {error}",
+                    ),
+                )
+                return
+
+            pulse_offsets = {}
+            completed_pulses = set()
+            ready_received = False
+            start_result = {"started": False}
+            start_result_event = threading.Event()
+
+            def start_recordings():
                 try:
-                    with self.pulse_process_lock:
+                    start_result["started"] = (
+                        self.handle_pulse_sequence_ready(start_token)
+                    )
+                finally:
+                    start_result_event.set()
+
+            for line in pulse_process.stdout:
+                line = line.strip()
+                if line:
+                    print(f"[PULSE SEQUENCE] {line}")
+
+                if line.startswith("SEQUENCE_READY"):
+                    ready_received = True
+                    self.root.after(0, start_recordings)
+
+                    while not start_result_event.wait(timeout=0.1):
                         if start_token != self.tracking_start_token:
                             return
 
-                        pulse_process = subprocess.Popen(
-                            command,
-                            cwd=pulse_folder,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                            bufsize=1,
-                        )
-                        self.pulse_process = pulse_process
-                except Exception as error:
-                    self.root.after(
-                        0,
-                        lambda error=error, pulse_number=pulse_number: (
-                            self.handle_pulse_sequence_failed(
-                                start_token,
-                                (
-                                    f"Pulse {pulse_number} could not start: "
-                                    f"{error}"
-                                ),
-                            )
-                        ),
-                    )
-                    return
-
-                pulse_offset = None
-                for line in pulse_process.stdout:
-                    line = line.strip()
-                    if line:
-                        print(f"[PULSE {pulse_number}] {line}")
-
-                    if "PLAYBACK_STARTED" in line:
-                        playback_started_at = time.time()
+                    if not start_result["started"]:
                         try:
-                            playback_started_at = float(
-                                line.rsplit(maxsplit=1)[-1]
-                            )
-                        except (TypeError, ValueError):
+                            pulse_process.terminate()
+                        except Exception:
                             pass
+                        break
 
-                        if self.camera.record_start_time is not None:
-                            pulse_offset = max(
-                                0.0,
-                                playback_started_at
-                                - self.camera.record_start_time,
-                            )
-                        else:
-                            pulse_offset = (
-                                (pulse_number - 1)
-                                * PULSE_DURATION_SECONDS
-                            )
-
-                        self.root.after(
-                            0,
-                            lambda pulse_number=pulse_number: (
-                                self.handle_pulse_started(
-                                    pulse_number,
-                                    start_token,
-                                )
-                            ),
+                    try:
+                        pulse_process.stdin.write("START\n")
+                        pulse_process.stdin.flush()
+                    except Exception as error:
+                        print(
+                            "[WARNING] Could not release pulse sequence: "
+                            f"{error}"
                         )
+                        try:
+                            pulse_process.terminate()
+                        except Exception:
+                            pass
+                        break
 
-                return_code = pulse_process.wait()
-                with self.pulse_process_lock:
-                    if self.pulse_process is pulse_process:
-                        self.pulse_process = None
+                elif line.startswith("PLAYBACK_STARTED"):
+                    parts = line.split(maxsplit=2)
+                    if len(parts) != 3:
+                        continue
 
-                if start_token != self.tracking_start_token:
-                    return
+                    try:
+                        pulse_number = int(parts[1])
+                        playback_started_at = float(parts[2])
+                    except (TypeError, ValueError):
+                        continue
 
-                if (
-                    return_code != 0
-                    or pulse_offset is None
-                    or not os.path.exists(recording_path)
-                ):
+                    if pulse_number == 1:
+                        self.pulse_sequence_started_at = (
+                            playback_started_at
+                        )
+                    if self.camera.record_start_time is not None:
+                        pulse_offset = max(
+                            0.0,
+                            playback_started_at
+                            - self.camera.record_start_time,
+                        )
+                    else:
+                        pulse_offset = (
+                            (pulse_number - 1) * PULSE_DURATION_SECONDS
+                        )
+                    pulse_offsets[pulse_number] = pulse_offset
                     self.root.after(
                         0,
                         lambda pulse_number=pulse_number: (
-                            self.handle_pulse_sequence_failed(
+                            self.handle_pulse_started(
+                                pulse_number,
                                 start_token,
-                                f"Pulse {pulse_number} playback or recording failed",
                             )
                         ),
                     )
-                    return
 
-                self.pulse_recordings.append(
-                    {
-                        "path": recording_path,
-                        "offset_seconds": pulse_offset,
-                    }
-                )
+                elif line.startswith("PULSE_FINISHED"):
+                    parts = line.split(maxsplit=2)
+                    if len(parts) != 3:
+                        continue
+
+                    try:
+                        pulse_number = int(parts[1])
+                    except (TypeError, ValueError):
+                        continue
+
+                    recording_path = parts[2]
+                    pulse_offset = pulse_offsets.get(pulse_number)
+                    if (
+                        pulse_number in completed_pulses
+                        or pulse_offset is None
+                        or not os.path.exists(recording_path)
+                    ):
+                        continue
+
+                    completed_pulses.add(pulse_number)
+                    self.pulse_recordings.append(
+                        {
+                            "path": recording_path,
+                            "offset_seconds": pulse_offset,
+                        }
+                    )
+                    self.root.after(
+                        0,
+                        lambda pulse_number=pulse_number: (
+                            self.handle_pulse_completed(
+                                pulse_number,
+                                start_token,
+                            )
+                        ),
+                    )
+
+            return_code = pulse_process.wait()
+            with self.pulse_process_lock:
+                if self.pulse_process is pulse_process:
+                    self.pulse_process = None
+
+            if start_token != self.tracking_start_token:
+                return
+
+            if (
+                return_code != 0
+                or not ready_received
+                or len(completed_pulses) != self.requested_pulse_count
+            ):
                 self.root.after(
                     0,
-                    lambda pulse_number=pulse_number: (
-                        self.handle_pulse_completed(
-                            pulse_number,
-                            start_token,
-                        )
+                    lambda: self.handle_pulse_sequence_failed(
+                        start_token,
+                        "Pulse sequence playback or recording failed",
                     ),
                 )
+                return
 
             self.root.after(
                 0,
@@ -2070,6 +2276,38 @@ class CoBasV1App:
             )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def handle_pulse_sequence_ready(self, start_token):
+        """Start both camera recorders, then allow pulse playback to begin."""
+        if start_token != self.tracking_start_token:
+            return False
+
+        self.start_active_recordings(
+            record_audio=False,
+            recording_timestamp=self.current_recording_timestamp,
+        )
+        if not self.current_video_path or not self.current_thermal_video_path:
+            print("[WARNING] Both synchronized camera recorders are required.")
+            return False
+
+        self.is_preparing_tracking = False
+        self.track_button.config(state="normal")
+        self.record_button.config(
+            text="Stop Recording",
+            style="VideoStop.TButton",
+            state="disabled",
+        )
+        target_duration = (
+            self.requested_pulse_count * PULSE_DURATION_SECONDS
+        )
+        self.update_status(
+            (
+                "Status: Cameras recording continuously for "
+                f"{target_duration:g} seconds; starting pulse 1"
+            ),
+            "● REC",
+        )
+        return True
 
     def handle_pulse_started(self, pulse_number, start_token):
         """Update the interface when one pulse begins."""
@@ -2144,9 +2382,16 @@ class CoBasV1App:
         self.cancel_thermal_preview_loop()
 
         session_audio_path = self.build_pulse_session_audio()
+        target_duration = (
+            len(self.pulse_recordings) * PULSE_DURATION_SECONDS
+            if self.pulse_recordings
+            else None
+        )
         saved_video_path, saved_thermal_video_path, _ = (
             self.finalize_capture_session(
-                audio_path_override=session_audio_path
+                target_duration_seconds=target_duration,
+                audio_path_override=session_audio_path,
+                capture_window_start_time=self.pulse_sequence_started_at,
             )
         )
 
@@ -2364,7 +2609,10 @@ class CoBasV1App:
         self.requested_pulse_count = requested_pulse_count
         self.current_pulse_number = 0
         self.pulse_recordings = []
-        self.current_recording_timestamp = None
+        self.pulse_sequence_started_at = None
+        self.current_recording_timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
         self.current_video_path = None
         self.current_thermal_video_path = None
 
@@ -2446,55 +2694,10 @@ class CoBasV1App:
             # Change Start Tracking button into Stop Tracking.
             self.update_tracking_button()
 
-            # Microphone capture is handled separately for each pulse.
-            self.start_active_recordings(record_audio=False)
-
-            if self.current_video_path:
-                self.is_preparing_tracking = False
-                self.track_button.config(state="normal")
-                self.record_button.config(
-                    text="Stop Recording",
-                    style="VideoStop.TButton",
-                    state="disabled",
-                )
-                self.update_status(
-                    (
-                        "Status: Cameras recording continuously; "
-                        "starting pulse 1"
-                    ),
-                    "● REC"
-                )
-
-                if not self.current_thermal_video_path:
-                    print("[WARNING] Thermal recording did not start.")
-                    self.update_status(
-                        "Status: Regular recording active; thermal recording unavailable",
-                        "● WARNING"
-                    )
-
-                # Start refreshing frames before pulse playback begins so the
-                # regular video writer receives frames for the whole sequence.
-                self.update_camera_feed()
-                self.start_pulse_sequence(start_token)
-            else:
-                self.is_preparing_tracking = False
-                self.pulse_sequence_active = False
-                self.pulse_count_spinbox.config(state="normal")
-                self.record_button.config(state="normal")
-                self.track_button.config(state="normal")
-                self.camera.stop_camera()
-                self.thermal_camera.stop_camera()
-                self.cancel_thermal_preview_loop()
-                self.update_tracking_button()
-                print("[WARNING] Could not start automatic video recording.")
-                self.record_button.config(
-                    text="Capture Video",
-                    style="Capture.TButton"
-                )
-                self.update_status(
-                    "Status: Failed to start recording during pulse playback",
-                    "● WARNING"
-                )
+            # Prepare one gap-free audio process first. It waits for both
+            # camera recorders before beginning the first pulse.
+            self.update_camera_feed()
+            self.start_pulse_sequence(start_token)
 
         else:
             self.is_preparing_tracking = False
@@ -2555,9 +2758,16 @@ class CoBasV1App:
         self.stop_pulse_sequence_process()
 
         session_audio_path = self.build_pulse_session_audio()
+        target_duration = (
+            len(self.pulse_recordings) * PULSE_DURATION_SECONDS
+            if self.pulse_recordings
+            else None
+        )
         saved_video_path, saved_thermal_video_path, _ = (
             self.finalize_capture_session(
-                audio_path_override=session_audio_path
+                target_duration_seconds=target_duration,
+                audio_path_override=session_audio_path,
+                capture_window_start_time=self.pulse_sequence_started_at,
             )
         )
 
@@ -2729,7 +2939,14 @@ class CoBasV1App:
                 )
 
         # Schedule next frame update.
-        self.preview_after_id = self.root.after(30, self.update_camera_feed)
+        frame_interval_ms = max(
+            1,
+            int(round(1000.0 / self.camera.record_fps)),
+        )
+        self.preview_after_id = self.root.after(
+            frame_interval_ms,
+            self.update_camera_feed,
+        )
 
     def switch_front_back_camera(self):
         """

@@ -10,6 +10,9 @@ import sounddevice as sd
 import soundfile as sf
 
 
+REGULAR_CAMERA_RECORD_FPS = 60.0
+
+
 class Camera:
     """
     Camera logic for CoBas_V1.
@@ -42,7 +45,7 @@ class Camera:
         self.video_writer = None
         self.is_recording = False
         self.record_start_time = None
-        self.record_fps = 20.0
+        self.record_fps = REGULAR_CAMERA_RECORD_FPS
 
         # Audio recording
         self.audio_sample_rate = 44100
