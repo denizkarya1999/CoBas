@@ -47,6 +47,9 @@ class Camera:
         self.record_start_time = None
         self.record_start_monotonic = None
         self.record_frames_written = 0
+        self.last_recording_average_fps = None
+        self.last_recording_duration = None
+        self.last_recording_frame_count = 0
         self.record_fps = REGULAR_CAMERA_RECORD_FPS
 
         # Audio recording
@@ -457,6 +460,9 @@ class Camera:
         self.record_start_time = time.time()
         self.record_start_monotonic = time.monotonic()
         self.record_frames_written = 0
+        self.last_recording_average_fps = None
+        self.last_recording_duration = None
+        self.last_recording_frame_count = 0
 
         return self.final_video_path
 
@@ -505,6 +511,9 @@ class Camera:
                 if recording_duration > 0
                 else 0.0
             )
+            self.last_recording_average_fps = average_fps
+            self.last_recording_duration = recording_duration
+            self.last_recording_frame_count = self.record_frames_written
             print(
                 f"[INFO] Regular camera average FPS: {average_fps:.2f} "
                 f"({self.record_frames_written} frames over "

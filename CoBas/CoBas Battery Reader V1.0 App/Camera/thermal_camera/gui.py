@@ -444,6 +444,9 @@ class ThermalCamera:
         self.is_recording = False
         self.record_start_time = None
         self.record_start_monotonic = None
+        self.last_recording_average_fps = None
+        self.last_recording_duration = None
+        self.last_recording_frame_count = 0
         self.record_renderer = None
         self.temp_video_path = None
         self.final_video_path = None
@@ -793,6 +796,9 @@ class ThermalCamera:
         self.is_recording = True
         self.record_start_time = time.time()
         self.record_start_monotonic = time.monotonic()
+        self.last_recording_average_fps = None
+        self.last_recording_duration = None
+        self.last_recording_frame_count = 0
         self.record_renderer = self.renderer
         self.record_thread = threading.Thread(
             target=self._record_loop,
@@ -908,6 +914,9 @@ class ThermalCamera:
                 if recording_duration > 0
                 else 0.0
             )
+            self.last_recording_average_fps = average_fps
+            self.last_recording_duration = recording_duration
+            self.last_recording_frame_count = recorder.frames_written
             print(
                 f"[INFO] Thermal camera average FPS: {average_fps:.2f} "
                 f"({recorder.frames_written} frames over "

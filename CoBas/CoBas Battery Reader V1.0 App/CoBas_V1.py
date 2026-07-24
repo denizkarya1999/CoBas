@@ -85,6 +85,7 @@ class CoBasV1App:
         # Stores path of the current video file.
         self.current_video_path = None
         self.current_thermal_video_path = None
+        self.average_fps_log_path = None
 
         # Stores last processed video path to avoid processing the same video twice.
         self.last_processed_video_path = None
@@ -927,6 +928,10 @@ class CoBasV1App:
         self.current_recording_timestamp = recording_timestamp
         self.current_video_path = None
         self.current_thermal_video_path = None
+        self.average_fps_log_path = os.path.join(
+            self.captures_dir,
+            f"CoBas_V1_Camera_Average_FPS_{recording_timestamp}.txt"
+        )
 
         self.current_video_path = self.camera.start_recording(
             timestamp=recording_timestamp,
@@ -940,6 +945,74 @@ class CoBasV1App:
             self.refresh_thermal_scale_controls()
 
         return self.current_video_path, self.current_thermal_video_path
+
+    def write_average_fps_log(
+        self,
+        regular_was_recording,
+        thermal_was_recording,
+    ):
+        """Write measured regular and thermal camera FPS for this session."""
+        if not regular_was_recording and not thermal_was_recording:
+            return None
+
+        if not self.average_fps_log_path:
+            timestamp = self.current_recording_timestamp
+            if not timestamp:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            self.average_fps_log_path = os.path.join(
+                self.captures_dir,
+                f"CoBas_V1_Camera_Average_FPS_{timestamp}.txt"
+            )
+
+        camera_entries = (
+            ("Regular camera", self.camera, regular_was_recording),
+            ("Thermal camera", self.thermal_camera, thermal_was_recording),
+        )
+
+        try:
+            with open(
+                self.average_fps_log_path,
+                "w",
+                encoding="utf-8",
+            ) as file:
+                file.write(
+                    "Camera Average FPS Log\n"
+                    f"Recording stopped: "
+                    f"{datetime.now().isoformat(timespec='milliseconds')}\n"
+                    "Average FPS is measured as recorded frames divided by "
+                    "wall-clock recording duration.\n\n"
+                )
+
+                for label, camera, was_recording in camera_entries:
+                    average_fps = camera.last_recording_average_fps
+                    duration = camera.last_recording_duration
+                    frame_count = camera.last_recording_frame_count
+
+                    if (
+                        was_recording
+                        and average_fps is not None
+                        and duration is not None
+                    ):
+                        file.write(
+                            f"{label} average FPS: {average_fps:.2f}\n"
+                            f"{label} frames: {frame_count}\n"
+                            f"{label} duration: {duration:.2f} seconds\n\n"
+                        )
+                    else:
+                        file.write(
+                            f"{label} average FPS: unavailable\n"
+                            f"{label} frames: unavailable\n"
+                            f"{label} duration: unavailable\n\n"
+                        )
+
+            print(
+                "[INFO] Camera average FPS log saved: "
+                f"{self.average_fps_log_path}"
+            )
+            return self.average_fps_log_path
+        except Exception as exc:
+            print(f"[WARNING] Camera average FPS log could not be saved: {exc}")
+            return None
 
     def set_recording_volume_to_maximum(self):
         """Unmute the default output device and set it to exactly 100%."""
@@ -1104,6 +1177,11 @@ class CoBasV1App:
 
             if saved_thermal_video_path:
                 self.current_thermal_video_path = saved_thermal_video_path
+
+        self.write_average_fps_log(
+            regular_was_recording,
+            thermal_was_recording,
+        )
 
         if regular_was_recording:
             saved_video_path = self.camera.finalize_recording(
@@ -1625,6 +1703,7 @@ class CoBasV1App:
         pulse_voice_paths,
         temperature_log_path,
         temperature_average_path,
+        average_fps_log_path,
         output_folder,
         expected_image_count=None,
     ):
@@ -1735,6 +1814,10 @@ class CoBasV1App:
                 temperature_average_path,
                 os.path.join(output_folder, "Thermal_Temperature_Averages.txt")
             ),
+            (
+                average_fps_log_path,
+                os.path.join(output_folder, "Camera_Average_FPS.txt")
+            ),
         )
         for source_path, output_path in capture_moves:
             self.move_capture_output(source_path, output_path)
@@ -1744,8 +1827,8 @@ class CoBasV1App:
         Export the capture artifacts from the latest recording.
 
         Outputs: camera frames, thermal frames, per-pulse voice recordings,
-        camera video, thermal video, thermal-range video, and two temperature
-        text files.
+        camera video, thermal video, thermal-range video, two temperature
+        text files, and the measured camera average-FPS log.
         """
 
         if video_path is None:
@@ -1766,6 +1849,7 @@ class CoBasV1App:
         scale_video_path = self.thermal_camera.scale_video_path
         temperature_log_path = self.thermal_camera.temperature_log_path
         temperature_average_path = self.thermal_camera.temperature_average_path
+        average_fps_log_path = self.average_fps_log_path
         pulse_voice_paths = [
             recording["path"]
             for recording in self.pulse_recordings
@@ -1782,6 +1866,7 @@ class CoBasV1App:
             (scale_video_path, "thermal-range video"),
             (temperature_log_path, "thermal temperature log"),
             (temperature_average_path, "thermal temperature averages"),
+            (average_fps_log_path, "camera average FPS log"),
         )
         for required_path, label in required_outputs:
             if not required_path or not os.path.exists(required_path):
@@ -1821,6 +1906,7 @@ class CoBasV1App:
                     pulse_voice_paths,
                     temperature_log_path,
                     temperature_average_path,
+                    average_fps_log_path,
                     output_folder,
                     expected_image_count=expected_image_count,
                 )
@@ -1898,7 +1984,8 @@ class CoBasV1App:
             "• Thermal_Video.mp4\n"
             "• Thermal_Range_Video.mp4\n"
             "• Thermal_Temperature_Log.txt\n"
-            "• Thermal_Temperature_Averages.txt\n\n"
+            "• Thermal_Temperature_Averages.txt\n"
+            "• Camera_Average_FPS.txt\n\n"
             f"Saved in: {output_folder}"
         )
 

@@ -18,6 +18,7 @@ if str(APP_ROOT) not in sys.path:
 
 from Camera.Camera import Camera
 from Camera.thermal_camera import CelsiusHeatMap, ThermalCamera
+from CoBas_V1 import CoBasV1App
 
 
 regular_camera_module = importlib.import_module("Camera.Camera")
@@ -118,6 +119,9 @@ class CoBasThermalCameraIntegrationTests(unittest.TestCase):
             "(40 frames over 2.00 seconds)",
             output.getvalue(),
         )
+        self.assertEqual(camera.last_recording_average_fps, 20.0)
+        self.assertEqual(camera.last_recording_duration, 2.0)
+        self.assertEqual(camera.last_recording_frame_count, 40)
 
     def test_thermal_capture_logs_average_fps(self):
         recorder = mock.Mock(frames_written=16, frames_dropped=0)
@@ -140,6 +144,33 @@ class CoBasThermalCameraIntegrationTests(unittest.TestCase):
             "(16 frames over 2.00 seconds)",
             output.getvalue(),
         )
+        self.assertEqual(self.camera.last_recording_average_fps, 8.0)
+        self.assertEqual(self.camera.last_recording_duration, 2.0)
+        self.assertEqual(self.camera.last_recording_frame_count, 16)
+
+    def test_session_writes_both_average_fps_values_to_text_file(self):
+        app = CoBasV1App.__new__(CoBasV1App)
+        app.captures_dir = self.output_directory.name
+        app.current_recording_timestamp = "20260724_120000_000000"
+        app.average_fps_log_path = None
+        app.camera = mock.Mock(
+            last_recording_average_fps=20.0,
+            last_recording_duration=2.0,
+            last_recording_frame_count=40,
+        )
+        app.thermal_camera = mock.Mock(
+            last_recording_average_fps=8.0,
+            last_recording_duration=2.0,
+            last_recording_frame_count=16,
+        )
+
+        log_path = app.write_average_fps_log(True, True)
+        contents = Path(log_path).read_text(encoding="utf-8")
+
+        self.assertIn("Regular camera average FPS: 20.00", contents)
+        self.assertIn("Regular camera frames: 40", contents)
+        self.assertIn("Thermal camera average FPS: 8.00", contents)
+        self.assertIn("Thermal camera frames: 16", contents)
 
 
 if __name__ == "__main__":
