@@ -1,10 +1,14 @@
 """Integration coverage for the thermal camera bundled with CoBas V1."""
 
+import importlib
+import io
 import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 
 APP_ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +16,12 @@ REPO_ROOT = APP_ROOT.parent
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
+from Camera.Camera import Camera
 from Camera.thermal_camera import CelsiusHeatMap, ThermalCamera
+
+
+regular_camera_module = importlib.import_module("Camera.Camera")
+thermal_camera_module = importlib.import_module("Camera.thermal_camera.gui")
 
 
 class CoBasThermalCameraIntegrationTests(unittest.TestCase):
@@ -88,6 +97,49 @@ class CoBasThermalCameraIntegrationTests(unittest.TestCase):
         self.assertTrue(self.camera.has_frame())
         self.assertEqual(self.camera.status, "Thermal live")
         self.assertEqual(preview.size, (640, 480))
+
+    def test_regular_capture_logs_average_fps(self):
+        camera = Camera(output_dir=self.output_directory.name)
+        camera.is_recording = True
+        camera.video_writer = mock.Mock()
+        camera.record_start_monotonic = 10.0
+        camera.record_frames_written = 40
+
+        output = io.StringIO()
+        with mock.patch.object(
+            regular_camera_module.time,
+            "monotonic",
+            return_value=12.0,
+        ), redirect_stdout(output):
+            camera.stop_recording_capture_phase()
+
+        self.assertIn(
+            "Regular camera average FPS: 20.00 "
+            "(40 frames over 2.00 seconds)",
+            output.getvalue(),
+        )
+
+    def test_thermal_capture_logs_average_fps(self):
+        recorder = mock.Mock(frames_written=16, frames_dropped=0)
+        scale_recorder = mock.Mock(frames_dropped=0)
+        self.camera.is_recording = True
+        self.camera.recorder = recorder
+        self.camera.scale_recorder = scale_recorder
+        self.camera.record_start_monotonic = 10.0
+
+        output = io.StringIO()
+        with mock.patch.object(
+            thermal_camera_module.time,
+            "monotonic",
+            return_value=12.0,
+        ), redirect_stdout(output):
+            self.camera.stop_recording()
+
+        self.assertIn(
+            "Thermal camera average FPS: 8.00 "
+            "(16 frames over 2.00 seconds)",
+            output.getvalue(),
+        )
 
 
 if __name__ == "__main__":

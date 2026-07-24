@@ -45,6 +45,8 @@ class Camera:
         self.video_writer = None
         self.is_recording = False
         self.record_start_time = None
+        self.record_start_monotonic = None
+        self.record_frames_written = 0
         self.record_fps = REGULAR_CAMERA_RECORD_FPS
 
         # Audio recording
@@ -453,12 +455,15 @@ class Camera:
 
         self.is_recording = True
         self.record_start_time = time.time()
+        self.record_start_monotonic = time.monotonic()
+        self.record_frames_written = 0
 
         return self.final_video_path
 
     def write_video_frame(self, frame):
         if self.is_recording and self.video_writer is not None:
             self.video_writer.write(frame)
+            self.record_frames_written += 1
 
     def stop_recording(self, keep_audio=False):
         """
@@ -484,10 +489,30 @@ class Camera:
         if not self.is_recording and self.video_writer is None:
             return None
 
+        recording_end_monotonic = time.monotonic()
+
         if self.video_writer is not None:
             self.video_writer.release()
 
         self.video_writer = None
+
+        if self.record_start_monotonic is not None:
+            recording_duration = (
+                recording_end_monotonic - self.record_start_monotonic
+            )
+            average_fps = (
+                self.record_frames_written / recording_duration
+                if recording_duration > 0
+                else 0.0
+            )
+            print(
+                f"[INFO] Regular camera average FPS: {average_fps:.2f} "
+                f"({self.record_frames_written} frames over "
+                f"{recording_duration:.2f} seconds)"
+            )
+
+        self.record_start_monotonic = None
+        self.record_frames_written = 0
 
         if self.record_audio_with_video:
             audio_path = self._stop_audio_recording()

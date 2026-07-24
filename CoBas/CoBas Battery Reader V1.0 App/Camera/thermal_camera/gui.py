@@ -443,6 +443,7 @@ class ThermalCamera:
         self.record_thread = None
         self.is_recording = False
         self.record_start_time = None
+        self.record_start_monotonic = None
         self.record_renderer = None
         self.temp_video_path = None
         self.final_video_path = None
@@ -791,6 +792,7 @@ class ThermalCamera:
 
         self.is_recording = True
         self.record_start_time = time.time()
+        self.record_start_monotonic = time.monotonic()
         self.record_renderer = self.renderer
         self.record_thread = threading.Thread(
             target=self._record_loop,
@@ -861,6 +863,7 @@ class ThermalCamera:
             return None
 
         self.is_recording = False
+        recording_end_monotonic = time.monotonic()
 
         if self.record_thread is not None:
             self.record_thread.join(timeout=3)
@@ -893,7 +896,25 @@ class ThermalCamera:
                 scale_error = exc
 
         if recorder is None:
+            self.record_start_monotonic = None
             return None
+
+        if self.record_start_monotonic is not None:
+            recording_duration = (
+                recording_end_monotonic - self.record_start_monotonic
+            )
+            average_fps = (
+                recorder.frames_written / recording_duration
+                if recording_duration > 0
+                else 0.0
+            )
+            print(
+                f"[INFO] Thermal camera average FPS: {average_fps:.2f} "
+                f"({recorder.frames_written} frames over "
+                f"{recording_duration:.2f} seconds)"
+            )
+
+        self.record_start_monotonic = None
 
         if recording_error is not None:
             print(f"[WARNING] Thermal recording failed: {recording_error}")
