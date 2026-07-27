@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from PIL import Image, ImageTk
 import os
 import cv2
@@ -29,6 +29,39 @@ DATASET_FRAMES_PER_PULSE = int(
 )
 
 
+def parse_battery_percentage(value):
+    """Return a validated whole-number battery percentage from user input."""
+    text = str(value).strip()
+    if text.endswith("%"):
+        text = text[:-1].strip()
+
+    if not text.isdigit():
+        raise ValueError(
+            "Enter a whole-number battery percentage from 0 to 100."
+        )
+
+    percentage = int(text)
+    if not 0 <= percentage <= 100:
+        raise ValueError(
+            "Enter a whole-number battery percentage from 0 to 100."
+        )
+    return percentage
+
+
+def battery_output_folder_name(percentage):
+    """Return the canonical folder name for one battery-level session."""
+    return f"{parse_battery_percentage(percentage)}_Percent_Battery"
+
+
+def battery_output_directory(base_dir, percentage):
+    """Return the capture root that contains every session output."""
+    return os.path.join(
+        base_dir,
+        "Captures",
+        battery_output_folder_name(percentage),
+    )
+
+
 class CoBasV1App:
     """
     Main GUI application for CoBas Battery Reader V1.0.
@@ -55,6 +88,17 @@ class CoBasV1App:
         self.root = root
         self.root.title(APP_TITLE)
         self.root.iconname(APP_TITLE)
+        self.root.withdraw()
+
+        self.base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.battery_percentage = self.request_battery_percentage()
+        self.battery_output_name = battery_output_folder_name(
+            self.battery_percentage
+        )
+        self.captures_dir = battery_output_directory(
+            self.base_dir,
+            self.battery_percentage,
+        )
 
         # Load application icon before building the UI.
         self.set_app_icon()
@@ -72,12 +116,9 @@ class CoBasV1App:
         self.is_closing = False
         self.root.bind("<Unmap>", self.prevent_minimize)
 
-        self.base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.captures_dir = os.path.join(self.base_dir, "Captures")
-
         # Camera backends.
         self.camera = Camera(
-            camera_index="/dev/video0",
+            camera_index=Camera.default_camera_source(),
             output_dir=self.captures_dir
         )
         self.thermal_camera = ThermalCamera(output_dir=self.captures_dir)
@@ -143,6 +184,33 @@ class CoBasV1App:
             "Status: Ready. Click 'Start Tracking' to begin.",
             "● READY"
         )
+        self.root.deiconify()
+
+    def request_battery_percentage(self):
+        """Ask for the required battery level before creating output paths."""
+        prompt = (
+            "What battery percentage level are you collecting data for? "
+            "(Ex. 50%, 100% etc.)"
+        )
+
+        while True:
+            response = simpledialog.askstring(
+                "Battery Percentage Level",
+                prompt,
+                parent=self.root,
+            )
+            if response is None:
+                self.root.destroy()
+                raise SystemExit(0)
+
+            try:
+                return parse_battery_percentage(response)
+            except ValueError as exc:
+                messagebox.showerror(
+                    "Invalid Battery Percentage",
+                    str(exc),
+                    parent=self.root,
+                )
 
     # --------------------------------------------------
     # Window Behavior
@@ -1693,7 +1761,11 @@ class CoBasV1App:
         output_path = os.path.abspath(output_path)
 
         if source_path != output_path:
-            shutil.move(source_path, output_path)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            # Canonical battery-folder outputs represent the latest completed
+            # capture at that charge level. Replace the previous known file
+            # atomically instead of creating another timestamped folder.
+            os.replace(source_path, output_path)
 
     def generate_capture_outputs(
         self,
@@ -1708,11 +1780,23 @@ class CoBasV1App:
         expected_image_count=None,
     ):
         """Generate all requested capture artifacts without an external script."""
-        if os.path.isdir(output_folder):
-            shutil.rmtree(output_folder)
-
+        os.makedirs(output_folder, exist_ok=True)
         camera_frames = os.path.join(output_folder, "Camera_Frames")
         thermal_frames = os.path.join(output_folder, "Thermal_Frames")
+        pulse_voice_folder = os.path.join(
+            output_folder,
+            "Voice_Recordings",
+        )
+        # Refresh only folders owned by this export. Never remove the selected
+        # battery folder or unrelated files the user placed inside it.
+        for generated_folder in (
+            camera_frames,
+            thermal_frames,
+            pulse_voice_folder,
+        ):
+            if os.path.isdir(generated_folder):
+                shutil.rmtree(generated_folder)
+
         os.makedirs(camera_frames, exist_ok=True)
         os.makedirs(thermal_frames, exist_ok=True)
 
@@ -1771,10 +1855,6 @@ class CoBasV1App:
                     )
 
         if pulse_voice_paths:
-            pulse_voice_folder = os.path.join(
-                output_folder,
-                "Voice_Recordings"
-            )
             os.makedirs(pulse_voice_folder, exist_ok=True)
 
             for index, pulse_voice_path in enumerate(
@@ -1877,11 +1957,9 @@ class CoBasV1App:
                 )
                 return
 
-        video_stem = os.path.splitext(os.path.basename(video_path))[0]
-        output_folder = os.path.join(
-            self.captures_dir,
-            f"{video_stem}_Image_and_Video"
-        )
+        # The battery-level directory is the session container. Do not create a
+        # second timestamped ``*_Image_and_Video`` directory beneath it.
+        output_folder = self.captures_dir
         self.last_processed_video_path = video_path
 
         def worker():
@@ -2997,8 +3075,8 @@ class CoBasV1App:
 
         else:
             self.update_status(
-                "Status: Camera opened, but no frame received",
-                "● WARNING"
+                "Status: Camera connection lost after automatic recovery",
+                "● ERROR"
             )
 
         # Update recording timer while recording.
@@ -3030,10 +3108,11 @@ class CoBasV1App:
             1,
             int(round(1000.0 / self.camera.record_fps)),
         )
-        self.preview_after_id = self.root.after(
-            frame_interval_ms,
-            self.update_camera_feed,
-        )
+        if self.camera.is_tracking:
+            self.preview_after_id = self.root.after(
+                frame_interval_ms,
+                self.update_camera_feed,
+            )
 
     def switch_front_back_camera(self):
         """

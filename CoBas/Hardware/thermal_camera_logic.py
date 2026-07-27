@@ -34,6 +34,10 @@ SENSOR_PIXELS = SENSOR_WIDTH * SENSOR_HEIGHT
 RECORD_WIDTH = int(os.environ.get("MLX90642_RECORD_WIDTH", "640"))
 RECORD_HEIGHT = int(os.environ.get("MLX90642_RECORD_HEIGHT", "480"))
 RECORD_FPS = int(os.environ.get("MLX90642_RECORD_FPS", "8"))
+# A single frame can fail during a sensor read-window transition even after the
+# transport-level retries. Do not terminate acquisition on one transient miss.
+FRAME_FAILURE_RETRY_LIMIT = 3
+FRAME_FAILURE_RETRY_DELAY_SECONDS = 0.05
 
 # Keep the public palette name for existing callers. It contains one unique RGB
 # value for every 0.05 °C interval on the fixed 0–60 °C color scale.
@@ -211,12 +215,35 @@ class CameraWorker(threading.Thread):
 
             # Event tuples are intentionally data-only: consumers can render,
             # record, or test acquisition without this module knowing a GUI.
+            consecutive_failures = 0
             while not self.stop_event.is_set():
-                # Read the current frame, then require a closed-to-open window
-                # transition before fetching the following frame.
-                frame = camera.read_frame()
-                self.events.put(("frame", frame, time.monotonic()))
-                camera.wait_for_next_frame()
+                try:
+                    # Read the current frame, then require a closed-to-open
+                    # window transition before fetching the following frame.
+                    frame = camera.read_frame()
+                    self.events.put(("frame", frame, time.monotonic()))
+                    camera.wait_for_next_frame()
+                    consecutive_failures = 0
+                except DriverError as exc:
+                    consecutive_failures += 1
+                    if consecutive_failures >= FRAME_FAILURE_RETRY_LIMIT:
+                        raise DriverError(
+                            "thermal frame acquisition failed "
+                            f"{consecutive_failures} consecutive times: {exc}"
+                        ) from exc
+
+                    self.events.put(
+                        (
+                            "status",
+                            "Recovering thermal camera "
+                            f"({consecutive_failures}/"
+                            f"{FRAME_FAILURE_RETRY_LIMIT})",
+                        )
+                    )
+                    if self.stop_event.wait(
+                        FRAME_FAILURE_RETRY_DELAY_SECONDS
+                    ):
+                        break
         except Exception as exc:
             # Marshal failures to the consumer instead of letting a daemon
             # thread terminate silently where the user cannot see the cause.
@@ -360,6 +387,11 @@ class ThermalRenderer:
     def _relative_frame_celsius(self, frame):
         """Convert a frame to Celsius values relative to its coldest pixel."""
         temperatures = frame_to_celsius(frame)
+        if not temperatures:
+            raise ValueError("thermal frame must contain at least one pixel")
+        if not all(math.isfinite(temperature) for temperature in temperatures):
+            raise ValueError("thermal frame contains a non-finite temperature")
+
         self.last_frame_min_celsius = min(temperatures)
         return [
             temperature - self.last_frame_min_celsius
@@ -392,6 +424,12 @@ class ThermalRenderer:
         width = max(1, int(width))
         height = max(1, int(height))
         temperatures = self._relative_frame_celsius(frame)
+        if len(temperatures) != SENSOR_PIXELS:
+            raise ValueError(
+                f"thermal frame must contain exactly {SENSOR_PIXELS} pixels; "
+                f"received {len(temperatures)}"
+            )
+
         min_value = min(temperatures)
         max_value = max(temperatures)
         color_cache = {}

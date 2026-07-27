@@ -287,8 +287,15 @@ class _PreviewRendererMixin:
     def render_image(self, frame, width, height):
         width = max(1, int(width))
         height = max(1, int(height))
-        rgb = self.render_rgb(frame, width, height)
-        return Image.frombytes("RGB", (width, height), rgb)
+        # Colorize only the camera's native 32x24 pixels, then let Pillow scale
+        # the finished image. Expanding every output pixel in Python made one
+        # 640x480 thermal frame take about 0.6 seconds and could freeze the app
+        # when preview and recording were active together. Nearest-neighbor
+        # scaling also preserves the exact mapped RGB colors.
+        image = self.render_sensor_image(frame)
+        if image.size == (width, height):
+            return image
+        return image.resize((width, height), Image.Resampling.NEAREST)
 
     def render_preview_frame(self, frame, width, height):
         image = self.render_sensor_image(frame)
@@ -590,7 +597,16 @@ class ThermalCamera:
         if frame is None:
             return None
 
-        return self.renderer.render_preview_image(frame, width, height)
+        try:
+            return self.renderer.render_preview_image(frame, width, height)
+        except Exception as exc:
+            # Tkinter callbacks must not receive renderer exceptions: an
+            # uncaught exception terminates the scheduled thermal preview loop.
+            message = f"Thermal preview rendering failed: {exc}"
+            print(f"[WARNING] {message}")
+            self.stop_event.set()
+            self.events.put(("error", message))
+            return None
 
     def _wait_for_frame(self, timeout_seconds=2.0):
         deadline = time.monotonic() + max(0.0, timeout_seconds)
@@ -1026,9 +1042,17 @@ class ThermalCamera:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"CoBas_V1_Thermal_Photo_{timestamp}.jpg"
         filepath = os.path.join(self.output_dir, filename)
-        image = self.renderer.render_image(frame, RECORD_WIDTH, RECORD_HEIGHT)
-        image.save(filepath, quality=95)
-        return filepath
+        try:
+            image = self.renderer.render_image(
+                frame,
+                RECORD_WIDTH,
+                RECORD_HEIGHT,
+            )
+            image.save(filepath, quality=95)
+            return filepath
+        except Exception as exc:
+            print(f"[WARNING] Thermal photo could not be saved: {exc}")
+            return None
 
     def get_recording_seconds(self):
         if not self.is_recording or self.record_start_time is None:

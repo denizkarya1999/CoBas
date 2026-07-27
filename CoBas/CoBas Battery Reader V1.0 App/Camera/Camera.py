@@ -1,4 +1,6 @@
 import cv2
+import glob
+import math
 import os
 import queue
 import time
@@ -10,7 +12,10 @@ import sounddevice as sd
 import soundfile as sf
 
 
-REGULAR_CAMERA_RECORD_FPS = 60.0
+REGULAR_CAMERA_RECORD_FPS = 30.0
+CAMERA_WARMUP_TIMEOUT_SECONDS = 2.0
+CAMERA_READ_ATTEMPTS = 5
+CAMERA_READ_RETRY_DELAY_SECONDS = 0.04
 
 
 class Camera:
@@ -29,11 +34,16 @@ class Camera:
     - Video/audio merging with FFmpeg
     """
 
-    def __init__(self, camera_index="/dev/video0", output_dir="Captures"):
-        self.camera_index = camera_index
+    def __init__(self, camera_index=None, output_dir="Captures"):
+        self.camera_index = (
+            camera_index
+            if camera_index is not None
+            else self.default_camera_source()
+        )
         self.output_dir = output_dir
 
         self.cap = None
+        self._prefetched_frame = None
         self.is_tracking = False
 
         # Digital zoom
@@ -80,6 +90,14 @@ class Camera:
     # Camera Source Handling
     # --------------------------------------------------
 
+    @staticmethod
+    def default_camera_source():
+        """Return the first conventional Linux camera node that exists."""
+        for source in ("/dev/video0", "/dev/video1"):
+            if os.path.exists(source):
+                return source
+        return "/dev/video0"
+
     def set_camera_source(self, camera_source):
         self.camera_index = camera_source
 
@@ -97,13 +115,26 @@ class Camera:
         return self.camera_index
 
     def _unique_camera_sources(self):
-        sources = [
-            self.camera_index,
-            "/dev/video0",
-            "/dev/video1",
-            0,
-            1,
-        ]
+        sources = [self.camera_index]
+
+        # USB and phone cameras normally occupy a low-numbered capture node.
+        # Avoid probing the Raspberry Pi codec/output nodes at video19+ as if
+        # they were cameras.
+        linux_sources = sorted(
+            (
+                source
+                for source in glob.glob("/dev/video*")
+                if source.removeprefix("/dev/video").isdigit()
+                and int(source.removeprefix("/dev/video")) < 10
+            ),
+            key=lambda source: int(source.removeprefix("/dev/video")),
+        )
+        sources.extend(linux_sources)
+
+        # OpenCV integer indexes are useful on non-Linux platforms or systems
+        # where /dev nodes are not directly visible.
+        if not linux_sources:
+            sources.extend((0, 1))
 
         unique_sources = []
 
@@ -112,6 +143,17 @@ class Camera:
                 unique_sources.append(source)
 
         return unique_sources
+
+    @staticmethod
+    def _read_valid_frame(camera):
+        """Read a frame with a short retry window for USB-camera warm-up."""
+        for attempt in range(CAMERA_READ_ATTEMPTS):
+            received, frame = camera.read()
+            if received and frame is not None:
+                return frame
+            if attempt + 1 < CAMERA_READ_ATTEMPTS:
+                time.sleep(CAMERA_READ_RETRY_DELAY_SECONDS)
+        return None
 
     def _try_open_camera(self, source):
         print(f"Trying camera source: {source}")
@@ -127,21 +169,42 @@ class Camera:
             print(f"Failed to open camera source: {source}")
             return None
 
+        # MJPEG is the camera's native 640x480 mode and avoids the bandwidth
+        # pressure of uncompressed YUYV over USB.
+        camera.set(
+            cv2.CAP_PROP_FOURCC,
+            cv2.VideoWriter_fourcc(*"MJPG"),
+        )
         camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         camera.set(cv2.CAP_PROP_FPS, self.record_fps)
         camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        time.sleep(0.5)
+        deadline = time.monotonic() + CAMERA_WARMUP_TIMEOUT_SECONDS
+        frame = None
+        while frame is None and time.monotonic() < deadline:
+            frame = self._read_valid_frame(camera)
 
-        ret, frame = camera.read()
-
-        if not ret or frame is None:
+        if frame is None:
             camera.release()
             print(f"Opened but could not read frame from: {source}")
             return None
 
-        print(f"Camera opened successfully: {source}")
+        actual_fps = camera.get(cv2.CAP_PROP_FPS)
+        if (
+            isinstance(actual_fps, (int, float))
+            and math.isfinite(actual_fps)
+            and 1.0 <= actual_fps <= 240.0
+        ):
+            self.record_fps = float(actual_fps)
+
+        # Preserve the verified frame so the first preview/recording request
+        # cannot immediately report "opened, but no frame received."
+        self._prefetched_frame = frame
+        print(
+            f"Camera opened successfully: {source} "
+            f"({self.record_fps:g} FPS)"
+        )
         return camera
 
     # --------------------------------------------------
@@ -153,6 +216,7 @@ class Camera:
             self.is_tracking = True
             return True
 
+        self._prefetched_frame = None
         for source in self._unique_camera_sources():
             camera = self._try_open_camera(source)
 
@@ -169,6 +233,7 @@ class Camera:
 
     def stop_camera(self):
         self.is_tracking = False
+        self._prefetched_frame = None
         if self.is_recording or self.video_writer is not None:
             self.stop_recording()
 
@@ -184,10 +249,34 @@ class Camera:
         if self.cap is None or not self.cap.isOpened():
             return None
 
-        ret, frame = self.cap.read()
+        if self._prefetched_frame is not None:
+            frame = self._prefetched_frame
+            self._prefetched_frame = None
+        else:
+            frame = self._read_valid_frame(self.cap)
 
-        if not ret or frame is None:
-            return None
+        if frame is None:
+            failed_source = self.camera_index
+            print(
+                f"[WARNING] Camera frame read failed on {failed_source}; "
+                "attempting one automatic reconnect."
+            )
+            self.cap.release()
+            self.cap = None
+            self.is_tracking = False
+
+            if not self.start_camera():
+                print("[WARNING] Camera reconnect failed.")
+                return None
+
+            frame = self._prefetched_frame
+            self._prefetched_frame = None
+            if frame is None:
+                frame = self._read_valid_frame(self.cap)
+            if frame is None:
+                self.stop_camera()
+                print("[WARNING] Reconnected camera produced no frame.")
+                return None
 
         frame = self.apply_zoom(frame)
 
@@ -459,7 +548,11 @@ class Camera:
         self.is_recording = True
         self.record_start_time = time.time()
         self.record_start_monotonic = time.monotonic()
-        self.record_frames_written = 0
+        # Save the verified startup frame immediately. A recording that opens
+        # successfully therefore always contains at least one camera frame,
+        # even if the device disconnects before the next preview callback.
+        self.video_writer.write(frame)
+        self.record_frames_written = 1
         self.last_recording_average_fps = None
         self.last_recording_duration = None
         self.last_recording_frame_count = 0
