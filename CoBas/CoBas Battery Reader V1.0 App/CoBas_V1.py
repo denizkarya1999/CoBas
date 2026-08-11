@@ -139,10 +139,16 @@ class CoBasV1App:
         self.pulse_playback_end_time = None
         self.pulse_count_text = tk.StringVar(master=self.root, value="20")
         self.pulse_count_spinbox = None
+        self.position_count_text = tk.StringVar(master=self.root, value="4")
+        self.position_count_spinbox = None
         self.requested_pulse_count = 1
+        self.requested_position_count = 1
+        self.pulses_per_position = 1
+        self.current_position_number = 1
         self.current_pulse_number = 0
         self.pulse_sequence_active = False
         self.pulse_recordings = []
+        self.position_segments = []
         self.pulse_sequence_started_at = None
         self.current_recording_timestamp = None
 
@@ -631,6 +637,29 @@ class CoBasV1App:
             justify="center"
         )
         self.pulse_count_spinbox.pack(side="right")
+
+        position_count_row = ttk.Frame(
+            controls_section,
+            style="Panel.TFrame"
+        )
+        position_count_row.pack(fill="x", pady=(0, 4))
+
+        ttk.Label(
+            position_count_row,
+            text="Battery positions",
+            style="PanelText.TLabel"
+        ).pack(side="left")
+
+        self.position_count_spinbox = ttk.Spinbox(
+            position_count_row,
+            from_=1,
+            to=99,
+            increment=1,
+            textvariable=self.position_count_text,
+            width=5,
+            justify="center"
+        )
+        self.position_count_spinbox.pack(side="right")
 
         # Start Tracking is green.
         # When camera is active, this button changes to red Stop Tracking.
@@ -1902,6 +1931,277 @@ class CoBasV1App:
         for source_path, output_path in capture_moves:
             self.move_capture_output(source_path, output_path)
 
+    def generate_positioned_capture_outputs(
+        self,
+        position_segments,
+        output_folder,
+    ):
+        """Export all positions into one battery-percentage class folder."""
+        os.makedirs(output_folder, exist_ok=True)
+        camera_frames = os.path.join(output_folder, "Camera_Frames")
+        thermal_frames = os.path.join(output_folder, "Thermal_Frames")
+        pulse_voice_folder = os.path.join(
+            output_folder,
+            "Voice_Recordings",
+        )
+
+        for generated_folder in (
+            camera_frames,
+            thermal_frames,
+            pulse_voice_folder,
+        ):
+            if os.path.isdir(generated_folder):
+                shutil.rmtree(generated_folder)
+
+        os.makedirs(camera_frames, exist_ok=True)
+        os.makedirs(thermal_frames, exist_ok=True)
+        os.makedirs(pulse_voice_folder, exist_ok=True)
+
+        total_image_count = 0
+        total_voice_count = 0
+        percentage = self.battery_percentage
+
+        for segment in sorted(
+            position_segments,
+            key=lambda item: item["position"],
+        ):
+            position_number = segment["position"]
+            expected_image_count = segment["expected_image_count"]
+            camera_prefix = (
+                f"Camera_Image_{percentage}_Percent_"
+                f"Position_{position_number}_"
+            )
+            thermal_prefix = (
+                f"Thermal_Image_{percentage}_Percent_"
+                f"Position_{position_number}_"
+            )
+            frame_limit_arguments = [
+                "-frames:v",
+                str(expected_image_count),
+            ]
+
+            self.run_capture_ffmpeg(
+                f"Position {position_number} camera frame extraction",
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    segment["video_path"],
+                    "-vf",
+                    f"fps={DATASET_FRAMES_PER_SECOND:g}",
+                    "-start_number",
+                    "1",
+                    *frame_limit_arguments,
+                    os.path.join(camera_frames, f"{camera_prefix}%03d.png"),
+                ],
+            )
+            self.run_capture_ffmpeg(
+                f"Position {position_number} thermal frame extraction",
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    segment["thermal_video_path"],
+                    "-vf",
+                    f"fps={DATASET_FRAMES_PER_SECOND:g}",
+                    "-start_number",
+                    "1",
+                    *frame_limit_arguments,
+                    os.path.join(thermal_frames, f"{thermal_prefix}%03d.png"),
+                ],
+            )
+
+            extracted_counts = {
+                "regular": sum(
+                    filename.startswith(camera_prefix)
+                    and filename.endswith(".png")
+                    for filename in os.listdir(camera_frames)
+                ),
+                "thermal": sum(
+                    filename.startswith(thermal_prefix)
+                    and filename.endswith(".png")
+                    for filename in os.listdir(thermal_frames)
+                ),
+            }
+            for label, extracted_count in extracted_counts.items():
+                if extracted_count != expected_image_count:
+                    raise RuntimeError(
+                        f"Expected {expected_image_count} Position "
+                        f"{position_number} {label} images, but extracted "
+                        f"{extracted_count}."
+                    )
+
+            total_image_count += expected_image_count
+
+            for recording in segment["pulse_recordings"]:
+                pulse_voice_path = recording.get("path")
+                if not pulse_voice_path or not os.path.exists(pulse_voice_path):
+                    print(
+                        "[WARNING] Pulse voice recording is unavailable: "
+                        f"{pulse_voice_path}"
+                    )
+                    continue
+
+                position_pulse_number = recording["position_pulse_number"]
+                voice_filename = (
+                    f"Voice_{percentage}_Percent_Position_"
+                    f"{position_number}_Pulse_"
+                    f"{position_pulse_number:03d}.wav"
+                )
+                self.move_capture_output(
+                    pulse_voice_path,
+                    os.path.join(pulse_voice_folder, voice_filename),
+                )
+                total_voice_count += 1
+
+            suffix = f"Position_{position_number}"
+            capture_moves = (
+                (
+                    segment["video_path"],
+                    os.path.join(output_folder, f"Camera_Video_{suffix}.mp4"),
+                ),
+                (
+                    segment["thermal_video_path"],
+                    os.path.join(output_folder, f"Thermal_Video_{suffix}.mp4"),
+                ),
+                (
+                    segment["scale_video_path"],
+                    os.path.join(
+                        output_folder,
+                        f"Thermal_Range_Video_{suffix}.mp4",
+                    ),
+                ),
+                (
+                    segment["temperature_log_path"],
+                    os.path.join(
+                        output_folder,
+                        f"Thermal_Temperature_Log_{suffix}.txt",
+                    ),
+                ),
+                (
+                    segment["temperature_average_path"],
+                    os.path.join(
+                        output_folder,
+                        f"Thermal_Temperature_Averages_{suffix}.txt",
+                    ),
+                ),
+                (
+                    segment["average_fps_log_path"],
+                    os.path.join(
+                        output_folder,
+                        f"Camera_Average_FPS_{suffix}.txt",
+                    ),
+                ),
+            )
+            for source_path, output_path in capture_moves:
+                self.move_capture_output(source_path, output_path)
+
+        return total_image_count, total_voice_count
+
+    def export_positioned_capture_session(self, position_segments):
+        """Process all physical positions without creating position classes."""
+        segments = [dict(segment) for segment in position_segments]
+        required_keys = (
+            "video_path",
+            "thermal_video_path",
+            "scale_video_path",
+            "temperature_log_path",
+            "temperature_average_path",
+            "average_fps_log_path",
+        )
+        for segment in segments:
+            for key in required_keys:
+                path = segment.get(key)
+                if not path or not os.path.exists(path):
+                    print(
+                        f"[WARNING] Position {segment['position']} output "
+                        f"is unavailable ({key}): {path}"
+                    )
+                    self.update_status(
+                        f"Status: Position {segment['position']} output is unavailable",
+                        "● WARNING",
+                    )
+                    return
+
+        output_folder = self.captures_dir
+
+        def worker():
+            self.root.after(
+                0,
+                lambda: (
+                    self.update_status(
+                        "Status: Generating position-aware dataset outputs...",
+                        "● WARNING",
+                    ),
+                    self.set_processing_indicator(True, "Generating outputs..."),
+                ),
+            )
+            try:
+                image_count, voice_count = (
+                    self.generate_positioned_capture_outputs(
+                        segments,
+                        output_folder,
+                    )
+                )
+                self.root.after(
+                    0,
+                    lambda: self.handle_positioned_outputs_finished(
+                        output_folder,
+                        len(segments),
+                        image_count,
+                        voice_count,
+                    ),
+                )
+            except Exception as error:
+                print(
+                    "[ERROR] Position-aware output generation failed: "
+                    f"{error}"
+                )
+                self.root.after(
+                    0,
+                    lambda: (
+                        self.set_processing_indicator(False),
+                        self.update_status(
+                            "Status: Position-aware output generation failed",
+                            "● WARNING",
+                        ),
+                    ),
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def handle_positioned_outputs_finished(
+        self,
+        output_folder,
+        position_count,
+        image_count_per_camera,
+        pulse_recording_count,
+    ):
+        """Report successful multi-position dataset generation."""
+        self.set_processing_indicator(False)
+        self.refresh_info_panel()
+        self.update_status(
+            (
+                f"Status: Saved {position_count} positions in the "
+                f"{self.battery_percentage}% class"
+            ),
+            "● IDLE",
+        )
+        messagebox.showinfo(
+            "Position-Aware Capture Saved",
+            (
+                f"Saved {position_count} battery positions under one class: "
+                f"{self.battery_percentage}%\n\n"
+                f"• Camera_Frames ({image_count_per_camera} PNG images)\n"
+                f"• Thermal_Frames ({image_count_per_camera} PNG images)\n"
+                f"• Voice_Recordings ({pulse_recording_count} WAV files)\n"
+                "• Position-numbered videos and logs\n\n"
+                "Position is included in filenames and is not a separate "
+                f"class.\n\nSaved in: {output_folder}"
+            ),
+            parent=self.root,
+        )
+
     def export_capture_session(self, video_path, thermal_video_path=None):
         """
         Export the capture artifacts from the latest recording.
@@ -2068,7 +2368,7 @@ class CoBasV1App:
         )
 
     def get_pulse_command(self):
-        """Return the command for one continuous repeated-pulse sequence."""
+        """Return the command for the current battery-position segment."""
         pulse_folder = os.path.join(self.base_dir, "Pulse Generation")
         pulse_script = os.path.join(
             pulse_folder,
@@ -2085,7 +2385,7 @@ class CoBasV1App:
             "--mode",
             "generate-play-record",
             "--count",
-            str(self.requested_pulse_count),
+            str(self.pulses_per_position),
             "--record-output-template",
             os.path.abspath(self.get_pulse_recording_template()),
             "--wait-for-start",
@@ -2102,14 +2402,15 @@ class CoBasV1App:
         return command, pulse_folder
 
     def get_pulse_recording_template(self):
-        """Return the temporary WAV template for a repeated-pulse session."""
+        """Return the temporary WAV template for the current position."""
         timestamp = (
             self.current_recording_timestamp
             or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         )
         return os.path.join(
             self.captures_dir,
-            f"CoBas_V1_PulseVoice_{timestamp}_{{pulse:03d}}.wav"
+            f"CoBas_V1_PulseVoice_{timestamp}_"
+            f"Position_{self.current_position_number}_{{pulse:03d}}.wav"
         )
 
     def get_pulse_recording_path(self, pulse_number):
@@ -2131,7 +2432,7 @@ class CoBasV1App:
             )
             remaining -= chunk_frames
 
-    def build_pulse_session_audio(self):
+    def build_pulse_session_audio(self, recordings=None):
         """
         Build one timeline-aligned WAV for the continuous camera videos.
 
@@ -2144,9 +2445,12 @@ class CoBasV1App:
         ):
             return None
 
+        if recordings is None:
+            recordings = self.pulse_recordings
+
         available_recordings = [
             recording
-            for recording in self.pulse_recordings
+            for recording in recordings
             if os.path.exists(recording.get("path", ""))
         ]
 
@@ -2251,7 +2555,11 @@ class CoBasV1App:
             return None
 
     def start_pulse_sequence(self, start_token):
-        """Run one gap-free process for all requested two-second pulses."""
+        """Run one gap-free pulse process for the current position."""
+
+        position_number = self.current_position_number
+        position_pulse_count = self.pulses_per_position
+        global_pulse_offset = (position_number - 1) * position_pulse_count
 
         def worker():
             if start_token != self.tracking_start_token:
@@ -2302,7 +2610,10 @@ class CoBasV1App:
             def start_recordings():
                 try:
                     start_result["started"] = (
-                        self.handle_pulse_sequence_ready(start_token)
+                        self.handle_pulse_sequence_ready(
+                            start_token,
+                            position_number,
+                        )
                     )
                 finally:
                     start_result_event.set()
@@ -2347,12 +2658,12 @@ class CoBasV1App:
                         continue
 
                     try:
-                        pulse_number = int(parts[1])
+                        position_pulse_number = int(parts[1])
                         playback_started_at = float(parts[2])
                     except (TypeError, ValueError):
                         continue
 
-                    if pulse_number == 1:
+                    if position_pulse_number == 1:
                         self.pulse_sequence_started_at = (
                             playback_started_at
                         )
@@ -2364,14 +2675,21 @@ class CoBasV1App:
                         )
                     else:
                         pulse_offset = (
-                            (pulse_number - 1) * PULSE_DURATION_SECONDS
+                            (position_pulse_number - 1)
+                            * PULSE_DURATION_SECONDS
                         )
-                    pulse_offsets[pulse_number] = pulse_offset
+                    pulse_offsets[position_pulse_number] = pulse_offset
+                    global_pulse_number = (
+                        global_pulse_offset + position_pulse_number
+                    )
                     self.root.after(
                         0,
-                        lambda pulse_number=pulse_number: (
+                        lambda global_pulse_number=global_pulse_number,
+                        position_pulse_number=position_pulse_number: (
                             self.handle_pulse_started(
-                                pulse_number,
+                                global_pulse_number,
+                                position_pulse_number,
+                                position_number,
                                 start_token,
                             )
                         ),
@@ -2383,31 +2701,40 @@ class CoBasV1App:
                         continue
 
                     try:
-                        pulse_number = int(parts[1])
+                        position_pulse_number = int(parts[1])
                     except (TypeError, ValueError):
                         continue
 
                     recording_path = parts[2]
-                    pulse_offset = pulse_offsets.get(pulse_number)
+                    pulse_offset = pulse_offsets.get(position_pulse_number)
                     if (
-                        pulse_number in completed_pulses
+                        position_pulse_number in completed_pulses
                         or pulse_offset is None
                         or not os.path.exists(recording_path)
                     ):
                         continue
 
-                    completed_pulses.add(pulse_number)
+                    completed_pulses.add(position_pulse_number)
+                    global_pulse_number = (
+                        global_pulse_offset + position_pulse_number
+                    )
                     self.pulse_recordings.append(
                         {
                             "path": recording_path,
                             "offset_seconds": pulse_offset,
+                            "pulse_number": global_pulse_number,
+                            "position": position_number,
+                            "position_pulse_number": position_pulse_number,
                         }
                     )
                     self.root.after(
                         0,
-                        lambda pulse_number=pulse_number: (
+                        lambda global_pulse_number=global_pulse_number,
+                        position_pulse_number=position_pulse_number: (
                             self.handle_pulse_completed(
-                                pulse_number,
+                                global_pulse_number,
+                                position_pulse_number,
+                                position_number,
                                 start_token,
                             )
                         ),
@@ -2424,7 +2751,7 @@ class CoBasV1App:
             if (
                 return_code != 0
                 or not ready_received
-                or len(completed_pulses) != self.requested_pulse_count
+                or len(completed_pulses) != position_pulse_count
             ):
                 self.root.after(
                     0,
@@ -2437,14 +2764,20 @@ class CoBasV1App:
 
             self.root.after(
                 0,
-                lambda: self.handle_pulse_sequence_finished(start_token)
+                lambda: self.handle_position_segment_finished(
+                    start_token,
+                    position_number,
+                )
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def handle_pulse_sequence_ready(self, start_token):
-        """Start both camera recorders, then allow pulse playback to begin."""
-        if start_token != self.tracking_start_token:
+    def handle_pulse_sequence_ready(self, start_token, position_number):
+        """Start both camera recorders for one position segment."""
+        if (
+            start_token != self.tracking_start_token
+            or position_number != self.current_position_number
+        ):
             return False
 
         self.start_active_recordings(
@@ -2463,18 +2796,25 @@ class CoBasV1App:
             state="disabled",
         )
         target_duration = (
-            self.requested_pulse_count * PULSE_DURATION_SECONDS
+            self.pulses_per_position * PULSE_DURATION_SECONDS
         )
         self.update_status(
             (
-                "Status: Cameras recording continuously for "
+                f"Status: Recording Position {position_number} of "
+                f"{self.requested_position_count} for "
                 f"{target_duration:g} seconds; starting pulse 1"
             ),
             "● REC",
         )
         return True
 
-    def handle_pulse_started(self, pulse_number, start_token):
+    def handle_pulse_started(
+        self,
+        pulse_number,
+        position_pulse_number,
+        position_number,
+        start_token,
+    ):
         """Update the interface when one pulse begins."""
         if start_token != self.tracking_start_token:
             return
@@ -2485,13 +2825,21 @@ class CoBasV1App:
         )
         self.update_status(
             (
-                f"Status: Playing and recording pulse {pulse_number} "
-                f"of {self.requested_pulse_count}"
+                f"Status: Position {position_number}/"
+                f"{self.requested_position_count}, pulse "
+                f"{position_pulse_number}/{self.pulses_per_position} "
+                f"(overall {pulse_number}/{self.requested_pulse_count})"
             ),
             "● REC",
         )
 
-    def handle_pulse_completed(self, pulse_number, start_token):
+    def handle_pulse_completed(
+        self,
+        pulse_number,
+        position_pulse_number,
+        position_number,
+        start_token,
+    ):
         """Report that one microphone stream was closed successfully."""
         if start_token != self.tracking_start_token:
             return
@@ -2499,18 +2847,159 @@ class CoBasV1App:
         self.pulse_playback_end_time = None
         self.record_timer_label.config(
             text=(
-                f"Pulses: {pulse_number}/{self.requested_pulse_count}"
+                f"Position {position_number}/{self.requested_position_count} "
+                f"• Pulses {pulse_number}/{self.requested_pulse_count}"
             )
         )
 
-        if pulse_number < self.requested_pulse_count:
+        if position_pulse_number < self.pulses_per_position:
             self.update_status(
                 (
-                    f"Status: Pulse {pulse_number} recorded; "
-                    f"preparing pulse {pulse_number + 1}"
+                    f"Status: Position {position_number}, pulse "
+                    f"{position_pulse_number} recorded; preparing pulse "
+                    f"{position_pulse_number + 1}"
                 ),
                 "● REC",
             )
+
+    def finalize_position_segment(self, position_number):
+        """Stop recording and retain the artifacts for one position."""
+        if any(
+            segment["position"] == position_number
+            for segment in self.position_segments
+        ):
+            return next(
+                segment
+                for segment in self.position_segments
+                if segment["position"] == position_number
+            )
+
+        position_recordings = [
+            recording
+            for recording in self.pulse_recordings
+            if recording.get("position") == position_number
+        ]
+        session_audio_path = self.build_pulse_session_audio(
+            position_recordings
+        )
+        target_duration = (
+            len(position_recordings) * PULSE_DURATION_SECONDS
+            if position_recordings
+            else None
+        )
+        saved_video_path, saved_thermal_video_path, _ = (
+            self.stop_active_recordings(
+                target_duration_seconds=target_duration,
+                audio_path_override=session_audio_path,
+                capture_window_start_time=self.pulse_sequence_started_at,
+            )
+        )
+
+        if not position_recordings:
+            return None
+
+        segment = {
+            "position": position_number,
+            "pulse_recordings": position_recordings,
+            "expected_image_count": (
+                len(position_recordings) * DATASET_FRAMES_PER_PULSE
+            ),
+            "video_path": saved_video_path,
+            "thermal_video_path": saved_thermal_video_path,
+            "scale_video_path": self.thermal_camera.scale_video_path,
+            "temperature_log_path": (
+                self.thermal_camera.temperature_log_path
+            ),
+            "temperature_average_path": (
+                self.thermal_camera.temperature_average_path
+            ),
+            "average_fps_log_path": self.average_fps_log_path,
+        }
+        self.position_segments.append(segment)
+        return segment
+
+    def handle_position_segment_finished(self, start_token, position_number):
+        """Pause capture and ask for the next physical battery position."""
+        if start_token != self.tracking_start_token:
+            return
+
+        self.is_preparing_tracking = True
+        self.track_button.config(text="Finalizing...", state="disabled")
+        self.update_status(
+            f"Status: Position {position_number} complete; stopping recording...",
+            "● WARNING",
+        )
+        segment = self.finalize_position_segment(position_number)
+        if segment is None:
+            self.finish_pulse_sequence(
+                completion_message=(
+                    f"Position {position_number} did not produce pulse data"
+                ),
+                indicator_text="● WARNING",
+            )
+            return
+
+        if position_number >= self.requested_position_count:
+            self.finish_pulse_sequence(
+                completion_message=(
+                    f"Completed {len(self.pulse_recordings)} pulses across "
+                    f"{len(self.position_segments)} positions"
+                ),
+                indicator_text="● IDLE",
+            )
+            return
+
+        next_position = position_number + 1
+        self.update_status(
+            (
+                f"Status: Recording stopped. Change the battery to Position "
+                f"{next_position}."
+            ),
+            "● WARNING",
+        )
+        should_continue = messagebox.askokcancel(
+            "Change Battery Position",
+            (
+                f"Position {position_number} is complete "
+                f"({self.pulses_per_position} pulses).\n\n"
+                "Recording has stopped. Can you change the battery to "
+                f"Position {next_position}?\n\n"
+                "Click OK after changing the position to continue."
+            ),
+            parent=self.root,
+        )
+        if not should_continue:
+            self.finish_pulse_sequence(
+                completion_message=(
+                    f"Stopped after Position {position_number}; "
+                    f"captured {len(self.pulse_recordings)} pulses"
+                ),
+                indicator_text="● WARNING",
+            )
+            return
+
+        self.current_position_number = next_position
+        self.pulse_sequence_started_at = None
+        self.current_recording_timestamp = datetime.now().strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
+        self.track_button.config(
+            text="Stop Tracking",
+            style="Stop.TButton",
+            state="normal",
+        )
+        self.record_timer_label.config(
+            text=(
+                f"Position {next_position}/{self.requested_position_count} "
+                f"• Pulses {len(self.pulse_recordings)}/"
+                f"{self.requested_pulse_count}"
+            )
+        )
+        self.update_status(
+            f"Status: Preparing Position {next_position} recording...",
+            "● STARTING",
+        )
+        self.start_pulse_sequence(start_token)
 
     def handle_pulse_sequence_failed(self, start_token, message):
         """Stop the cameras safely if a pulse cannot be played or recorded."""
@@ -2523,21 +3012,8 @@ class CoBasV1App:
             indicator_text="● WARNING",
         )
 
-    def handle_pulse_sequence_finished(self, start_token):
-        """Finalize the continuous camera session after the last pulse."""
-        if start_token != self.tracking_start_token:
-            return
-
-        self.finish_pulse_sequence(
-            completion_message=(
-                f"Completed {len(self.pulse_recordings)} "
-                "pulse recordings"
-            ),
-            indicator_text="● IDLE",
-        )
-
     def finish_pulse_sequence(self, completion_message, indicator_text):
-        """Stop both cameras once and export the repeated-pulse session."""
+        """Stop both cameras and export every captured position as one class."""
         self.is_preparing_tracking = False
         self.pulse_sequence_active = False
         self.pulse_playback_end_time = None
@@ -2546,22 +3022,14 @@ class CoBasV1App:
         self.cancel_preview_loop()
         self.cancel_thermal_preview_loop()
 
-        session_audio_path = self.build_pulse_session_audio()
-        target_duration = (
-            len(self.pulse_recordings) * PULSE_DURATION_SECONDS
-            if self.pulse_recordings
-            else None
-        )
-        saved_video_path, saved_thermal_video_path, _ = (
-            self.finalize_capture_session(
-                target_duration_seconds=target_duration,
-                audio_path_override=session_audio_path,
-                capture_window_start_time=self.pulse_sequence_started_at,
-            )
-        )
+        if self.camera.is_recording or self.thermal_camera.is_recording:
+            self.finalize_position_segment(self.current_position_number)
 
         self.camera.stop_camera()
         self.thermal_camera.stop_camera()
+
+        if self.position_segments:
+            self.export_positioned_capture_session(self.position_segments)
 
         self.video_label.config(
             image="",
@@ -2595,13 +3063,14 @@ class CoBasV1App:
             )
         )
         self.pulse_count_spinbox.config(state="normal")
+        self.position_count_spinbox.config(state="normal")
         self.track_button.config(state="normal")
         self.update_tracking_button()
         self.refresh_info_panel()
 
         status_message = f"Status: {completion_message}"
-        if saved_video_path and saved_thermal_video_path:
-            status_message += "; camera and thermal videos saved"
+        if self.position_segments:
+            status_message += "; generating position-aware outputs"
         self.update_status(status_message, indicator_text)
 
     def stop_pulse_sequence_process(self):
@@ -2762,6 +3231,38 @@ class CoBasV1App:
             self.pulse_count_spinbox.focus_set()
             return
 
+        try:
+            requested_position_count = int(self.position_count_text.get())
+            if requested_position_count < 1:
+                raise ValueError
+        except (TypeError, ValueError):
+            messagebox.showwarning(
+                "Invalid Position Count",
+                "Enter a whole number greater than zero for battery positions."
+            )
+            self.position_count_spinbox.focus_set()
+            return
+
+        if requested_position_count > requested_pulse_count:
+            messagebox.showwarning(
+                "Too Many Positions",
+                "The position count cannot be greater than the pulse count."
+            )
+            self.position_count_spinbox.focus_set()
+            return
+
+        if requested_pulse_count % requested_position_count != 0:
+            messagebox.showwarning(
+                "Pulses Must Divide Evenly",
+                (
+                    "The pulse count must divide evenly across the battery "
+                    "positions. For example, 200 pulses and 4 positions "
+                    "records 50 pulses per position."
+                )
+            )
+            self.position_count_spinbox.focus_set()
+            return
+
         # Prevent duplicate preview loops before starting.
         self.cancel_preview_loop()
         self.cancel_thermal_preview_loop()
@@ -2772,8 +3273,14 @@ class CoBasV1App:
             self.tracking_start_token += 1
             start_token = self.tracking_start_token
         self.requested_pulse_count = requested_pulse_count
+        self.requested_position_count = requested_position_count
+        self.pulses_per_position = (
+            requested_pulse_count // requested_position_count
+        )
+        self.current_position_number = 1
         self.current_pulse_number = 0
         self.pulse_recordings = []
+        self.position_segments = []
         self.pulse_sequence_started_at = None
         self.current_recording_timestamp = datetime.now().strftime(
             "%Y%m%d_%H%M%S_%f"
@@ -2783,6 +3290,7 @@ class CoBasV1App:
 
         self.start_thermal_camera_feed()
         self.pulse_count_spinbox.config(state="disabled")
+        self.position_count_spinbox.config(state="disabled")
         self.record_button.config(state="disabled")
 
         self.track_button.config(
@@ -2795,7 +3303,9 @@ class CoBasV1App:
             image="",
             text=(
                 "Preparing continuous camera recording...\n\n"
-                f"{requested_pulse_count} pulses requested."
+                f"Position 1 of {requested_position_count}\n"
+                f"{self.pulses_per_position} of {requested_pulse_count} "
+                "total pulses will be recorded."
             ),
             bg=COLORS["preview_bg"],
             fg=COLORS["muted_text"]
@@ -2806,7 +3316,7 @@ class CoBasV1App:
             image="",
             text=(
                 "Preparing thermal camera...\n\n"
-                "It will record from the first pulse through the last."
+                "Recording will stop between battery positions."
             ),
             bg=COLORS["preview_bg"],
             fg=COLORS["muted_text"]
@@ -2816,7 +3326,8 @@ class CoBasV1App:
         self.update_status(
             (
                 "Status: Preparing cameras for "
-                f"{requested_pulse_count} pulse recordings..."
+                f"Position 1/{requested_position_count} "
+                f"({self.pulses_per_position} pulses)..."
             ),
             "● STARTING"
         )
@@ -2871,6 +3382,7 @@ class CoBasV1App:
             self.thermal_camera.stop_camera()
             self.cancel_thermal_preview_loop()
             self.pulse_count_spinbox.config(state="normal")
+            self.position_count_spinbox.config(state="normal")
             self.record_button.config(state="normal")
             self.track_button.config(state="normal")
 
@@ -2922,23 +3434,15 @@ class CoBasV1App:
         # Stop the current pulse before closing the continuous camera session.
         self.stop_pulse_sequence_process()
 
-        session_audio_path = self.build_pulse_session_audio()
-        target_duration = (
-            len(self.pulse_recordings) * PULSE_DURATION_SECONDS
-            if self.pulse_recordings
-            else None
-        )
-        saved_video_path, saved_thermal_video_path, _ = (
-            self.finalize_capture_session(
-                target_duration_seconds=target_duration,
-                audio_path_override=session_audio_path,
-                capture_window_start_time=self.pulse_sequence_started_at,
-            )
-        )
+        if self.camera.is_recording or self.thermal_camera.is_recording:
+            self.finalize_position_segment(self.current_position_number)
 
         # Release camera through backend.
         self.camera.stop_camera()
         self.thermal_camera.stop_camera()
+
+        if self.position_segments:
+            self.export_positioned_capture_session(self.position_segments)
 
         # Reset preview display.
         self.video_label.config(
@@ -2967,9 +3471,10 @@ class CoBasV1App:
             text=f"Pulses recorded: {len(self.pulse_recordings)}"
         )
         self.pulse_count_spinbox.config(state="normal")
+        self.position_count_spinbox.config(state="normal")
 
         self.update_status(
-            "Status: Tracking stopped",
+            "Status: Tracking stopped; saving completed positions",
             "● IDLE"
         )
 
@@ -3087,14 +3592,18 @@ class CoBasV1App:
             ):
                 self.record_timer_label.config(
                     text=(
-                        f"Pulse {self.current_pulse_number}/"
+                        f"Position {self.current_position_number}/"
+                        f"{self.requested_position_count} • Pulse "
+                        f"{self.current_pulse_number}/"
                         f"{self.requested_pulse_count}"
                     )
                 )
             elif self.pulse_sequence_active:
                 self.record_timer_label.config(
                     text=(
-                        f"Pulses: {len(self.pulse_recordings)}/"
+                        f"Position {self.current_position_number}/"
+                        f"{self.requested_position_count} • Pulses "
+                        f"{len(self.pulse_recordings)}/"
                         f"{self.requested_pulse_count}"
                     )
                 )
@@ -3357,7 +3866,14 @@ class CoBasV1App:
         self.stop_pulse_sequence_process()
 
         # Finalize any active recordings before releasing camera resources.
-        session_audio_path = self.build_pulse_session_audio()
+        current_position_recordings = [
+            recording
+            for recording in self.pulse_recordings
+            if recording.get("position") == self.current_position_number
+        ]
+        session_audio_path = self.build_pulse_session_audio(
+            current_position_recordings
+        )
         self.stop_active_recordings(audio_path_override=session_audio_path)
 
         # Release camera and recording resources.
