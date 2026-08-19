@@ -2,6 +2,7 @@
 numpy
 opencv-python
 Pillow
+pyserial>=3.5,<4
 
 # Audio capture and processing
 sounddevice

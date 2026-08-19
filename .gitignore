@@ -4,5 +4,8 @@
 *.MOV
 *.jpg
 .DS_Store
+__pycache__/
+*.py[cod]
+Captures/
 *.wav
 *.png

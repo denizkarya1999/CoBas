@@ -197,7 +197,7 @@ def play_and_record_pulse_sequence(
     Play back-to-back pulses through one stream and save one WAV per pulse.
 
     Keeping a single full-duplex stream open removes the process and device
-    setup gaps that would otherwise extend an N-pulse camera session beyond
+    setup gaps that would otherwise extend an N-pulse sensor session beyond
     exactly N times the two-second pulse duration.
     """
     signal = np.asarray(signal, dtype=np.float32).reshape(-1)

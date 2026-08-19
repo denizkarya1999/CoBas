@@ -55,8 +55,9 @@ def show_about_window(parent=None):
 
     description = (
         "CoBas is a contactless battery sensing prototype that combines "
-        "near-ultrasonic acoustic signals with synchronized video to support "
-        "lithium-ion battery state-of-charge monitoring."
+        "near-ultrasonic acoustic signals, IWR6843AOP range-angle responses, "
+        "and synchronized thermal imaging to support lithium-ion battery "
+        "state-of-charge monitoring."
     )
 
     ttk.Label(

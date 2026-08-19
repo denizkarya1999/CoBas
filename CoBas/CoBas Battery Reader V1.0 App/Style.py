@@ -14,7 +14,7 @@ WINDOW = {
 # --------------------------------------------------
 # Preview Settings
 # --------------------------------------------------
-# Display size of the camera preview inside the GUI.
+# Display size of each live sensor preview inside the GUI.
 PREVIEW = {
     "width": 660,
     "height": 380
@@ -60,22 +60,6 @@ COLORS = {
     "start_hover": "#15803d",
     "stop": "#dc2626",
     "stop_hover": "#b91c1c",
-
-    # Camera switch button colors
-    "camera": "#0891b2",
-    "camera_hover": "#0e7490",
-
-    # Photo and video capture colors
-    "capture": "#16a34a",
-    "capture_hover": "#15803d",
-
-    # Stop recording colors
-    "video_stop": "#dc2626",
-    "video_stop_hover": "#b91c1c",
-
-    # Zoom button colors
-    "zoom": "#475569",
-    "zoom_hover": "#334155",
 
     # Toolbar button colors
     "settings": "#4f46e5",
@@ -281,43 +265,6 @@ def apply_styles(root):
         "Tool.TButton",
         COLORS["tool"],
         COLORS["tool_hover"]
-    )
-
-    # Restart Camera uses the same normal tool button style.
-    configure_colored_button(
-        "Restart.TButton",
-        COLORS["tool"],
-        COLORS["tool_hover"]
-    )
-
-    # Cyan camera-switch button.
-    configure_colored_button(
-        "Camera.TButton",
-        COLORS["camera"],
-        COLORS["camera_hover"]
-    )
-
-    # Green photo/video capture buttons.
-    configure_colored_button(
-        "Capture.TButton",
-        COLORS["capture"],
-        COLORS["capture_hover"],
-        bold=True
-    )
-
-    # Red stop-recording button.
-    configure_colored_button(
-        "VideoStop.TButton",
-        COLORS["video_stop"],
-        COLORS["video_stop_hover"],
-        bold=True
-    )
-
-    # Gray zoom/reset buttons.
-    configure_colored_button(
-        "Zoom.TButton",
-        COLORS["zoom"],
-        COLORS["zoom_hover"]
     )
 
     # Indigo settings/about toolbar buttons.

@@ -1,0 +1,4 @@
+# Keep ModemManager from probing the IWR6843AOPEVM's CP2105 UARTs and grant
+# serial access to local users in Ubuntu's standard plugdev group.
+# Install with: sudo install -m 0644 99-iwr6843aop.rules /etc/udev/rules.d/
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea70", ENV{ID_MM_DEVICE_IGNORE}="1", GROUP="plugdev", MODE="0660"

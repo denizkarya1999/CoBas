@@ -1,0 +1,185 @@
+THEORY BEHIND MMWAVE RAW I/Q AND RANGE-ANGLE RESPONSES
+========================================================
+
+1. What the radar transmits
+---------------------------
+
+The IWR6843AOP is a frequency-modulated continuous-wave (FMCW) radar. During
+each chirp, its transmitted frequency increases approximately linearly. A
+target reflects a delayed and phase-shifted copy of that chirp back to the
+receiver antennas.
+
+Inside the radar, each received signal is mixed with a copy of the transmitted
+signal. The resulting lower-frequency complex baseband signal has two parts:
+
+    I = in-phase component (real part)
+    Q = quadrature component (imaginary part)
+
+Together they form one complex sample:
+
+    x = I + jQ
+
+Keeping both I and Q preserves phase. Phase differences between virtual
+antennas are what make angle estimation possible.
+
+
+2. What this application receives on USB1
+------------------------------------------
+
+The sensor itself samples complex baseband data and performs its range and
+Doppler processing. In this application, USB0 is the 115200-baud text command
+port and USB1 is the 921600-baud binary data port.
+
+The USB1 data used here is not untouched, time-domain ADC data. The out-of-box
+mmWave SDK has already performed a range FFT and Doppler processing inside the
+sensor. The enabled static-heat-map TLV contains the zero-Doppler complex
+range-FFT value for each range bin and virtual antenna. This application calls
+those complex values Raw I/Q because they are the earliest complex antenna
+values available to this USB pipeline, but they are processed radar-cube
+values rather than direct ADC samples.
+
+Each USB1 packet contains:
+
+    SDK magic word -> packet header -> one or more TLV records -> padding
+
+The parser accepts static heat-map TLV type 8 used by the AOP demo and type 4
+used by compatible non-AOP output. TI stores every complex int16 symbol as
+imaginary first and real second (cmplx16ImRe_t). The parser maps that order to
+the conventional names Q and I, then constructs:
+
+    X[range_bin, virtual_antenna] = I + jQ
+
+The Raw IQ Signals CSV contains only the values needed to reconstruct X:
+
+    frame_number, range_bin, virtual_antenna, i, q
+
+
+3. How range is represented
+---------------------------
+
+The range FFT separates returns according to their beat frequency. A higher
+beat frequency represents a longer round-trip delay and therefore a greater
+target range. For a linear FMCW chirp, the range-bin spacing is approximately:
+
+    delta_R = c * sample_rate / (2 * chirp_slope * range_FFT_size)
+
+For this application's hard-coded profile:
+
+    sample rate       = 2,000,000 samples/second
+    chirp slope       = 70,000,000,000,000 hertz/second
+    range FFT size    = 64
+    range-bin spacing = approximately 0.0669 meter
+
+Therefore:
+
+    range_meters = range_bin * 0.0669 (approximately)
+
+This application retains only range-bin centers between 0.20 and 0.50 meter.
+With the fixed profile, those are bins 3 through 7, approximately 0.201 to
+0.468 meter. The live display uses requested axis limits of 0.20 to 0.50 meter.
+
+
+4. How angle is estimated
+-------------------------
+
+The three transmitters and four receivers form virtual antenna channels. A
+wave arriving from an angle reaches the antenna locations with different
+phases. After applying the configured AOP channel selection and alternating
+phase correction, the program tests possible angles from -60 to +60 degrees.
+
+For antenna position p measured in half-wavelength units and candidate angle
+theta, the steering phase is:
+
+    a(p, theta) = exp(-j * pi * p * sin(theta))
+
+A Hamming aperture window reduces angular sidelobes. Conventional beamforming
+then combines the corrected complex antenna values against each candidate
+steering vector:
+
+    response[range, angle] = sum(weighted_IQ * conjugate(steering_vector))
+
+The squared magnitude gives linear response power:
+
+    power[range, angle] = |response[range, angle]|^2
+
+The processor supports the 12-, 8-, and 4-symbol AOP layouts configured in
+Logic/config.py. At least four usable virtual antenna symbols are required for
+this range-angle calculation.
+
+
+5. Temporal smoothing and decibels
+----------------------------------
+
+The program smooths consecutive frames in linear power, not in decibels:
+
+    smoothed = alpha * current + (1 - alpha) * previous
+
+It then uses the strongest cell in the current smoothed map as the reference:
+
+    relative_dB = 10 * log10(smoothed_power / maximum_smoothed_power)
+
+The strongest cell is 0 dB, and values below -50 dB are clipped to -50 dB for
+the display. These are relative response levels, not calibrated dBm power.
+
+
+6. What is stored for each named session
+----------------------------------------
+
+When the application starts, it asks for a battery level from 0% to 100%. That
+level is used as the shared name for matching files. For example, entering 20%
+creates:
+
+    Logs/Raw IQ Signals/20_Percent_Battery.csv
+    Logs/Range-Angle Responses/20_Percent_Battery.csv
+
+The Raw IQ file contains the minimum complex input described in section 2.
+
+The Range-Angle Responses file contains one row per frame and selected range
+value. Its first two columns are frame_number and range_meters. The remaining
+columns are the relative dB values for every displayed angle from -60.0 to
++60.0 degrees. Consequently, selecting all rows for one frame reconstructs the
+exact 5-by-121 matrix supplied to the live figure before graphical
+interpolation. The Raw IQ file likewise retains only range bins 3 through 7.
+
+The application also asks for a spectrogram recording duration. During that
+period, the same relative-dB matrix is converted to Viridis-colored pixels and
+sampled at 2 frames per second and written to a temporary video. The video
+contains only spectrogram pixels: it
+does not contain a title, axes, ticks, labels, grid, colorbar, controls, or
+status information. The video is then sliced into numbered JPEG images under:
+
+    Frames/<battery level>_Percent/
+
+For example, a 20% session uses Frames/20_Percent/. The temporary video is
+deleted after its frames have been extracted. This video conversion does not
+modify the I/Q data or the range-angle calculations.
+
+The entered duration controls the complete capture session. A visible
+remaining-seconds countdown runs while Raw I/Q logging, Range-Angle logging,
+and spectrogram recording operate. When it reaches zero, all three stop
+together and the temporary video is converted into frames.
+
+After frame extraction, one frame is selected randomly for that battery. A
+separate reference image is created with Angle (degrees), Range (meters), and
+Energy (dB) annotations. It is saved under References/ using a fixed battery
+filename, so there is at most one labeled reference per battery level. The
+remaining images in Frames/ stay free of labels and graphical annotations.
+
+The one-time transform_existing_frames.py script crops legacy clean frames
+from their original 0-4.216 m and -90 to +90 degree view, enlarges the selected
+0.20-0.50 m and -60 to +60 degree window back to the standard image size, and
+rebuilds the labeled references. Per-folder marker files prevent double crops.
+
+
+7. Limitations
+--------------
+
+Because the SDK exports the zero-Doppler static heat map, this view emphasizes
+stationary or near-stationary reflections. It is not a full range-angle-
+velocity cube. Absolute power requires an RF/ADC calibration that this basic
+application does not perform.
+
+Capturing untouched time-domain ADC I/Q requires a different data path, such
+as LVDS capture with a DCA1000 or suitable custom firmware. That capture format
+would also require chirp, transmitter, receiver, ADC-sample, and frame indices
+before range and Doppler FFTs could be reproduced on the Raspberry Pi.

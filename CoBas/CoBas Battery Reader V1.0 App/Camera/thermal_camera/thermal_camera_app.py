@@ -348,7 +348,7 @@ class ThermalCameraApp(tk.Tk):
         return display_bounds
 
     def _canvas_layout(self):
-        """Lay out the regular camera image and optional temperature legend."""
+        """Lay out the color thermal image and optional temperature legend."""
         canvas_width = max(1, self.canvas.winfo_width())
         canvas_height = max(1, self.canvas.winfo_height())
         available_width = (
