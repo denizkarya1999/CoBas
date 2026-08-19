@@ -179,6 +179,10 @@ The CoBas V1 battery reader imports this processing pipeline through its
 `MMWave/capture.py` bridge. CoBas remains the sole owner of chirp duration and
 battery-position prompts. The bridge only enables acquisition during an active
 position, pauses while the battery is moved, and stops after the final chirp.
+It reports the radar as ready only after a valid complex I/Q frame arrives and
+aborts the coordinated capture if the USB1 stream stops. The integrated live
+preview includes calibrated angle, range, relative-power, peak, frame, and
+antenna references; saved training frames remain clean heatmap pixels.
 
 Integrated outputs are written beneath the selected battery capture directory:
 

@@ -21,11 +21,14 @@ if raw_iq_path not in sys.path:
     sys.path.insert(0, raw_iq_path)
 
 from iq_logic import (  # noqa: E402
+    FIRST_IQ_FRAME_TIMEOUT_SECONDS,
     IQFrame,
     MMWavePacketParser,
     READ_SIZE,
     RadarUARTSource,
 )
+
+__all__ = ("FIRST_IQ_FRAME_TIMEOUT_SECONDS", "RawIQFrameSource")
 
 
 class RawIQFrameSource:
@@ -43,6 +46,10 @@ class RawIQFrameSource:
     @property
     def discarded_bytes(self) -> int:
         return self._parser.discarded_bytes
+
+    @property
+    def total_packets(self) -> int:
+        return self._parser.total_packets
 
     def __enter__(self) -> "RawIQFrameSource":
         # RadarUARTSource opens USB1 first, then configures/starts through USB0.
@@ -69,8 +76,5 @@ class RawIQFrameSource:
         """Drop USB1 bytes and partial packets collected during a user pause."""
         if not self._is_open:
             raise RuntimeError("Raw I/Q frame source is not open")
-        data_port = self._uart._data
-        if data_port is None:
-            raise RuntimeError("Radar USB1 data port is not open")
-        data_port.reset_input_buffer()
+        self._uart.reset_data_input_buffer()
         self._parser = MMWavePacketParser()

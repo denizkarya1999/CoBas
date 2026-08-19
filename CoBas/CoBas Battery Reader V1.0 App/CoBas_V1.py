@@ -268,7 +268,7 @@ class CoBasV1App:
 
         ttk.Label(
             mmwave_frame,
-            text="Range-Angle Response Pattern",
+            text="mmWave Range-Angle Spectrogram · calibrated references",
             style="PanelText.TLabel",
         ).grid(row=0, column=0, sticky="w", pady=(0, 3))
 
@@ -541,14 +541,20 @@ class CoBasV1App:
 
     def update_thermal_feed(self):
         self.thermal_preview_after_id = None
+        capture_error = None
         for event in self.thermal_camera.poll_events():
             if event[0] == "error":
+                capture_error = str(event[1])
                 self.thermal_video_label.config(
                     image="",
-                    text=f"Thermal sensor unavailable.\n\n{event[1]}",
+                    text=f"Thermal sensor unavailable.\n\n{capture_error}",
                     fg=COLORS["warning"],
                 )
                 self.thermal_video_label.image = None
+
+        if capture_error and self.pulse_sequence_active and not self.is_closing:
+            self.abort_capture(capture_error)
+            return
 
         width, height = self.get_preview_dimensions(self.thermal_video_label)
         image = self.thermal_camera.get_preview_image(width, height)
@@ -583,7 +589,10 @@ class CoBasV1App:
                     self.display_mmwave_frame(event.payload)
                 elif event.kind == "ready":
                     self.refresh_info_panel()
-                    self.update_status("Status: mmWave radar ready", "● LIVE")
+                    self.update_status(
+                        "Status: mmWave radar ready; valid I/Q stream confirmed",
+                        "● LIVE",
+                    )
                     if self.awaiting_radar_ready and self.pulse_sequence_active:
                         self.awaiting_radar_ready = False
                         token = self.tracking_start_token

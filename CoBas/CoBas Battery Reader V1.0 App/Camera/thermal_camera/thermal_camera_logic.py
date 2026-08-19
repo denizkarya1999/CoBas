@@ -290,8 +290,8 @@ class ThermalRenderer:
 
         self.min_celsius = min_celsius
         self.max_celsius = max_celsius
-        # Keep the absolute baseline used for the most recently generated
-        # color map. Mapped pixels themselves are relative to this value.
+        # Keep the coldest absolute measurement from the most recently
+        # generated color map for diagnostics and legend consumers.
         self.last_frame_min_celsius = None
         # Coordinate maps depend only on output dimensions, so cache them across
         # frames and avoid repeating bilinear setup at recording frame rate.
@@ -384,8 +384,8 @@ class ThermalRenderer:
         color_cache[temperature] = color
         return color
 
-    def _relative_frame_celsius(self, frame):
-        """Convert a frame to Celsius values relative to its coldest pixel."""
+    def _validated_frame_celsius(self, frame):
+        """Convert and validate one complete frame in absolute Celsius."""
         temperatures = frame_to_celsius(frame)
         if not temperatures:
             raise ValueError("thermal frame must contain at least one pixel")
@@ -393,15 +393,12 @@ class ThermalRenderer:
             raise ValueError("thermal frame contains a non-finite temperature")
 
         self.last_frame_min_celsius = min(temperatures)
-        return [
-            temperature - self.last_frame_min_celsius
-            for temperature in temperatures
-        ]
+        return temperatures
 
     def frame_colors(self, frame):
-        # Convert raw values to Celsius, subtract this frame's coldest Celsius
-        # pixel, then assign colors from the resulting relative temperatures.
-        temperatures = self._relative_frame_celsius(frame)
+        # Assign colors from absolute Celsius values so image pixels and the
+        # fixed Celsius legend describe the same physical temperature scale.
+        temperatures = self._validated_frame_celsius(frame)
         min_value = min(temperatures)
         max_value = max(temperatures)
         color_cache = {}
@@ -419,11 +416,11 @@ class ThermalRenderer:
         return colors
 
     def render_rgb(self, frame, width, height):
-        # Build the 32x24 thermal vision first: raw value -> Celsius -> subtract
-        # the frame minimum -> RGB. The completed pixels are then enlarged.
+        # Build the 32x24 thermal image from absolute Celsius values, then
+        # enlarge the completed RGB pixels for video output.
         width = max(1, int(width))
         height = max(1, int(height))
-        temperatures = self._relative_frame_celsius(frame)
+        temperatures = self._validated_frame_celsius(frame)
         if len(temperatures) != SENSOR_PIXELS:
             raise ValueError(
                 f"thermal frame must contain exactly {SENSOR_PIXELS} pixels; "

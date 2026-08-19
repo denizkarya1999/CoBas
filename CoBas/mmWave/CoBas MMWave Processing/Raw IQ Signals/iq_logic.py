@@ -359,6 +359,12 @@ class RadarUARTSource:
             raise RuntimeError("Radar USB1 data port is not open")
         return self._data.read(min(size, self._data.in_waiting or 1))
 
+    def reset_data_input_buffer(self) -> None:
+        """Discard queued USB1 bytes without exposing the serial object."""
+        if self._data is None or not self._data.is_open:
+            raise RuntimeError("Radar USB1 data port is not open")
+        self._data.reset_input_buffer()
+
     def close(self, stop_sensor: bool) -> None:
         """Stop RF operation when possible, then release both serial ports."""
         if stop_sensor and self._cli is not None and self._cli.is_open:

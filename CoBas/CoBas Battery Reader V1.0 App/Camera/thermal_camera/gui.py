@@ -532,6 +532,11 @@ class ThermalCamera:
         self.stop_event.clear()
         self.events = queue.Queue()
         self.error = None
+        # Never let a new recording use a frame left over from an earlier
+        # camera session. Readiness is established only by the new worker.
+        with self.frame_lock:
+            self.latest_frame = None
+            self.latest_frame_time = None
         self.status = "Starting thermal camera"
         self.worker = CameraWorker(self.events, self.stop_event, mock=self.mock)
         self.worker.start()
@@ -553,6 +558,9 @@ class ThermalCamera:
 
         self.is_tracking = False
         self.status = "Thermal idle"
+        with self.frame_lock:
+            self.latest_frame = None
+            self.latest_frame_time = None
 
     def poll_events(self):
         events = []
@@ -825,55 +833,58 @@ class ThermalCamera:
     def _record_loop(self):
         next_frame_time = time.monotonic()
         frame_interval = 1.0 / max(1, self.record_fps)
+        try:
+            while (
+                self.is_recording
+                and self.recorder is not None
+                and self.scale_recorder is not None
+            ):
+                frame = self._copy_latest_frame()
 
-        while (
-            self.is_recording
-            and self.recorder is not None
-            and self.scale_recorder is not None
-        ):
-            frame = self._copy_latest_frame()
-
-            if frame is not None:
-                renderer = self.record_renderer or self.renderer
-                image = renderer.render_image(
-                    frame,
-                    self.record_width,
-                    self.record_height
-                )
-                self.recorder.write_frame(image.tobytes())
-                if self.recorder.error is not None:
-                    print(
-                        "[WARNING] Thermal recorder rejected a frame: "
-                        f"{self.recorder.error}"
+                if frame is not None:
+                    renderer = self.record_renderer or self.renderer
+                    image = renderer.render_image(
+                        frame,
+                        self.record_width,
+                        self.record_height,
                     )
-                    break
+                    self.recorder.write_frame(image.tobytes())
+                    if self.recorder.error is not None:
+                        raise RuntimeError(
+                            "Thermal video recorder rejected a frame: "
+                            f"{self.recorder.error}"
+                        )
 
-                scale_image = renderer.render_scale_image(
-                    frame,
-                    self.scale_record_width,
-                    self.scale_record_height
-                )
-                self.scale_recorder.write_frame(scale_image.tobytes())
-                if self.scale_recorder.error is not None:
-                    print(
-                        "[WARNING] Thermal scale recorder rejected a frame: "
-                        f"{self.scale_recorder.error}"
+                    scale_image = renderer.render_scale_image(
+                        frame,
+                        self.scale_record_width,
+                        self.scale_record_height,
                     )
-                    break
+                    self.scale_recorder.write_frame(scale_image.tobytes())
+                    if self.scale_recorder.error is not None:
+                        raise RuntimeError(
+                            "Thermal scale recorder rejected a frame: "
+                            f"{self.scale_recorder.error}"
+                        )
 
-                try:
-                    self._log_frame_temperatures(frame)
-                except Exception as exc:
-                    self.temperature_logging_error = exc
-                    print(
-                        "[WARNING] Thermal temperature logging failed: "
-                        f"{exc}"
-                    )
-                    break
+                    try:
+                        self._log_frame_temperatures(frame)
+                    except Exception as exc:
+                        self.temperature_logging_error = exc
+                        raise RuntimeError(
+                            f"Thermal temperature logging failed: {exc}"
+                        ) from exc
 
-            next_frame_time += frame_interval
-            sleep_seconds = max(0.0, next_frame_time - time.monotonic())
-            time.sleep(sleep_seconds)
+                next_frame_time += frame_interval
+                sleep_seconds = max(0.0, next_frame_time - time.monotonic())
+                time.sleep(sleep_seconds)
+        except Exception as exc:
+            # Surface worker-thread failures to the main application. CoBas can
+            # then stop all synchronized sensors instead of recording a frozen
+            # thermal frame for the remainder of the battery session.
+            message = f"Thermal recording failed: {exc}"
+            self.error = message
+            self.events.put(("error", message))
 
     def stop_recording(self, audio_path=None):
         if (
