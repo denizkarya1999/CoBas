@@ -120,6 +120,7 @@ class CoBasV1App:
         self.current_position_number = 1
         self.current_pulse_number = 0
         self.pulse_recordings = []
+        self.voice_recording_count = 0
         self.position_segments = []
         self.pulse_sequence_started_at = None
         self.thermal_segment_started_at = None
@@ -678,6 +679,7 @@ class CoBasV1App:
         self.current_position_number = 1
         self.current_pulse_number = 0
         self.pulse_recordings = []
+        self.voice_recording_count = 0
         self.position_segments = []
         self.pulse_sequence_started_at = None
         self.thermal_segment_started_at = None
@@ -1169,8 +1171,9 @@ class CoBasV1App:
 
             thermal_video = os.path.join(self.captures_dir, "Thermal_Video.mp4")
             self.concatenate_thermal_videos(self.position_segments, thermal_video)
-            voice_path = os.path.join(self.captures_dir, "Voice_Recording.wav")
-            self.build_battery_voice_recording(voice_path)
+            self.voice_recording_count = len(
+                self.validate_chirp_voice_recordings()
+            )
             self.combine_thermal_text_outputs(
                 "temperature_log_path",
                 os.path.join(self.captures_dir, "Thermal_Temperature_Log.txt"),
@@ -1275,41 +1278,59 @@ class CoBasV1App:
         for input_path in inputs:
             os.remove(input_path)
 
-    def build_battery_voice_recording(self, output_path):
-        recordings = [
-            item
-            for item in sorted(
-                self.pulse_recordings,
-                key=lambda value: value["pulse_number"],
-            )
-            if os.path.exists(item["path"])
-        ]
+    def validate_chirp_voice_recordings(self):
+        """Require one complete, unique WAV file for every finished chirp."""
+        recordings = sorted(
+            self.pulse_recordings,
+            key=lambda value: value["pulse_number"],
+        )
         if not recordings:
             raise RuntimeError("No completed voice recordings were available")
 
-        temporary_path = f"{output_path}.tmp.wav"
+        pulse_numbers = [item["pulse_number"] for item in recordings]
+        expected_numbers = list(range(1, len(recordings) + 1))
+        if pulse_numbers != expected_numbers:
+            raise RuntimeError(
+                "Voice recordings are not a complete chirp-by-chirp sequence: "
+                f"expected chirps 1-{len(recordings)}, received {pulse_numbers}"
+            )
+
+        recording_paths = [
+            os.path.abspath(item["path"])
+            for item in recordings
+        ]
+        if len(set(recording_paths)) != len(recording_paths):
+            raise RuntimeError(
+                "Each chirp must have its own unique voice recording file"
+            )
+
         expected_format = None
-        with wave.open(temporary_path, "wb") as output_wav:
-            for recording in recordings:
-                with wave.open(recording["path"], "rb") as input_wav:
-                    current_format = (
-                        input_wav.getnchannels(),
-                        input_wav.getsampwidth(),
-                        input_wav.getframerate(),
-                    )
-                    if expected_format is None:
-                        expected_format = current_format
-                        output_wav.setnchannels(current_format[0])
-                        output_wav.setsampwidth(current_format[1])
-                        output_wav.setframerate(current_format[2])
-                    elif current_format != expected_format:
-                        raise RuntimeError(
-                            f"Incompatible chirp recording: {recording['path']}"
-                        )
-                    output_wav.writeframes(input_wav.readframes(input_wav.getnframes()))
-        os.replace(temporary_path, output_path)
         for recording in recordings:
-            os.remove(recording["path"])
+            recording_path = os.path.abspath(recording["path"])
+            if not os.path.isfile(recording_path):
+                raise RuntimeError(
+                    f"Voice recording is missing for chirp "
+                    f"{recording['pulse_number']}: {recording_path}"
+                )
+            with wave.open(recording_path, "rb") as input_wav:
+                current_format = (
+                    input_wav.getnchannels(),
+                    input_wav.getsampwidth(),
+                    input_wav.getframerate(),
+                )
+                if input_wav.getnframes() <= 0:
+                    raise RuntimeError(
+                        f"Voice recording is empty for chirp "
+                        f"{recording['pulse_number']}: {recording_path}"
+                    )
+                if expected_format is None:
+                    expected_format = current_format
+                elif current_format != expected_format:
+                    raise RuntimeError(
+                        f"Incompatible chirp recording: {recording_path}"
+                    )
+
+        return recording_paths
 
     def combine_thermal_text_outputs(self, key, output_path):
         sources = [
@@ -1348,8 +1369,7 @@ class CoBasV1App:
 
     def clean_position_temporary_outputs(self):
         final_video = os.path.join(self.captures_dir, "Thermal_Video.mp4")
-        final_voice = os.path.join(self.captures_dir, "Voice_Recording.wav")
-        protected = {os.path.abspath(final_video), os.path.abspath(final_voice)}
+        protected = {os.path.abspath(final_video)}
         for segment in self.position_segments:
             for key in (
                 "thermal_video_path",
@@ -1383,7 +1403,8 @@ class CoBasV1App:
         messagebox.showinfo(
             "Battery Capture Saved",
             "Generated one battery-level Thermal_Video.mp4 and "
-            "Voice_Recording.wav, position-aware thermal frames, and mmWave "
+            f"{self.voice_recording_count} chirp-by-chirp voice WAV files, "
+            "position-aware thermal frames, and mmWave "
             f"logs, frames, and reference data.\n\nSaved in: {self.captures_dir}",
             parent=self.root,
         )

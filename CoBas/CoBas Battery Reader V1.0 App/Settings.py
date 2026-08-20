@@ -54,7 +54,8 @@ class SettingsWindow:
             settings_frame,
             text=(
                 "The IWR6843AOP radar uses /dev/ttyUSB0 and /dev/ttyUSB1. "
-                "Select the microphone used to record each chirp sequence."
+                "Select the microphone used to save every chirp as its own "
+                "voice WAV recording."
             ),
             style="PanelText.TLabel",
             wraplength=420,
