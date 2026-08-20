@@ -26,9 +26,8 @@ APP_TITLE = "CoBas Battery Reader V1.0"
 APP_WM_CLASS = "cobas_battery_reader_v1"
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 PULSE_DURATION_SECONDS = 2.0
-DATASET_FRAME_INTERVAL_SECONDS = 0.5
-DATASET_FRAMES_PER_SECOND = 1.0 / DATASET_FRAME_INTERVAL_SECONDS
-DATASET_FRAMES_PER_PULSE = int(PULSE_DURATION_SECONDS / DATASET_FRAME_INTERVAL_SECONDS)
+DATASET_FRAMES_PER_PULSE = 1
+SENSOR_FRAME_CAPTURE_TIMEOUT_SECONDS = 3.0
 
 
 def parse_battery_percentage(value):
@@ -97,11 +96,38 @@ class CoBasV1App:
             self.base_dir,
             self.battery_percentage,
         )
+        self.mmwave_frames_dir = os.path.join(
+            self.captures_dir,
+            "mmWave Frames",
+        )
+        self.thermal_frames_dir = os.path.join(
+            self.captures_dir,
+            "Thermal Frames",
+        )
+        self.voices_dir = os.path.join(self.captures_dir, "Voices")
+        self.references_dir = os.path.join(self.captures_dir, "References")
+        self.mmwave_references_dir = os.path.join(
+            self.references_dir,
+            "mmWave References",
+        )
+        self.thermal_references_dir = os.path.join(
+            self.references_dir,
+            "Thermal Data References",
+        )
         os.makedirs(self.captures_dir, exist_ok=True)
+        for output_directory in (
+            self.mmwave_frames_dir,
+            self.thermal_frames_dir,
+            self.voices_dir,
+            self.mmwave_references_dir,
+            self.thermal_references_dir,
+        ):
+            os.makedirs(output_directory, exist_ok=True)
 
         self.audio = AudioInputConfiguration()
-        self.thermal_camera = ThermalCamera(output_dir=self.captures_dir)
-        self.mmwave_frame_rate = DATASET_FRAMES_PER_SECOND
+        self.thermal_camera = ThermalCamera(
+            output_dir=self.thermal_references_dir,
+        )
         self.mmwave_capture = self.new_mmwave_capture()
 
         self.is_closing = False
@@ -122,6 +148,8 @@ class CoBasV1App:
         self.pulse_recordings = []
         self.voice_recording_count = 0
         self.position_segments = []
+        self.thermal_frame_records = []
+        self.thermal_frames_staging_directory = None
         self.pulse_sequence_started_at = None
         self.thermal_segment_started_at = None
         self.current_recording_timestamp = None
@@ -155,7 +183,9 @@ class CoBasV1App:
     def new_mmwave_capture(self):
         return MMWaveCaptureService(
             self.battery_percentage,
-            Path(self.captures_dir) / "mmWave Data",
+            self.mmwave_references_dir,
+            frames_directory=self.mmwave_frames_dir,
+            references_directory=self.mmwave_references_dir,
         )
 
     def request_battery_percentage(self):
@@ -490,8 +520,8 @@ class CoBasV1App:
         self.output_info_label.config(text=f"Output: {self.captures_dir}/")
         self.rate_info_label.config(
             text=(
-                f"mmWave export: {self.mmwave_frame_rate:g} FPS\n"
-                f"Thermal: {self.thermal_camera.record_fps:g} FPS"
+                "Dataset export: 1 mmWave + 1 thermal frame/chirp\n"
+                f"Thermal video: {self.thermal_camera.record_fps:g} FPS"
             )
         )
 
@@ -681,6 +711,14 @@ class CoBasV1App:
         self.pulse_recordings = []
         self.voice_recording_count = 0
         self.position_segments = []
+        self.thermal_frame_records = []
+        capture_identifier = datetime.now().astimezone().strftime(
+            "%Y%m%d_%H%M%S_%f"
+        )
+        self.thermal_frames_staging_directory = (
+            Path(self.captures_dir)
+            / f".Thermal_Frames_{capture_identifier}"
+        )
         self.pulse_sequence_started_at = None
         self.thermal_segment_started_at = None
         self.export_started = False
@@ -735,7 +773,7 @@ class CoBasV1App:
             or datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
         )
         return os.path.join(
-            self.captures_dir,
+            self.voices_dir,
             f"CoBas_V1_PulseVoice_{timestamp}_"
             f"Position_{self.current_position_number}_{{pulse:03d}}.wav",
         )
@@ -860,10 +898,14 @@ class CoBasV1App:
                     )
                     self.root.after(
                         0,
-                        lambda global_pulse=global_pulse: self.handle_pulse_completed(
-                            start_token,
-                            position_number,
-                            global_pulse,
+                        lambda global_pulse=global_pulse,
+                        position_pulse=position_pulse: (
+                            self.handle_pulse_completed(
+                                start_token,
+                                position_number,
+                                position_pulse,
+                                global_pulse,
+                            )
                         ),
                     )
 
@@ -939,15 +981,58 @@ class CoBasV1App:
         self,
         start_token,
         position_number,
+        position_pulse_number,
         global_pulse_number,
     ):
         if start_token != self.tracking_start_token:
+            return
+        try:
+            self.capture_chirp_sensor_frames(
+                position_number,
+                position_pulse_number,
+                global_pulse_number,
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            self.abort_capture(
+                f"Sensor frames could not be saved for chirp "
+                f"{global_pulse_number}: {error}"
+            )
             return
         self.record_timer_label.config(
             text=(
                 f"Position {position_number}/{self.requested_position_count} • "
                 f"Chirps {global_pulse_number}/{self.requested_pulse_count}"
             )
+        )
+
+    def capture_chirp_sensor_frames(
+        self,
+        position_number,
+        position_pulse_number,
+        global_pulse_number,
+    ):
+        """Save one thermal image and request one mmWave image per chirp."""
+        if self.thermal_frames_staging_directory is None:
+            raise RuntimeError("Thermal chirp-frame output was not initialized")
+
+        thermal_path = self.thermal_frames_staging_directory / (
+            f"Thermal_Image_{self.battery_percentage}_Percent_"
+            f"Position_{position_number}_{position_pulse_number:03d}.png"
+        )
+        saved_path = self.thermal_camera.save_latest_frame(thermal_path)
+        try:
+            self.mmwave_capture.request_chirp_frame(global_pulse_number)
+        except (RuntimeError, ValueError):
+            Path(saved_path).unlink(missing_ok=True)
+            raise
+
+        self.thermal_frame_records.append(
+            {
+                "path": saved_path,
+                "pulse_number": global_pulse_number,
+                "position": position_number,
+                "position_pulse_number": position_pulse_number,
+            }
         )
 
     def finalize_position_segment(self, position_number):
@@ -962,18 +1047,48 @@ class CoBasV1App:
         if existing is not None:
             return existing
 
-        self.mmwave_capture.pause()
         position_recordings = [
             item
             for item in self.pulse_recordings
             if item.get("position") == position_number
         ]
+        thermal_frame_records = sorted(
+            (
+                item
+                for item in self.thermal_frame_records
+                if item.get("position") == position_number
+            ),
+            key=lambda item: item["pulse_number"],
+        )
+        expected_pulse_numbers = [
+            item["pulse_number"]
+            for item in sorted(
+                position_recordings,
+                key=lambda item: item["pulse_number"],
+            )
+        ]
+        thermal_pulse_numbers = [
+            item["pulse_number"] for item in thermal_frame_records
+        ]
+        mmwave_frames_complete = not expected_pulse_numbers
+        if expected_pulse_numbers:
+            mmwave_frames_complete = self.mmwave_capture.wait_for_frame_count(
+                expected_pulse_numbers[-1],
+                timeout=SENSOR_FRAME_CAPTURE_TIMEOUT_SECONDS,
+            )
+
+        self.mmwave_capture.pause()
         target_duration = len(position_recordings) * PULSE_DURATION_SECONDS
         thermal_path = None
         if self.thermal_camera.is_recording:
             thermal_path = self.thermal_camera.stop_recording()
 
-        if not position_recordings or not thermal_path:
+        if (
+            not position_recordings
+            or not thermal_path
+            or not mmwave_frames_complete
+            or thermal_pulse_numbers != expected_pulse_numbers
+        ):
             self.remove_thermal_temporary_outputs()
             return None
 
@@ -994,6 +1109,7 @@ class CoBasV1App:
             "expected_image_count": (
                 len(position_recordings) * DATASET_FRAMES_PER_PULSE
             ),
+            "thermal_frame_records": thermal_frame_records,
             "thermal_video_path": thermal_path,
             "scale_video_path": self.thermal_camera.scale_video_path,
             "temperature_log_path": self.thermal_camera.temperature_log_path,
@@ -1080,6 +1196,8 @@ class CoBasV1App:
                 target=self.export_battery_capture,
                 daemon=True,
             ).start()
+        elif not self.position_segments:
+            self.remove_thermal_frame_staging_directory()
 
     def stop_tracking(self):
         self.tracking_start_token += 1
@@ -1158,30 +1276,32 @@ class CoBasV1App:
     def export_battery_capture(self):
         try:
             self.mmwave_capture.stop(wait=True, timeout=20.0)
-            thermal_frames = os.path.join(self.captures_dir, "Thermal_Frames")
-            if os.path.isdir(thermal_frames):
-                shutil.rmtree(thermal_frames)
-            os.makedirs(thermal_frames, exist_ok=True)
-
-            for segment in sorted(
-                self.position_segments,
-                key=lambda item: item["position"],
-            ):
-                self.extract_thermal_frames(segment, thermal_frames)
-
-            thermal_video = os.path.join(self.captures_dir, "Thermal_Video.mp4")
-            self.concatenate_thermal_videos(self.position_segments, thermal_video)
             self.voice_recording_count = len(
                 self.validate_chirp_voice_recordings()
             )
+            if self.mmwave_capture.frame_count != self.voice_recording_count:
+                raise RuntimeError(
+                    f"Expected {self.voice_recording_count} mmWave frames, "
+                    f"but saved {self.mmwave_capture.frame_count}"
+                )
+            self.finalize_thermal_frames(self.voice_recording_count)
+
+            thermal_video = os.path.join(
+                self.thermal_references_dir,
+                "Thermal_Video.mp4",
+            )
+            self.concatenate_thermal_videos(self.position_segments, thermal_video)
             self.combine_thermal_text_outputs(
                 "temperature_log_path",
-                os.path.join(self.captures_dir, "Thermal_Temperature_Log.txt"),
+                os.path.join(
+                    self.thermal_references_dir,
+                    "Thermal_Temperature_Log.txt",
+                ),
             )
             self.combine_thermal_text_outputs(
                 "temperature_average_path",
                 os.path.join(
-                    self.captures_dir,
+                    self.thermal_references_dir,
                     "Thermal_Temperature_Averages.txt",
                 ),
             )
@@ -1203,39 +1323,51 @@ class CoBasV1App:
                     ),
                 )
 
-    def extract_thermal_frames(self, segment, output_directory):
-        input_path = segment["thermal_video_path"]
-        position = segment["position"]
-        expected = segment["expected_image_count"]
-        prefix = f"Thermal_Image_{self.battery_percentage}_Percent_Position_{position}_"
-        command = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            input_path,
-            "-vf",
-            f"fps={DATASET_FRAMES_PER_SECOND:g}",
-            "-frames:v",
-            str(expected),
-            "-start_number",
-            "1",
-            os.path.join(output_directory, f"{prefix}%03d.png"),
-        ]
-        subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+    def finalize_thermal_frames(self, expected_count):
+        """Publish the chirp-aligned thermal images after validating the set."""
+        records = sorted(
+            self.thermal_frame_records,
+            key=lambda item: item["pulse_number"],
         )
-        extracted = sum(
-            name.startswith(prefix) and name.endswith(".png")
-            for name in os.listdir(output_directory)
-        )
-        if extracted != expected:
+        pulse_numbers = [item["pulse_number"] for item in records]
+        if pulse_numbers != list(range(1, expected_count + 1)):
             raise RuntimeError(
-                f"Expected {expected} thermal frames for Position {position}, "
-                f"but extracted {extracted}"
+                "Thermal frames are not a complete chirp-by-chirp sequence: "
+                f"expected chirps 1-{expected_count}, received {pulse_numbers}"
             )
+
+        staging_directory = self.thermal_frames_staging_directory
+        if staging_directory is None or not staging_directory.is_dir():
+            raise RuntimeError("Thermal chirp-frame staging directory is missing")
+
+        recorded_paths = [Path(item["path"]) for item in records]
+        if len(set(recorded_paths)) != expected_count:
+            raise RuntimeError("Each chirp must have one unique thermal frame")
+        if any(not path.is_file() for path in recorded_paths):
+            raise RuntimeError("One or more thermal chirp frames are missing")
+
+        staged_paths = sorted(staging_directory.glob("*.png"))
+        if len(staged_paths) != expected_count or set(staged_paths) != set(
+            recorded_paths
+        ):
+            raise RuntimeError(
+                f"Expected {expected_count} thermal frames, "
+                f"but found {len(staged_paths)}"
+            )
+
+        output_directory = Path(self.thermal_frames_dir)
+        if output_directory.is_dir():
+            shutil.rmtree(output_directory)
+        elif output_directory.exists():
+            raise RuntimeError(
+                f"Thermal frame output is not a directory: {output_directory}"
+            )
+        staging_directory.replace(output_directory)
+
+    def remove_thermal_frame_staging_directory(self):
+        staging_directory = self.thermal_frames_staging_directory
+        if staging_directory is not None and staging_directory.is_dir():
+            shutil.rmtree(staging_directory)
 
     @staticmethod
     def concatenate_thermal_videos(segments, output_path):
@@ -1368,7 +1500,10 @@ class CoBasV1App:
                 os.remove(path)
 
     def clean_position_temporary_outputs(self):
-        final_video = os.path.join(self.captures_dir, "Thermal_Video.mp4")
+        final_video = os.path.join(
+            self.thermal_references_dir,
+            "Thermal_Video.mp4",
+        )
         protected = {os.path.abspath(final_video)}
         for segment in self.position_segments:
             for key in (
@@ -1400,14 +1535,31 @@ class CoBasV1App:
             f"Status: Battery outputs saved in {self.captures_dir}",
             "● IDLE",
         )
-        messagebox.showinfo(
-            "Battery Capture Saved",
-            "Generated one battery-level Thermal_Video.mp4 and "
-            f"{self.voice_recording_count} chirp-by-chirp voice WAV files, "
-            "position-aware thermal frames, and mmWave "
-            f"logs, frames, and reference data.\n\nSaved in: {self.captures_dir}",
+        self.prompt_for_another_dataset()
+
+    def prompt_for_another_dataset(self):
+        """Relaunch for another battery or close after a completed export."""
+        collect_another = messagebox.askyesno(
+            "Battery Dataset Complete",
+            "Would you like to collect another battery dataset?\n\n"
+            f"The completed dataset was saved in:\n{self.captures_dir}",
             parent=self.root,
         )
+        if collect_another:
+            self.restart_application()
+        else:
+            self.on_close()
+
+    def restart_application(self):
+        """Close all current resources and replace this process with a fresh app."""
+        script_path = os.path.abspath(__file__)
+        command_arguments = [
+            sys.executable,
+            script_path,
+            *sys.argv[1:],
+        ]
+        self.on_close()
+        os.execv(sys.executable, command_arguments)
 
     def on_close(self):
         self.is_closing = True

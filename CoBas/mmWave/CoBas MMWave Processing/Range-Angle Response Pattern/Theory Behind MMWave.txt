@@ -74,9 +74,9 @@ Therefore:
 
     range_meters = range_bin * 0.0669 (approximately)
 
-This application retains only range-bin centers between 0.20 and 0.50 meter.
-With the fixed profile, those are bins 3 through 7, approximately 0.201 to
-0.468 meter. The live display uses requested axis limits of 0.20 to 0.50 meter.
+This application retains only range-bin centers between 0.05 and 0.50 meter.
+With the fixed profile, those are bins 1 through 7, approximately 0.067 to
+0.468 meter. The live display uses requested axis limits of 0.05 to 0.50 meter.
 
 
 4. How angle is estimated
@@ -138,8 +138,8 @@ The Range-Angle Responses file contains one row per frame and selected range
 value. Its first two columns are frame_number and range_meters. The remaining
 columns are the relative dB values for every displayed angle from -60.0 to
 +60.0 degrees. Consequently, selecting all rows for one frame reconstructs the
-exact 5-by-121 matrix supplied to the live figure before graphical
-interpolation. The Raw IQ file likewise retains only range bins 3 through 7.
+exact 7-by-121 matrix supplied to the live figure before graphical
+interpolation. The Raw IQ file likewise retains only range bins 1 through 7.
 
 The application also asks for a spectrogram recording duration. During that
 period, the same relative-dB matrix is converted to Viridis-colored pixels and
@@ -167,7 +167,7 @@ remaining images in Frames/ stay free of labels and graphical annotations.
 
 The one-time transform_existing_frames.py script crops legacy clean frames
 from their original 0-4.216 m and -90 to +90 degree view, enlarges the selected
-0.20-0.50 m and -60 to +60 degree window back to the standard image size, and
+0.05-0.50 m and -60 to +60 degree window back to the standard image size, and
 rebuilds the labeled references. Per-folder marker files prevent double crops.
 
 

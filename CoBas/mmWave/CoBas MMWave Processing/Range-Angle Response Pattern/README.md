@@ -94,12 +94,12 @@ Logs/Range-Angle Responses/20_Percent_Battery.csv
 ```
 
 The Raw IQ CSV stores only `frame_number`, `range_bin`, `virtual_antenna`, `i`,
-and `q` for range bins 3 through 7. These are the bins whose centers fall in
-the requested 0.20-0.50 m window.
+and `q` for range bins 1 through 7. These are the bins whose centers fall in
+the requested 0.05-0.50 m window.
 
 The Range-Angle Responses CSV stores `frame_number`, `range_meters`, and one
 relative-power dB column for each displayed angle from -60° to +60°. The rows
-for a frame are the exact 5-by-121 data matrix given to the live figure before
+for a frame are the exact 7-by-121 data matrix given to the live figure before
 Matplotlib performs visual interpolation.
 
 ## Spectrogram video frames
@@ -159,9 +159,9 @@ For every USB1 frame, the app:
 6. converts power to a relative decibel scale from -50 dB to 0 dB.
 
 The range spacing is derived from the embedded 2 MSPS, 70 MHz/us, 64-bin
-profile and is approximately 0.0669 meters per bin. Only bins 3 through 7 are
-processed and logged; their centers are approximately 0.201-0.468 m. The plot
-is displayed with requested limits of 0.20-0.50 m and -60° to +60°, and both
+profile and is approximately 0.0669 meters per bin. Only bins 1 through 7 are
+processed and logged; their centers are approximately 0.067-0.468 m. The plot
+is displayed with requested limits of 0.05-0.50 m and -60° to +60°, and both
 limits are shown in the status bar and on the axes.
 
 The plotted data is the zero-Doppler range-angle response, so it emphasizes

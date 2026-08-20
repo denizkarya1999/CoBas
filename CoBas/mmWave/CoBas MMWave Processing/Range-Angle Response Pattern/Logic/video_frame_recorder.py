@@ -244,7 +244,7 @@ class TemporarySpectrogramVideoRecorder:
         """Mark new frames as already using the configured physical window."""
         marker = self.frames_directory / FRAME_WINDOW_MARKER_FILENAME
         marker.write_text(
-            "Frames use range 0.20-0.50 m and angle -60 to +60 degrees.\n",
+            "Frames use range 0.05-0.50 m and angle -60 to +60 degrees.\n",
             encoding="utf-8",
         )
 

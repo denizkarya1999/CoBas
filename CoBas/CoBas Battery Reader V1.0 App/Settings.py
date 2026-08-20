@@ -97,8 +97,11 @@ class SettingsWindow:
                 f"Thermal sensor: {self.app.thermal_camera.status}\n"
                 f"Microphone: {self.app.audio.microphone_device_name}\n"
                 f"Thermal FPS: {self.app.thermal_camera.record_fps:g}\n"
-                f"mmWave frame export: {self.app.mmwave_frame_rate:g} FPS\n"
-                f"Output folder: {self.app.captures_dir}"
+                "Dataset frames: 1 mmWave + 1 thermal per chirp\n"
+                f"mmWave frames: {self.app.mmwave_frames_dir}\n"
+                f"Thermal frames: {self.app.thermal_frames_dir}\n"
+                f"Voices: {self.app.voices_dir}\n"
+                f"References: {self.app.references_dir}"
             ),
             style="PanelText.TLabel",
             wraplength=420,

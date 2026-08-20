@@ -64,7 +64,7 @@ def transform_saved_battery_frames(
         _transform_frame_in_place(cv2, frame_path)
 
     marker.write_text(
-        "Legacy frames cropped to range 0.20-0.50 m and angle "
+        "Legacy frames cropped to range 0.05-0.50 m and angle "
         "-60 to +60 degrees.\n",
         encoding="utf-8",
     )

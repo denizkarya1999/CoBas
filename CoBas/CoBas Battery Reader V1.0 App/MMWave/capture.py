@@ -11,6 +11,7 @@ import queue
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, Literal
@@ -43,7 +44,6 @@ from Logic.config import (  # noqa: E402
     MAXIMUM_RANGE_METERS,
     MINIMUM_ANGLE_DEGREES,
     MINIMUM_RANGE_METERS,
-    SPECTROGRAM_FRAME_RATE,
 )
 from Logic.range_angle_processor import (  # noqa: E402
     RangeAngleFrame,
@@ -89,7 +89,6 @@ class _CleanFrameWriter:
     def __init__(self, frames_directory: Path) -> None:
         self.frames_directory = frames_directory
         self.frame_count = 0
-        self._next_frame_at: float | None = None
         self._cv2 = None
 
     def validate_preconditions(self) -> None:
@@ -109,36 +108,40 @@ class _CleanFrameWriter:
             )
         self.frames_directory.mkdir(parents=True, exist_ok=True)
 
-    def resume(self) -> None:
-        """Make the first response after a position change immediately due."""
-        self._next_frame_at = None
-
-    def write_if_due(self, frame: RangeAngleFrame) -> bool:
+    def write_chirp_frame(
+        self,
+        frame: RangeAngleFrame,
+        chirp_number: int,
+    ) -> Path:
+        """Save exactly one sequential dataset image for a completed chirp."""
         if self._cv2 is None:
             raise RuntimeError("mmWave frame writer was not initialized")
 
-        now = time.monotonic()
-        if self._next_frame_at is not None and now < self._next_frame_at:
-            return False
+        chirp_number = int(chirp_number)
+        expected_number = self.frame_count + 1
+        if chirp_number != expected_number:
+            raise RuntimeError(
+                "mmWave chirp frames must be saved in sequence: "
+                f"expected {expected_number}, received {chirp_number}"
+            )
 
         image = TemporarySpectrogramVideoRecorder._render_clean_spectrogram(
             self._cv2,
             frame,
         )
-        self.frame_count += 1
-        output_path = self.frames_directory / f"frame_{self.frame_count:06d}.jpg"
+        output_path = self.frames_directory / f"frame_{chirp_number:06d}.jpg"
         if not self._cv2.imwrite(str(output_path), image):
             raise RuntimeError(f"Could not save mmWave frame: {output_path}")
 
-        self._next_frame_at = now + (1.0 / SPECTROGRAM_FRAME_RATE)
-        return True
+        self.frame_count = chirp_number
+        return output_path
 
     def finish(self) -> None:
         if not self.frame_count:
             return
         marker = self.frames_directory / FRAME_WINDOW_MARKER_FILENAME
         marker.write_text(
-            "Frames use range 0.20-0.50 m and angle -60 to +60 degrees.\n",
+            "Frames use range 0.05-0.50 m and angle -60 to +60 degrees.\n",
             encoding="utf-8",
         )
 
@@ -315,12 +318,28 @@ class MMWaveCaptureService:
         self,
         battery_level_percent: int,
         output_directory: str | Path,
+        *,
+        logs_directory: str | Path | None = None,
+        frames_directory: str | Path | None = None,
+        references_directory: str | Path | None = None,
     ) -> None:
         self.battery_level_percent = int(battery_level_percent)
         self.output_directory = Path(output_directory)
-        self.logs_directory = self.output_directory / "Logs"
-        self.frames_directory = self.output_directory / "Frames"
-        self.references_directory = self.output_directory / "References"
+        self.logs_directory = (
+            Path(logs_directory)
+            if logs_directory is not None
+            else self.output_directory / "Logs"
+        )
+        self.frames_directory = (
+            Path(frames_directory)
+            if frames_directory is not None
+            else self.output_directory / "Frames"
+        )
+        self.references_directory = (
+            Path(references_directory)
+            if references_directory is not None
+            else self.output_directory / "References"
+        )
         self.events: queue.Queue[MMWaveCaptureEvent] = queue.Queue(maxsize=32)
 
         self._processor = RangeAngleProcessor()
@@ -331,6 +350,9 @@ class MMWaveCaptureService:
         self._ready_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._position_number: int | None = None
+        self._frame_condition = threading.Condition()
+        self._pending_chirp_frames: deque[int] = deque()
+        self._last_requested_chirp = 0
 
     @property
     def is_running(self) -> bool:
@@ -344,6 +366,11 @@ class MMWaveCaptureService:
     def position_number(self) -> int | None:
         return self._position_number
 
+    @property
+    def frame_count(self) -> int:
+        with self._frame_condition:
+            return self._frame_writer.frame_count
+
     def start(self) -> None:
         if self.is_running:
             return
@@ -353,6 +380,9 @@ class MMWaveCaptureService:
         self._ready_event.clear()
         self._position_number = None
         self._processor.reset()
+        with self._frame_condition:
+            self._pending_chirp_frames.clear()
+            self._last_requested_chirp = 0
         self._thread = threading.Thread(
             target=self._run,
             name="cobas-mmwave-capture",
@@ -366,7 +396,6 @@ class MMWaveCaptureService:
         self._position_number = int(position_number)
         self._discard_requested.set()
         self._processor.reset()
-        self._frame_writer.resume()
         self._capture_enabled.set()
         self._publish(
             MMWaveCaptureEvent(
@@ -375,10 +404,47 @@ class MMWaveCaptureService:
             )
         )
 
+    def request_chirp_frame(self, chirp_number: int) -> None:
+        """Queue one radar dataset image for a completed chirp."""
+        chirp_number = int(chirp_number)
+        if not self.is_ready or not self._capture_enabled.is_set():
+            raise RuntimeError("mmWave capture is not active")
+
+        with self._frame_condition:
+            expected_number = self._last_requested_chirp + 1
+            if chirp_number != expected_number:
+                raise RuntimeError(
+                    "mmWave chirp frame requests must be sequential: "
+                    f"expected {expected_number}, received {chirp_number}"
+                )
+            self._pending_chirp_frames.append(chirp_number)
+            self._last_requested_chirp = chirp_number
+            self._frame_condition.notify_all()
+
+    def wait_for_frame_count(
+        self,
+        expected_count: int,
+        timeout: float = 3.0,
+    ) -> bool:
+        """Wait until all requested chirp images through ``expected_count`` exist."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._frame_condition:
+            while self._frame_writer.frame_count < expected_count:
+                if not self.is_running:
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self._frame_condition.wait(timeout=remaining)
+            return True
+
     def pause(self) -> None:
         self._capture_enabled.clear()
         self._discard_requested.set()
         self._position_number = None
+        with self._frame_condition:
+            self._pending_chirp_frames.clear()
+            self._frame_condition.notify_all()
         if self.is_running:
             self._publish(MMWaveCaptureEvent("status", "mmWave capture paused"))
 
@@ -485,7 +551,17 @@ class MMWaveCaptureService:
                                 break
                             processed = self._processor.process(raw_frame)
                             logger.write_frame(raw_frame, processed)
-                            self._frame_writer.write_if_due(processed)
+                            chirp_number = None
+                            with self._frame_condition:
+                                if self._pending_chirp_frames:
+                                    chirp_number = self._pending_chirp_frames.popleft()
+                            if chirp_number is not None:
+                                self._frame_writer.write_chirp_frame(
+                                    processed,
+                                    chirp_number,
+                                )
+                                with self._frame_condition:
+                                    self._frame_condition.notify_all()
                             self._publish(MMWaveCaptureEvent("frame", processed))
 
                         if (
@@ -517,3 +593,5 @@ class MMWaveCaptureService:
         finally:
             self._capture_enabled.clear()
             self._ready_event.clear()
+            with self._frame_condition:
+                self._frame_condition.notify_all()

@@ -14,8 +14,8 @@ RANGE_BIN_SPACING_M = (
 )
 
 # Only this near-field window is processed, displayed, and logged. With the
-# fixed profile it contains range bins 3 through 7 (approximately 20.1-46.8 cm).
-MINIMUM_RANGE_METERS = 0.20
+# fixed profile it contains range bins 1 through 7 (approximately 6.7-46.8 cm).
+MINIMUM_RANGE_METERS = 0.05
 MAXIMUM_RANGE_METERS = 0.50
 DISPLAY_RANGE_BIN_INDICES = tuple(
     range_bin
@@ -85,4 +85,4 @@ SPECTROGRAM_FRAME_HEIGHT = 256
 SPECTROGRAM_FRAME_RATE = 2.0
 SPECTROGRAM_VIDEO_CODEC = "MJPG"
 SPECTROGRAM_FRAME_QUEUE_SIZE = 64
-FRAME_WINDOW_MARKER_FILENAME = ".window_20cm_50cm_-60deg_60deg"
+FRAME_WINDOW_MARKER_FILENAME = ".window_5cm_50cm_-60deg_60deg"

@@ -616,6 +616,31 @@ class ThermalCamera:
             self.events.put(("error", message))
             return None
 
+    def save_latest_frame(self, output_path):
+        """Save the latest sensor image as one chirp-aligned thermal PNG."""
+        frame = self._copy_latest_frame()
+        if frame is None:
+            raise RuntimeError("No thermal frame is available for this chirp")
+
+        output_path = Path(output_path)
+        if output_path.exists():
+            raise FileExistsError(f"Thermal chirp frame already exists: {output_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        renderer = self.record_renderer or self.renderer
+        image = renderer.render_image(
+            frame,
+            self.record_width,
+            self.record_height,
+        )
+        temporary_path = output_path.with_name(f".{output_path.name}.tmp")
+        try:
+            image.save(temporary_path, format="PNG")
+            temporary_path.replace(output_path)
+        finally:
+            temporary_path.unlink(missing_ok=True)
+        return str(output_path)
+
     def _wait_for_frame(self, timeout_seconds=2.0):
         deadline = time.monotonic() + max(0.0, timeout_seconds)
 

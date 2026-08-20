@@ -16,7 +16,7 @@ SAMPLE_RATE = 48_000
 PULSE_DURATION_SECONDS = 2.0
 START_FREQUENCY = 15_000.0
 END_FREQUENCY = 19_200.0
-AMPLITUDE = 0.85
+AMPLITUDE = 0.90  # Keep 0.9 dB of digital headroom to prevent fuzzy clipping.
 FADE_MILLISECONDS = 5.0
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +25,7 @@ OUTPUT_PATH = os.path.join(INPUT_DIR, "2_second_pulse.wav")
 
 
 def apply_fade(signal, fade_milliseconds=FADE_MILLISECONDS):
-    """Fade both ends of a pulse to prevent playback clicks."""
+    """Apply smooth raised-cosine edges without adding broadband clicks."""
     fade_samples = int(
         round(fade_milliseconds * 1e-3 * SAMPLE_RATE)
     )
@@ -33,26 +33,25 @@ def apply_fade(signal, fade_milliseconds=FADE_MILLISECONDS):
     if fade_samples == 0 or 2 * fade_samples >= signal.size:
         return signal
 
+    fade_phase = np.linspace(
+        0.0,
+        np.pi / 2.0,
+        fade_samples,
+        dtype=np.float64,
+    )
+    fade_curve = np.square(np.sin(fade_phase)).astype(signal.dtype)
     window = np.ones_like(signal)
-    window[:fade_samples] = np.linspace(
-        0.0,
-        1.0,
-        fade_samples,
-        dtype=np.float32,
-    )
-    window[-fade_samples:] = np.linspace(
-        1.0,
-        0.0,
-        fade_samples,
-        dtype=np.float32,
-    )
+    window[:fade_samples] = fade_curve
+    window[-fade_samples:] = fade_curve[::-1]
     return signal * window
 
 
 def build_pulse():
-    """Build one linear chirp lasting exactly two seconds."""
+    """Build a clean, linear chirp lasting exactly two seconds."""
     sample_count = int(round(SAMPLE_RATE * PULSE_DURATION_SECONDS))
-    time_axis = np.arange(sample_count, dtype=np.float32) / SAMPLE_RATE
+    # Calculate phase in float64. At ultrasonic frequencies, float32 phase
+    # quantization adds avoidable jitter and weak spurious frequency content.
+    time_axis = np.arange(sample_count, dtype=np.float64) / SAMPLE_RATE
     sweep_rate = (
         END_FREQUENCY - START_FREQUENCY
     ) / PULSE_DURATION_SECONDS

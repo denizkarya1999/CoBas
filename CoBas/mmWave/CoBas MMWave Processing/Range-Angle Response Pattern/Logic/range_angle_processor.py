@@ -89,7 +89,7 @@ class RangeAngleProcessor:
                     sample.q,
                 )
 
-        # Retain only range bins whose centers fall inside 20-50 centimeters.
+        # Retain only range bins whose centers fall inside 5-50 centimeters.
         azimuth_iq = iq_matrix[self._range_bin_indices][:, channels]
         phase_rotation = self._all_phase_rotations[channels]
         calibrated_iq = azimuth_iq * phase_rotation[np.newaxis, :]
