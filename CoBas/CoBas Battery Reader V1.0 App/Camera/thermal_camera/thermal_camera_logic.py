@@ -7,6 +7,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import tempfile
 import time
 from pathlib import Path
 
@@ -20,6 +21,8 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent
 LIB = ROOT / "mlx90642-library"
+if not LIB.is_dir():
+    LIB = ROOT.parents[2] / "Hardware" / "mlx90642-library"
 # The path is configurable so an installer or developer can choose where the
 # ctypes-compatible shared-library build is written.
 SHARED_LIB = Path(os.environ.get("MLX90642_SHARED_LIB", "/tmp/libmlx90642.so"))
@@ -71,19 +74,22 @@ def build_shared_library(output=SHARED_LIB):
         output,
     ]
 
-    result = subprocess.run(
-        [str(part) for part in command],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        # gcc normally reports useful diagnostics on stderr, but keep stdout as
-        # a fallback for toolchains that route diagnostics differently.
-        details = (result.stderr or result.stdout).strip()
-        raise DriverError(f"driver build failed:\n{details}")
-
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Replacing an inode is safe even while a camera has the previous driver loaded.
+    # Compiling straight over a loaded .so can corrupt its mapped code pages.
+    with tempfile.NamedTemporaryFile(prefix=output.stem + "_", suffix=".so", dir=output.parent, delete=False) as temporary:
+        temporary_path = Path(temporary.name)
+    command[-1] = temporary_path
+    try:
+        result = subprocess.run([str(part) for part in command], cwd=ROOT,
+                                text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout).strip()
+            raise DriverError(f"driver build failed:\n{details}")
+        os.replace(temporary_path, output)
+    finally:
+        temporary_path.unlink(missing_ok=True)
     return output
 
 

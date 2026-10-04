@@ -526,6 +526,8 @@ class ThermalCamera:
 
     def start_camera(self):
         if self.worker is not None and self.worker.is_alive():
+            if self.stop_event.is_set():
+                raise RuntimeError("Thermal camera is still stopping. Try again shortly.")
             self.is_tracking = True
             return True
 
@@ -554,7 +556,10 @@ class ThermalCamera:
 
         if self.worker is not None:
             self.worker.join(timeout=2)
-            self.worker = None
+            # Retain a timed-out worker so another start cannot reuse its stop event
+            # and accidentally run two acquisition threads against the same sensor.
+            if not self.worker.is_alive():
+                self.worker = None
 
         self.is_tracking = False
         self.status = "Thermal idle"

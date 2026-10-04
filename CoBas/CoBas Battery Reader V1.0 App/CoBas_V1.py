@@ -8,11 +8,13 @@ import shutil
 import subprocess
 import sys
 import threading
+import tempfile
 import tkinter as tk
 import wave
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import ttk
+from TouchUI import NumberControl, ask_number, dialogs as messagebox
 
 import sounddevice as sd
 from About import show_about_window
@@ -88,41 +90,18 @@ class CoBasV1App:
         self.root.title(APP_TITLE)
         self.root.iconname(APP_TITLE)
         self.root.withdraw()
+        self.root.geometry("800x480+0+0")
+        self.root.overrideredirect(True)
+        self.touch_mode = True
+        apply_styles(self.root)
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.battery_percentage = self.request_battery_percentage()
         self.battery_output_name = battery_output_folder_name(self.battery_percentage)
-        self.captures_dir = battery_output_directory(
-            self.base_dir,
-            self.battery_percentage,
-        )
-        self.mmwave_frames_dir = os.path.join(
-            self.captures_dir,
-            "mmWave Frames",
-        )
-        self.thermal_frames_dir = os.path.join(
-            self.captures_dir,
-            "Thermal Frames",
-        )
-        self.voices_dir = os.path.join(self.captures_dir, "Voices")
-        self.references_dir = os.path.join(self.captures_dir, "References")
-        self.mmwave_references_dir = os.path.join(
-            self.references_dir,
-            "mmWave References",
-        )
-        self.thermal_references_dir = os.path.join(
-            self.references_dir,
-            "Thermal Data References",
-        )
-        os.makedirs(self.captures_dir, exist_ok=True)
-        for output_directory in (
-            self.mmwave_frames_dir,
-            self.thermal_frames_dir,
-            self.voices_dir,
-            self.mmwave_references_dir,
-            self.thermal_references_dir,
-        ):
-            os.makedirs(output_directory, exist_ok=True)
+        self.prepare_capture_session()
+        self.capture_attempted = False
+        self.ui_callbacks = queue.Queue()
+        self.export_in_progress = False
 
         self.audio = AudioInputConfiguration()
         self.thermal_camera = ThermalCamera(
@@ -170,15 +149,47 @@ class CoBasV1App:
         self.thermal_scale_buttons = []
 
         self.set_app_icon()
-        self.root.geometry(f"{WINDOW['width']}x{WINDOW['height']}")
-        self.root.resizable(False, False)
-        self.root.minsize(WINDOW["width"], WINDOW["height"])
-        self.root.maxsize(WINDOW["width"], WINDOW["height"])
-        apply_styles(self.root)
+        self.root.resizable(True, True)
+        self.root.minsize(760, 440)
         self.build_gui()
         self.refresh_info_panel()
         self.mmwave_poll_after_id = self.root.after(50, self.poll_mmwave_events)
         self.root.deiconify()
+
+    def prepare_capture_session(self):
+        """Reserve a fresh output folder without modifying earlier captures."""
+        battery_directory = Path(battery_output_directory(self.base_dir, self.battery_percentage))
+        battery_directory.mkdir(parents=True, exist_ok=True)
+        prefix = datetime.now().astimezone().strftime("Session_%Y%m%d_%H%M%S_")
+        self.captures_dir = tempfile.mkdtemp(prefix=prefix, dir=battery_directory)
+        self.mmwave_frames_dir = os.path.join(self.captures_dir, "mmWave Frames")
+        self.thermal_frames_dir = os.path.join(self.captures_dir, "Thermal Frames")
+        self.voices_dir = os.path.join(self.captures_dir, "Voices")
+        self.references_dir = os.path.join(self.captures_dir, "References")
+        self.mmwave_references_dir = os.path.join(self.references_dir, "mmWave References")
+        self.thermal_references_dir = os.path.join(self.references_dir, "Thermal Data References")
+        for path in (self.mmwave_frames_dir, self.thermal_frames_dir, self.voices_dir,
+                     self.mmwave_references_dir, self.thermal_references_dir):
+            os.makedirs(path, exist_ok=True)
+        if hasattr(self, "thermal_camera"):
+            self.thermal_camera.output_dir = self.thermal_references_dir
+
+    def post_ui(self, callback, *args, token=None):
+        """Workers enqueue updates; only the Tk thread may touch widgets or capture state."""
+        if not self.is_closing:
+            self.ui_callbacks.put((token, callback, args))
+
+    def drain_ui_callbacks(self):
+        for _ in range(100):
+            try:
+                token, callback, args = self.ui_callbacks.get_nowait()
+            except queue.Empty:
+                break
+            if self.is_closing:
+                break
+            if token is not None and token != self.tracking_start_token:
+                continue
+            callback(*args)
 
     def new_mmwave_capture(self):
         return MMWaveCaptureService(
@@ -189,19 +200,11 @@ class CoBasV1App:
         )
 
     def request_battery_percentage(self):
-        while True:
-            value = simpledialog.askstring(
-                "Battery Level",
-                "Enter the battery percentage (for example 20 or 20%):",
-                parent=self.root,
-            )
-            if value is None:
-                self.root.destroy()
-                raise SystemExit(0)
-            try:
-                return parse_battery_percentage(value)
-            except ValueError as error:
-                messagebox.showerror("Invalid Battery Level", str(error))
+        value = ask_number(self.root, "Battery percentage (%)", minimum=0, maximum=100)
+        if value is None:
+            self.root.destroy()
+            raise SystemExit(0)
+        return value
 
     def set_app_icon(self):
         icon_path = os.path.join(self.base_dir, "Assets", "icon.png")
@@ -221,261 +224,135 @@ class CoBasV1App:
         outer.pack(fill="both", expand=True)
         self.build_toolbar(outer)
 
-        main = ttk.Frame(outer, style="Main.TFrame")
-        main.pack(
-            fill="both",
-            expand=True,
-            padx=SPACING["main_padx"],
-            pady=SPACING["main_pady"],
-        )
-        main.columnconfigure(0, weight=4)
-        main.columnconfigure(1, weight=1)
-        main.rowconfigure(0, weight=1)
+        # Reserve the capture action and status before allocating preview space.
+        footer = ttk.Frame(outer, style="Panel.TFrame", padding=(10, 6), height=76)
+        footer.pack(side="bottom", fill="x")
+        footer.pack_propagate(False)
+        self.track_button = ttk.Button(footer, text="Start Tracking", style="Start.TButton",
+                                       command=self.toggle_tracking, width=17)
+        self.track_button.pack(side="right", padx=(10, 0))
+        self.record_timer_label = ttk.Label(footer, text="Pulses: 0/20", style="PanelTitle.TLabel")
+        self.record_timer_label.pack(anchor="w")
+        self.status_label = ttk.Label(footer, text="Ready. Tap Start Tracking to begin.",
+                                      style="Info.TLabel", wraplength=500)
+        self.status_label.pack(fill="x", expand=True, anchor="w")
+        self.status_label.bind("<Button-1>", lambda e: messagebox.showinfo("Capture status", self.status_label.cget("text"), parent=self.root))
+        footer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(220, e.width - 270)))
 
-        preview_panel = ttk.Frame(main, style="Panel.TFrame")
-        preview_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        control_panel = ttk.Frame(main, style="Panel.TFrame")
-        control_panel.grid(row=0, column=1, sticky="nsew")
-        self.build_preview_panel(preview_panel)
-        self.build_control_panel(control_panel)
+        self.notebook = ttk.Notebook(outer, style="Touch.TNotebook")
+        self.notebook.pack(fill="both", expand=True, padx=8, pady=6)
+        preview = ttk.Frame(self.notebook, style="Panel.TFrame")
+        setup = ttk.Frame(self.notebook, style="Panel.TFrame")
+        system = ttk.Frame(self.notebook, style="Panel.TFrame")
+        self.notebook.add(preview, text="Live sensors")
+        self.notebook.add(setup, text="Capture setup")
+        self.notebook.add(system, text="System")
+        self.build_preview_panel(preview)
+        self.build_control_panel(setup)
+        self.build_system_panel(system)
 
     def build_toolbar(self, parent):
-        toolbar = ttk.Frame(parent, style="Toolbar.TFrame")
+        toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(8, 4))
         toolbar.pack(fill="x")
-        left = ttk.Frame(toolbar, style="Toolbar.TFrame")
-        left.pack(
-            side="left",
-            padx=SPACING["toolbar_padx"],
-            pady=SPACING["toolbar_pady"],
-        )
-        ttk.Button(
-            left,
-            text="Settings",
-            style="Settings.TButton",
-            command=lambda: SettingsWindow(self.root, self),
-        ).pack(side="left", padx=(0, 4))
-        ttk.Button(
-            left,
-            text="About",
-            style="Settings.TButton",
-            command=lambda: show_about_window(self.root),
-        ).pack(side="left", padx=4)
+        ttk.Label(toolbar, text=f"CoBas  ·  {self.battery_percentage}%", style="ToolbarTitle.TLabel").pack(side="left", padx=(0, 10))
+        ttk.Button(toolbar, text="Close", width=5, style="Danger.TButton", command=self.request_close).pack(side="right", padx=(6,0))
+        self.window_button = ttk.Button(toolbar, text="Window", width=7, style="Tool.TButton", command=self.toggle_touch_mode)
+        self.window_button.pack(side="right", padx=3)
+        ttk.Button(toolbar, text="About", width=5, style="Tool.TButton", command=lambda: show_about_window(self.root)).pack(side="right", padx=3)
+        ttk.Button(toolbar, text="Settings", width=7, style="Settings.TButton", command=lambda: SettingsWindow(self.root, self)).pack(side="right", padx=3)
+
+    def toggle_touch_mode(self):
+        self.touch_mode = not self.touch_mode
+        self.root.overrideredirect(self.touch_mode)
+        if self.touch_mode:
+            self.root.geometry("800x480+0+0")
+        else:
+            width = min(980, self.root.winfo_screenwidth())
+            height = min(620, self.root.winfo_screenheight() - 40)
+            x = 810 if self.root.winfo_screenwidth() >= width + 810 else 0
+            self.root.geometry(f"{width}x{height}+{x}+30")
+        self.window_button.configure(text="Window" if self.touch_mode else "Touch")
+
+    def request_close(self):
+        if self.export_in_progress:
+            messagebox.showinfo("Saving capture", "Please wait for saving to finish before closing CoBas.", parent=self.root)
+            return
+        if self.pulse_sequence_active:
+            if not messagebox.askokcancel("Close CoBas?", "A capture or export may still be running. Close the app?", parent=self.root):
+                return
+        self.on_close()
 
     def build_preview_panel(self, parent):
         header = ttk.Frame(parent, style="Panel.TFrame")
-        header.pack(fill="x", padx=SPACING["panel_padx"], pady=(8, 4))
-        ttk.Label(
-            header,
-            text="Live Sensors",
-            style="PanelTitle.TLabel",
-        ).pack(side="left")
-        self.live_indicator_label = tk.Label(
-            header,
-            text="● READY",
-            bg=COLORS["panel_bg"],
-            fg=COLORS["accent"],
-            font=FONTS["status"],
-        )
+        header.pack(fill="x", padx=10, pady=(5, 4))
+        ttk.Label(header, text="Live sensors", style="PanelTitle.TLabel").pack(side="left")
+        self.live_indicator_label = tk.Label(header, text="● READY", bg=COLORS["panel_bg"],
+                                            fg=COLORS["accent"], font=FONTS["status"])
         self.live_indicator_label.pack(side="right")
-
-        preview_area = ttk.Frame(parent, style="Panel.TFrame")
-        preview_area.pack(
-            fill="both",
-            expand=True,
-            padx=SPACING["panel_padx"],
-            pady=(0, 6),
-        )
-        preview_area.columnconfigure(0, weight=1, uniform="sensor_preview")
-        preview_area.columnconfigure(1, weight=1, uniform="sensor_preview")
-        preview_area.rowconfigure(0, weight=1)
-
-        mmwave_frame = ttk.Frame(preview_area, style="Panel.TFrame")
-        thermal_frame = ttk.Frame(preview_area, style="Panel.TFrame")
-        mmwave_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        thermal_frame.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
-        for frame in (mmwave_frame, thermal_frame):
-            frame.rowconfigure(1, weight=1)
-            frame.columnconfigure(0, weight=1)
-
-        ttk.Label(
-            mmwave_frame,
-            text="mmWave Range-Angle Spectrogram · calibrated references",
-            style="PanelText.TLabel",
-        ).grid(row=0, column=0, sticky="w", pady=(0, 3))
-
-        thermal_header = ttk.Frame(thermal_frame, style="Panel.TFrame")
-        thermal_header.grid(row=0, column=0, sticky="ew", pady=(0, 3))
-        ttk.Label(
-            thermal_header,
-            text="Thermal Sensor",
-            style="PanelText.TLabel",
-        ).pack(side="left")
-        self.build_thermal_controls(thermal_header)
-
-        self.mmwave_label = tk.Label(
-            mmwave_frame,
-            text="mmWave radar is ready.\n\nClick 'Start Tracking' to connect.",
-            bg=COLORS["preview_bg"],
-            fg=COLORS["muted_text"],
-            font=FONTS["preview_text"],
-            bd=0,
-        )
-        self.mmwave_label.grid(row=1, column=0, sticky="nsew")
-        self.thermal_video_label = tk.Label(
-            thermal_frame,
-            text="Thermal sensor is ready.\n\nClick 'Start Tracking' to begin.",
-            bg=COLORS["preview_bg"],
-            fg=COLORS["muted_text"],
-            font=FONTS["preview_text"],
-            bd=0,
-        )
-        self.thermal_video_label.grid(row=1, column=0, sticky="nsew")
-
-        bottom = ttk.Frame(parent, style="Panel.TFrame")
-        bottom.pack(fill="x", padx=SPACING["panel_padx"], pady=(0, 8))
-        self.status_label = ttk.Label(
-            bottom,
-            text="Status: Ready. Click 'Start Tracking' to begin.",
-            style="Info.TLabel",
-        )
-        self.status_label.pack(side="left")
-        self.record_timer_label = ttk.Label(
-            bottom,
-            text="Pulses: 0/20",
-            style="Info.TLabel",
-        )
-        self.record_timer_label.pack(side="right")
-
-    def build_thermal_controls(self, parent):
-        controls = ttk.Frame(parent, style="Panel.TFrame")
-        controls.pack(side="right")
-        ttk.Label(controls, text="Min", style="PanelText.TLabel").pack(side="left")
-        self.thermal_min_entry = ttk.Entry(
-            controls,
-            textvariable=self.thermal_min_text,
-            width=4,
-            justify="center",
-        )
-        self.thermal_min_entry.pack(side="left", padx=(2, 3))
-        ttk.Label(controls, text="Max", style="PanelText.TLabel").pack(side="left")
-        self.thermal_max_entry = ttk.Entry(
-            controls,
-            textvariable=self.thermal_max_text,
-            width=4,
-            justify="center",
-        )
-        self.thermal_max_entry.pack(side="left", padx=(2, 3))
-        self.thermal_range_button = ttk.Button(
-            controls,
-            text="Set",
-            width=3,
-            command=self.configure_thermal_temperature_range,
-        )
-        self.thermal_range_button.pack(side="left", padx=(0, 3))
-        for label, value in (("Color", "rgb"), ("Grey", "grayscale")):
-            button = ttk.Radiobutton(
-                controls,
-                text=label,
-                value=value,
-                variable=self.thermal_scale_mode,
-                command=self.change_thermal_scale_mode,
-                style="ThermalScale.TRadiobutton",
-            )
-            button.pack(side="left", padx=(2, 0))
-            self.thermal_scale_buttons.append(button)
+        area = ttk.Frame(parent, style="Panel.TFrame")
+        area.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        area.rowconfigure(1, weight=1)
+        for col, title in enumerate(("mmWave radar", "Thermal camera")):
+            area.columnconfigure(col, weight=1, uniform="sensor")
+            ttk.Label(area, text=title, style="PanelText.TLabel").grid(row=0, column=col, sticky="w", padx=4, pady=(0,4))
+        self.mmwave_label = tk.Label(area, text="Radar ready.\n\nTap Start Tracking to connect.",
+                                     bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
+                                     font=FONTS["preview_text"], width=1, height=1, wraplength=330, bd=0)
+        self.thermal_video_label = tk.Label(area, text="Thermal camera ready.\n\nTap Start Tracking to begin.",
+                                            bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
+                                            font=FONTS["preview_text"], width=1, height=1, wraplength=330, bd=0)
+        for col, label in enumerate((self.mmwave_label, self.thermal_video_label)):
+            label.grid(row=1, column=col, sticky="nsew", padx=4)
+            label.bind("<Configure>", lambda e, widget=label: widget.configure(wraplength=max(100, e.width - 12)))
 
     def build_control_panel(self, parent):
-        controls = ttk.Frame(parent, style="Panel.TFrame")
-        controls.pack(
-            fill="x",
-            padx=SPACING["panel_padx"],
-            pady=(8, 4),
-        )
-        ttk.Label(controls, text="Tracking", style="PanelTitle.TLabel").pack(
-            anchor="w", pady=(0, 3)
-        )
-        self.pulse_count_spinbox = self.build_spinbox_row(
-            controls,
-            "Chirp count",
-            self.pulse_count_text,
-            999,
-        )
-        self.position_count_spinbox = self.build_spinbox_row(
-            controls,
-            "Battery positions",
-            self.position_count_text,
-            99,
-        )
-        self.track_button = ttk.Button(
-            controls,
-            text="Start Tracking",
-            style="Start.TButton",
-            command=self.toggle_tracking,
-        )
-        self.track_button.pack(fill="x", pady=SPACING["button_pady"])
+        parent.columnconfigure(0, weight=1, uniform="setup")
+        parent.columnconfigure(1, weight=1, uniform="setup")
+        controls = ttk.Frame(parent, style="Panel.TFrame", padding=10)
+        controls.grid(row=0, column=0, sticky="nsew")
+        thermal = ttk.Frame(parent, style="Panel.TFrame", padding=10)
+        thermal.grid(row=0, column=1, sticky="nsew")
+        ttk.Label(controls, text="Capture", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
+        self.pulse_count_spinbox = self.build_spinbox_row(controls, "Chirp count", self.pulse_count_text, 999)
+        self.position_count_spinbox = self.build_spinbox_row(controls, "Battery positions", self.position_count_text, 99)
+        ttk.Label(controls, text="Tap a number to open the keypad.", style="PanelText.TLabel").pack(anchor="w", pady=(5,0))
+        self.build_thermal_controls(thermal)
 
-        info = ttk.Frame(parent, style="Panel.TFrame")
-        info.pack(
-            fill="both",
-            expand=True,
-            padx=SPACING["panel_padx"],
-            pady=(8, 8),
-        )
-        ttk.Label(info, text="System", style="PanelTitle.TLabel").pack(
-            anchor="w", pady=(0, 5)
-        )
-        self.radar_info_label = ttk.Label(
-            info,
-            text="mmWave: idle",
-            style="PanelText.TLabel",
-            wraplength=180,
-        )
-        self.radar_info_label.pack(anchor="w")
-        self.thermal_info_label = ttk.Label(
-            info,
-            text="Thermal: idle",
-            style="PanelText.TLabel",
-            wraplength=180,
-        )
-        self.thermal_info_label.pack(anchor="w")
-        self.microphone_info_label = ttk.Label(
-            info,
-            text="Mic: System Default",
-            style="PanelText.TLabel",
-            wraplength=180,
-        )
-        self.microphone_info_label.pack(anchor="w")
-        self.output_info_label = ttk.Label(
-            info,
-            text="Output: Captures/",
-            style="PanelText.TLabel",
-            wraplength=180,
-        )
-        self.output_info_label.pack(anchor="w")
-        self.rate_info_label = ttk.Label(
-            info,
-            text="",
-            style="PanelText.TLabel",
-            wraplength=180,
-        )
-        self.rate_info_label.pack(anchor="w")
+    def build_thermal_controls(self, parent):
+        ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
+        row = ttk.Frame(parent, style="Panel.TFrame")
+        row.pack(fill="x")
+        for title, variable, attr in (("Minimum", self.thermal_min_text, "thermal_min_entry"),
+                                      ("Maximum", self.thermal_max_text, "thermal_max_entry")):
+            ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
+            control = NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
+            control.pack(fill="x", pady=(0,4))
+            setattr(self, attr, control)
+        modes = ttk.Frame(parent, style="Panel.TFrame")
+        modes.pack(fill="x", pady=(2,0))
+        self.thermal_range_button = ttk.Button(modes, text="Apply", style="Primary.TButton", width=5,
+                                               command=self.configure_thermal_temperature_range)
+        self.thermal_range_button.pack(side="left", padx=(0,6))
+        for label, value in (("Color", "rgb"), ("Grey", "grayscale")):
+            button = ttk.Radiobutton(modes, text=label, value=value, variable=self.thermal_scale_mode,
+                                      command=self.change_thermal_scale_mode, style="ThermalScale.TRadiobutton")
+            button.pack(side="left")
+            self.thermal_scale_buttons.append(button)
+
+    def build_system_panel(self, parent):
+        info = ttk.Frame(parent, style="Panel.TFrame", padding=12)
+        info.pack(fill="both", expand=True)
+        for attr in ("radar_info_label", "thermal_info_label", "microphone_info_label", "output_info_label", "rate_info_label"):
+            label = ttk.Label(info, style="PanelText.TLabel", wraplength=720)
+            label.pack(anchor="w", pady=(0,6))
+            setattr(self, attr, label)
 
     @staticmethod
     def build_spinbox_row(parent, label, variable, maximum):
-        row = ttk.Frame(parent, style="Panel.TFrame")
-        row.pack(fill="x", pady=(0, 4))
-        ttk.Label(row, text=label, style="PanelText.TLabel").pack(side="left")
-        spinbox = ttk.Spinbox(
-            row,
-            from_=1,
-            to=maximum,
-            increment=1,
-            textvariable=variable,
-            width=5,
-            justify="center",
-        )
-        spinbox.pack(side="right")
-        return spinbox
+        ttk.Label(parent, text=label, style="PanelText.TLabel").pack(anchor="w")
+        control = NumberControl(parent, variable, label, maximum=maximum)
+        control.pack(fill="x", pady=(0,4))
+        return control
 
     def get_preview_dimensions(self, label):
         width = label.winfo_width()
@@ -613,6 +490,9 @@ class CoBasV1App:
 
     def poll_mmwave_events(self):
         self.mmwave_poll_after_id = None
+        self.drain_ui_callbacks()
+        if self.is_closing:
+            return
         try:
             while True:
                 event = self.mmwave_capture.events.get_nowait()
@@ -670,14 +550,19 @@ class CoBasV1App:
             )
 
     def toggle_tracking(self):
-        if self.is_preparing_tracking:
+        if self.export_in_progress or self.is_closing:
             return
         if self.pulse_sequence_active:
             self.stop_tracking()
-        else:
+        elif not self.is_preparing_tracking:
             self.start_tracking()
 
     def start_tracking(self):
+        if self.is_closing or self.export_in_progress or self.pulse_sequence_active:
+            return
+        if self.mmwave_capture.is_running:
+            self.update_status("Status: Previous radar session is still stopping. Try again shortly.", "● WARNING")
+            return
         try:
             pulse_count = int(self.pulse_count_text.get())
             position_count = int(self.position_count_text.get())
@@ -702,6 +587,14 @@ class CoBasV1App:
             )
             return
 
+        if self.capture_attempted:
+            try:
+                self.prepare_capture_session()
+            except OSError as error:
+                messagebox.showerror("Capture folder", f"Cannot create a new capture folder: {error}", parent=self.root)
+                return
+        self.capture_attempted = True
+        self.refresh_info_panel()
         self.tracking_start_token += 1
         self.requested_pulse_count = pulse_count
         self.requested_position_count = position_count
@@ -727,8 +620,12 @@ class CoBasV1App:
         self.awaiting_radar_ready = True
 
         self.mmwave_capture = self.new_mmwave_capture()
-        self.start_thermal_feed()
-        self.mmwave_capture.start()
+        try:
+            self.start_thermal_feed()
+            self.mmwave_capture.start()
+        except (OSError, RuntimeError) as error:
+            self.abort_capture(f"Sensors could not start: {error}")
+            return
         self.pulse_count_spinbox.configure(state="disabled")
         self.position_count_spinbox.configure(state="disabled")
         self.set_thermal_controls_state("disabled")
@@ -779,159 +676,115 @@ class CoBasV1App:
         )
 
     def start_pulse_sequence(self, start_token):
-        if start_token != self.tracking_start_token:
+        if start_token != self.tracking_start_token or not self.pulse_sequence_active:
             return
         position_number = self.current_position_number
         pulse_count = self.pulses_per_position
         global_offset = (position_number - 1) * pulse_count
-        self.current_recording_timestamp = (
-            datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
-        )
+        self.current_recording_timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
+        # Snapshot the command before a worker starts, so retries cannot change its paths.
+        command, pulse_folder = self.get_pulse_command()
+        if command is None:
+            self.abort_capture("Pulse generator was not found")
+            return
 
         def worker():
-            command, pulse_folder = self.get_pulse_command()
-            if command is None:
-                self.root.after(
-                    0,
-                    lambda: self.abort_capture("Pulse generator was not found"),
-                )
-                return
-            try:
-                process = subprocess.Popen(
-                    command,
-                    cwd=pulse_folder,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-                with self.pulse_process_lock:
-                    self.pulse_process = process
-            except (OSError, subprocess.SubprocessError) as error:
-                self.root.after(
-                    0,
-                    lambda error=error: self.abort_capture(
-                        f"Pulse sequence could not start: {error}"
-                    ),
-                )
-                return
-
+            process = None
             completed = set()
             ready_received = False
             start_result = {"started": False}
             start_result_event = threading.Event()
 
+            def publish(callback, *args):
+                self.post_ui(callback, *args, token=start_token)
+
             def start_recording():
                 try:
-                    start_result["started"] = self.handle_sequence_ready(
-                        start_token,
-                        position_number,
-                    )
+                    start_result["started"] = self.handle_sequence_ready(start_token, position_number)
                 finally:
                     start_result_event.set()
 
-            for output_line in process.stdout:
-                line = output_line.strip()
-                if line:
-                    print(f"[CHIRP SEQUENCE] {line}")
-                if line.startswith("SEQUENCE_READY"):
-                    ready_received = True
-                    self.root.after(0, start_recording)
-                    while not start_result_event.wait(timeout=0.1):
-                        if start_token != self.tracking_start_token:
+            try:
+                process = subprocess.Popen(command, cwd=pulse_folder, stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                           text=True, bufsize=1)
+                with self.pulse_process_lock:
+                    if start_token != self.tracking_start_token or self.is_closing:
+                        return
+                    self.pulse_process = process
+                for output_line in process.stdout:
+                    if start_token != self.tracking_start_token or self.is_closing:
+                        return
+                    line = output_line.strip()
+                    if line:
+                        print(f"[CHIRP SEQUENCE] {line}")
+                    if line.startswith("SEQUENCE_READY"):
+                        if ready_received:
+                            raise RuntimeError("Pulse generator reported readiness twice")
+                        ready_received = True
+                        publish(start_recording)
+                        while not start_result_event.wait(timeout=0.1):
+                            if start_token != self.tracking_start_token or self.is_closing:
+                                return
+                        if not start_result["started"]:
                             return
-                    if not start_result["started"]:
-                        process.terminate()
-                        break
-                    try:
                         process.stdin.write("START\n")
                         process.stdin.flush()
-                    except (BrokenPipeError, OSError):
-                        process.terminate()
-                        break
-                elif line.startswith("PLAYBACK_STARTED"):
-                    parts = line.split(maxsplit=2)
-                    if len(parts) != 3:
-                        continue
-                    try:
-                        position_pulse = int(parts[1])
-                        playback_started_at = float(parts[2])
-                    except ValueError:
-                        continue
-                    if position_pulse == 1:
-                        self.pulse_sequence_started_at = playback_started_at
-                    global_pulse = global_offset + position_pulse
-                    self.root.after(
-                        0,
-                        lambda global_pulse=global_pulse, position_pulse=position_pulse: (
-                            self.handle_pulse_started(
-                                start_token,
-                                position_number,
-                                position_pulse,
-                                global_pulse,
-                            )
-                        ),
-                    )
-                elif line.startswith("PULSE_FINISHED"):
-                    parts = line.split(maxsplit=2)
-                    if len(parts) != 3:
-                        continue
-                    try:
-                        position_pulse = int(parts[1])
-                    except ValueError:
-                        continue
-                    recording_path = parts[2]
-                    if position_pulse in completed or not os.path.exists(
-                        recording_path
-                    ):
-                        continue
-                    completed.add(position_pulse)
-                    global_pulse = global_offset + position_pulse
-                    self.pulse_recordings.append(
-                        {
-                            "path": recording_path,
-                            "pulse_number": global_pulse,
-                            "position": position_number,
-                            "position_pulse_number": position_pulse,
-                        }
-                    )
-                    self.root.after(
-                        0,
-                        lambda global_pulse=global_pulse,
-                        position_pulse=position_pulse: (
-                            self.handle_pulse_completed(
-                                start_token,
-                                position_number,
-                                position_pulse,
-                                global_pulse,
-                            )
-                        ),
-                    )
-
-            return_code = process.wait()
-            with self.pulse_process_lock:
-                if self.pulse_process is process:
-                    self.pulse_process = None
-            if start_token != self.tracking_start_token:
-                return
-            if return_code or not ready_received or len(completed) != pulse_count:
-                self.root.after(
-                    0,
-                    lambda: self.abort_capture(
-                        "Chirp playback or microphone recording failed"
-                    ),
-                )
-                return
-            self.root.after(
-                0,
-                lambda: self.handle_position_finished(
-                    start_token,
-                    position_number,
-                ),
-            )
+                    elif line.startswith("PLAYBACK_STARTED"):
+                        parts = line.split(maxsplit=2)
+                        if len(parts) != 3:
+                            continue
+                        position_pulse, started_at = int(parts[1]), float(parts[2])
+                        publish(self.handle_pulse_started, start_token, position_number,
+                                position_pulse, global_offset + position_pulse, started_at)
+                    elif line.startswith("PULSE_FINISHED"):
+                        parts = line.split(maxsplit=2)
+                        if len(parts) != 3:
+                            continue
+                        position_pulse, path = int(parts[1]), parts[2]
+                        if position_pulse in completed:
+                            continue
+                        if not 1 <= position_pulse <= pulse_count or not os.path.isfile(path):
+                            raise RuntimeError("Pulse generator reported an invalid recording")
+                        completed.add(position_pulse)
+                        publish(self.register_pulse_recording, start_token, position_number,
+                                position_pulse, global_offset + position_pulse, path)
+                return_code = process.wait()
+                if return_code or not ready_received or len(completed) != pulse_count:
+                    publish(self.abort_capture, "Chirp playback or microphone recording failed")
+                else:
+                    publish(self.handle_position_finished, start_token, position_number)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                publish(self.abort_capture, f"Pulse sequence failed: {error}")
+            finally:
+                if process is not None:
+                    if process.poll() is None:
+                        try:
+                            process.terminate()
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        except ProcessLookupError:
+                            pass
+                    for pipe in (process.stdin, process.stdout):
+                        if pipe is not None:
+                            try:
+                                pipe.close()
+                            except OSError:
+                                pass
+                    with self.pulse_process_lock:
+                        if self.pulse_process is process:
+                            self.pulse_process = None
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def register_pulse_recording(self, start_token, position, position_pulse, global_pulse, path):
+        if start_token != self.tracking_start_token or not self.pulse_sequence_active:
+            return
+        self.pulse_recordings.append({"path": path, "pulse_number": global_pulse,
+                                      "position": position, "position_pulse_number": position_pulse})
+        self.handle_pulse_completed(start_token, position, position_pulse, global_pulse)
 
     def handle_sequence_ready(self, start_token, position_number):
         if (
@@ -967,9 +820,12 @@ class CoBasV1App:
         position_number,
         position_pulse_number,
         global_pulse_number,
+        playback_started_at=None,
     ):
         if start_token != self.tracking_start_token:
             return
+        if position_pulse_number == 1 and playback_started_at is not None:
+            self.pulse_sequence_started_at = playback_started_at
         self.current_pulse_number = global_pulse_number
         self.update_status(
             f"Status: Position {position_number}/{self.requested_position_count}, "
@@ -1143,7 +999,7 @@ class CoBasV1App:
         should_continue = messagebox.askokcancel(
             "Change Battery Position",
             f"Position {position_number} is complete.\n\n"
-            f"Move the battery to Position {next_position}, then click OK.\n\n"
+            f"Move the battery to Position {next_position}, then tap OK.\n\n"
             "Capture is paused and repositioning time is excluded.",
             parent=self.root,
         )
@@ -1166,11 +1022,13 @@ class CoBasV1App:
         if not self.pulse_sequence_active:
             return
         print(f"[WARNING] {message}")
+        self.tracking_start_token += 1
         self.stop_pulse_process()
         self.finalize_position_segment(self.current_position_number)
         self.finish_capture(message, warning=True)
 
     def finish_capture(self, message, warning=False):
+        self.tracking_start_token += 1
         self.is_preparing_tracking = False
         self.awaiting_radar_ready = False
         self.pulse_sequence_active = False
@@ -1192,6 +1050,8 @@ class CoBasV1App:
         )
         if self.position_segments and not self.export_started:
             self.export_started = True
+            self.export_in_progress = True
+            self.track_button.configure(text="Saving…", state="disabled")
             threading.Thread(
                 target=self.export_battery_capture,
                 daemon=True,
@@ -1276,6 +1136,8 @@ class CoBasV1App:
     def export_battery_capture(self):
         try:
             self.mmwave_capture.stop(wait=True, timeout=20.0)
+            if self.mmwave_capture.is_running:
+                raise RuntimeError("Radar is still saving; capture files have been preserved")
             self.voice_recording_count = len(
                 self.validate_chirp_voice_recordings()
             )
@@ -1306,22 +1168,15 @@ class CoBasV1App:
                 ),
             )
             self.clean_position_temporary_outputs()
-            self.root.after(0, self.handle_export_finished)
-        except (
-            OSError,
-            RuntimeError,
-            subprocess.CalledProcessError,
-            wave.Error,
-        ) as error:
+            self.post_ui(self.handle_export_finished)
+        except Exception as error:  # Worker boundary: always unlock and report failed exports.
             print(f"[ERROR] Battery output generation failed: {error}")
-            if not self.is_closing:
-                self.root.after(
-                    0,
-                    lambda error=error: self.update_status(
-                        f"Status: Output generation failed: {error}",
-                        "● ERROR",
-                    ),
-                )
+            self.post_ui(self.handle_export_failed, str(error))
+
+    def handle_export_failed(self, error):
+        self.export_in_progress = False
+        self.track_button.configure(text="Start Tracking", style="Start.TButton", state="normal")
+        self.update_status(f"Status: Saving failed: {error}. Files retained in {self.captures_dir}", "● ERROR")
 
     def finalize_thermal_frames(self, expected_count):
         """Publish the chirp-aligned thermal images after validating the set."""
@@ -1357,7 +1212,9 @@ class CoBasV1App:
 
         output_directory = Path(self.thermal_frames_dir)
         if output_directory.is_dir():
-            shutil.rmtree(output_directory)
+            if any(output_directory.iterdir()):
+                raise RuntimeError(f"Thermal frame output already contains data: {output_directory}")
+            output_directory.rmdir()
         elif output_directory.exists():
             raise RuntimeError(
                 f"Thermal frame output is not a directory: {output_directory}"
@@ -1376,8 +1233,8 @@ class CoBasV1App:
             for item in sorted(segments, key=lambda value: value["position"])
             if os.path.exists(item["thermal_video_path"])
         ]
-        if not inputs:
-            raise RuntimeError("No thermal video segments were available")
+        if not inputs or len(inputs) != len(segments):
+            raise RuntimeError("One or more thermal video segments are missing")
         if len(inputs) == 1:
             os.replace(inputs[0], output_path)
             return
@@ -1450,11 +1307,11 @@ class CoBasV1App:
                     input_wav.getsampwidth(),
                     input_wav.getframerate(),
                 )
-                if input_wav.getnframes() <= 0:
-                    raise RuntimeError(
-                        f"Voice recording is empty for chirp "
-                        f"{recording['pulse_number']}: {recording_path}"
-                    )
+                expected_frames = round(48_000 * PULSE_DURATION_SECONDS)
+                if current_format != (1, 2, 48_000) or input_wav.getnframes() != expected_frames:
+                    raise RuntimeError(f"Chirp {recording['pulse_number']} must contain exactly two seconds of 48 kHz mono 16-bit audio: {recording_path}")
+                if len(input_wav.readframes(expected_frames)) != expected_frames * 2:
+                    raise RuntimeError(f"Chirp {recording['pulse_number']} audio data is truncated: {recording_path}")
                 if expected_format is None:
                     expected_format = current_format
                 elif current_format != expected_format:
@@ -1521,14 +1378,16 @@ class CoBasV1App:
                     os.remove(path)
 
     def handle_export_finished(self):
+        self.export_in_progress = False
+        self.track_button.configure(text="Start Tracking", style="Start.TButton", state="normal")
         self.mmwave_label.config(
             image="",
-            text="Battery capture saved.\n\nClick 'Start Tracking' to record again.",
+            text="Battery capture saved.\n\nTap 'Start Tracking' to record again.",
         )
         self.mmwave_label.image = None
         self.thermal_video_label.config(
             image="",
-            text="Thermal capture saved.\n\nClick 'Start Tracking' to record again.",
+            text="Thermal capture saved.\n\nTap 'Start Tracking' to record again.",
         )
         self.thermal_video_label.image = None
         self.update_status(
@@ -1562,6 +1421,8 @@ class CoBasV1App:
         os.execv(sys.executable, command_arguments)
 
     def on_close(self):
+        if self.is_closing or self.export_in_progress:
+            return
         self.is_closing = True
         if self.mmwave_poll_after_id is not None:
             try:
@@ -1583,5 +1444,5 @@ class CoBasV1App:
 if __name__ == "__main__":
     root = tk.Tk(className=APP_WM_CLASS)
     app = CoBasV1App(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_close)
+    root.protocol("WM_DELETE_WINDOW", app.request_close)
     root.mainloop()

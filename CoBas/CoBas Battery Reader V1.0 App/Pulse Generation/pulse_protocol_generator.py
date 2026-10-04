@@ -16,7 +16,9 @@ SAMPLE_RATE = 48_000
 PULSE_DURATION_SECONDS = 2.0
 START_FREQUENCY = 15_000.0
 END_FREQUENCY = 19_200.0
-AMPLITUDE = 0.90  # Keep 0.9 dB of digital headroom to prevent fuzzy clipping.
+# Verified through duplex capture playback at 100% USB speaker volume.
+# Keep 2.5 dB of digital headroom; higher drive distorted on this speaker.
+AMPLITUDE = 0.75
 FADE_MILLISECONDS = 5.0
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -109,7 +111,7 @@ def play_pulse(signal=None, rate=SAMPLE_RATE):
 
     try:
         playback_started_at = time.time()
-        sd.play(signal, samplerate=rate, blocking=False)
+        sd.play(signal, samplerate=rate, blocking=False, latency="high")
         print(
             f"PLAYBACK_STARTED {playback_started_at:.9f}",
             flush=True,
@@ -142,6 +144,7 @@ def play_and_record_pulse(
             dtype="float32",
             device=(input_device, None),
             blocking=False,
+            latency="high",
         )
         print(
             f"PLAYBACK_STARTED {playback_started_at:.9f}",

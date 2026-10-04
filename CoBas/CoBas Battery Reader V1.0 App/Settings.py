@@ -1,119 +1,68 @@
-"""Settings dialog for the integrated CoBas sensor application."""
-
-import tkinter as tk
+"""Touch-sized microphone chooser with paged device buttons."""
 from tkinter import ttk
-
-from Style import COLORS
+from TouchUI import TouchDialog, dialogs
 
 
 class SettingsWindow:
-    """Select the microphone and show the fixed radar/thermal configuration."""
-
     def __init__(self, parent, app):
-        self.parent = parent
         self.app = app
+        self.dialog = TouchDialog(parent, 'Microphone settings', width=740, height=440)
+        self.window = self.dialog
+        self.microphones = app.audio.get_input_microphones()
+        self.page = 0
+        self.selected_id = app.audio.microphone_device_id
+        ttk.Label(self.dialog.body, text='Choose the microphone used to record each chirp.', style='PanelText.TLabel').pack(anchor='w', pady=(0,8))
+        self.choices = ttk.Frame(self.dialog.body, style='Panel.TFrame')
+        self.choices.pack(fill='both', expand=True)
+        self.page_row = ttk.Frame(self.dialog.body, style='Panel.TFrame')
+        self.page_row.pack(fill='x', pady=6)
+        self.previous = ttk.Button(self.page_row, text='Previous', style='Tool.TButton', command=lambda: self.change_page(-1))
+        self.previous.pack(side='left')
+        self.page_label = ttk.Label(self.page_row, style='PanelText.TLabel', anchor='center')
+        self.page_label.pack(side='left', fill='x', expand=True)
+        self.next = ttk.Button(self.page_row, text='Next', style='Tool.TButton', command=lambda: self.change_page(1))
+        self.next.pack(side='right')
+        actions = ttk.Frame(self.dialog.body, style='Panel.TFrame')
+        actions.pack(fill='x')
+        ttk.Button(actions, text='Cancel', style='Tool.TButton', command=self.dialog.cancel).pack(side='left', fill='x', expand=True, padx=(0,4))
+        ttk.Button(actions, text='Apply microphone', style='Primary.TButton', command=self.apply).pack(side='left', fill='x', expand=True, padx=(4,0))
+        self.render()
+        self.dialog.show()
 
-        self.window = tk.Toplevel(parent)
-        self.window.title("Settings")
-        self.window.geometry("460x360")
-        self.window.resizable(False, False)
-        self.window.configure(bg=COLORS["main_bg"])
-        self.window.transient(parent)
-        self.window.grab_set()
+    def change_page(self, delta):
+        self.page += delta
+        self.render()
 
-        self.microphones = self.app.audio.get_input_microphones()
-        self.microphone_display_values = []
-        self.microphone_lookup = {}
-        for microphone in self.microphones:
-            display_name = self._display_name(microphone)
-            self.microphone_display_values.append(display_name)
-            self.microphone_lookup[display_name] = microphone
+    def select(self, device_id):
+        self.selected_id = device_id
+        self.render()
 
-        self.selected_microphone_source = tk.StringVar(
-            value=self._current_microphone_display()
-        )
-        self.build_window()
+    def render(self):
+        for child in self.choices.winfo_children():
+            child.destroy()
+        pages = max(1, (len(self.microphones) + 2) // 3)
+        self.page = max(0, min(self.page, pages - 1))
+        for device in self.microphones[self.page*3:self.page*3+3]:
+            selected = device['id'] == self.selected_id
+            name = device['name']
+            label = ('✓  ' if selected else '') + name
+            if len(label) > 64:
+                label = label[:61] + '…'
+            ttk.Button(self.choices, text=label, style='Primary.TButton' if selected else 'Tool.TButton',
+                       command=lambda i=device['id']: self.select(i)).pack(fill='x', pady=3)
+        self.page_label.configure(text=f'{self.page + 1} / {pages}')
+        self.previous.configure(state='disabled' if self.page == 0 else 'normal')
+        self.next.configure(state='disabled' if self.page == pages - 1 else 'normal')
 
-    @staticmethod
-    def _display_name(microphone):
-        if microphone["id"] is None:
-            return microphone["name"]
-        return f"{microphone['id']}: {microphone['name']}"
-
-    def _current_microphone_display(self):
-        for display_name, microphone in self.microphone_lookup.items():
-            if microphone["id"] == self.app.audio.microphone_device_id:
-                return display_name
-        return "System Default Microphone"
-
-    def build_window(self):
-        settings_frame = ttk.Frame(self.window, style="Panel.TFrame")
-        settings_frame.pack(fill="both", expand=True, padx=16, pady=16)
-
-        ttk.Label(
-            settings_frame,
-            text=(
-                "The IWR6843AOP radar uses /dev/ttyUSB0 and /dev/ttyUSB1. "
-                "Select the microphone used to save every chirp as its own "
-                "voice WAV recording."
-            ),
-            style="PanelText.TLabel",
-            wraplength=420,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 16))
-
-        microphone_section = ttk.Frame(settings_frame, style="Panel.TFrame")
-        microphone_section.pack(fill="x", pady=(0, 16))
-        ttk.Label(
-            microphone_section,
-            text="Microphone Source",
-            style="PanelTitle.TLabel",
-        ).pack(anchor="w", pady=(0, 5))
-        ttk.Combobox(
-            microphone_section,
-            textvariable=self.selected_microphone_source,
-            values=self.microphone_display_values,
-            state="readonly",
-        ).pack(fill="x", pady=(0, 7))
-        ttk.Button(
-            microphone_section,
-            text="Apply Microphone Source",
-            style="Primary.TButton",
-            command=self.apply_microphone_source,
-        ).pack(fill="x")
-
-        info_section = ttk.Frame(settings_frame, style="Panel.TFrame")
-        info_section.pack(fill="both", expand=True)
-        ttk.Label(
-            info_section,
-            text="Current Configuration",
-            style="PanelTitle.TLabel",
-        ).pack(anchor="w", pady=(0, 6))
-        ttk.Label(
-            info_section,
-            text=(
-                "mmWave CLI: /dev/ttyUSB0\n"
-                "mmWave data: /dev/ttyUSB1\n"
-                f"Thermal sensor: {self.app.thermal_camera.status}\n"
-                f"Microphone: {self.app.audio.microphone_device_name}\n"
-                f"Thermal FPS: {self.app.thermal_camera.record_fps:g}\n"
-                "Dataset frames: 1 mmWave + 1 thermal per chirp\n"
-                f"mmWave frames: {self.app.mmwave_frames_dir}\n"
-                f"Thermal frames: {self.app.thermal_frames_dir}\n"
-                f"Voices: {self.app.voices_dir}\n"
-                f"References: {self.app.references_dir}"
-            ),
-            style="PanelText.TLabel",
-            wraplength=420,
-            justify="left",
-        ).pack(anchor="w")
-
-    def apply_microphone_source(self):
-        microphone = self.microphone_lookup.get(self.selected_microphone_source.get())
-        if microphone is None:
+    def apply(self):
+        if self.app.pulse_sequence_active:
+            dialogs.showwarning('Capture active', 'Stop tracking before changing the microphone.', parent=self.dialog)
             return
-        self.app.apply_microphone_source_from_settings(
-            microphone["id"],
-            microphone["name"],
-        )
-        self.window.destroy()
+        device = next((item for item in self.microphones if item['id'] == self.selected_id), None)
+        if device is None:
+            self.selected_id = None
+            self.render()
+            dialogs.showwarning('Microphone unavailable', 'Select an available microphone before applying.', parent=self.dialog)
+            return
+        self.app.apply_microphone_source_from_settings(device['id'], device['name'])
+        self.dialog.finish(True)

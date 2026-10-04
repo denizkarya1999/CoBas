@@ -1,328 +1,52 @@
+"""Shared touchscreen styles; button heights use pixels through negative font sizes."""
 from tkinter import ttk
 
-
-# --------------------------------------------------
-# Window Settings
-# --------------------------------------------------
-# Fixed size of the main application window.
-WINDOW = {
-    "width": 980,
-    "height": 620
-}
-
-
-# --------------------------------------------------
-# Preview Settings
-# --------------------------------------------------
-# Display size of each live sensor preview inside the GUI.
-PREVIEW = {
-    "width": 660,
-    "height": 380
-}
-
-
-# --------------------------------------------------
-# Colors
-# --------------------------------------------------
-# Central color palette used across the application.
+WINDOW = {'width': 800, 'height': 480}
+PREVIEW = {'width': 740, 'height': 250}
 COLORS = {
-    # Main backgrounds
-    "main_bg": "#0b1120",
-    "toolbar_bg": "#020617",
-    "panel_bg": "#111827",
-    "panel_bg_light": "#1f2937",
-    "preview_bg": "#020617",
-
-    # Text colors
-    "text": "#f8fafc",
-    "muted_text": "#94a3b8",
-    "panel_text": "#cbd5e1",
-    "info_text": "#e5e7eb",
-
-    # Status colors
-    "accent": "#38bdf8",
-    "success": "#22c55e",
-    "warning": "#facc15",
-    "error": "#f87171",
-    "idle": "#94a3b8",
-    "record": "#ef4444",
-
-    # General button colors
-    "primary": "#2563eb",
-    "primary_hover": "#1d4ed8",
-    "danger": "#dc2626",
-    "danger_hover": "#b91c1c",
-    "tool": "#1f2937",
-    "tool_hover": "#2563eb",
-
-    # Start / Stop Tracking colors
-    "start": "#16a34a",
-    "start_hover": "#15803d",
-    "stop": "#dc2626",
-    "stop_hover": "#b91c1c",
-
-    # Toolbar button colors
-    "settings": "#4f46e5",
-    "settings_hover": "#4338ca"
+    'main_bg': '#0b1120', 'toolbar_bg': '#020617', 'panel_bg': '#111827',
+    'panel_bg_light': '#1f2937', 'preview_bg': '#020617', 'text': '#f8fafc',
+    'muted_text': '#94a3b8', 'panel_text': '#cbd5e1', 'info_text': '#e5e7eb',
+    'accent': '#38bdf8', 'success': '#22c55e', 'warning': '#facc15',
+    'error': '#f87171', 'idle': '#94a3b8', 'record': '#ef4444',
+    'primary': '#2563eb', 'primary_hover': '#1d4ed8', 'danger': '#dc2626',
+    'danger_hover': '#b91c1c', 'tool': '#1f2937', 'tool_hover': '#334155',
+    'start': '#15803d', 'start_hover': '#166534', 'stop': '#dc2626',
+    'stop_hover': '#b91c1c', 'settings': '#4f46e5', 'settings_hover': '#4338ca',
 }
-
-
-# --------------------------------------------------
-# Fonts
-# --------------------------------------------------
-# Central font settings.
 FONTS = {
-    "toolbar_title": ("Arial", 12, "bold"),
-    "toolbar_text": ("Arial", 8),
-
-    "panel_title": ("Arial", 10, "bold"),
-    "panel_text": ("Arial", 7),
-
-    "status": ("Arial", 8, "bold"),
-    "info": ("Arial", 7),
-
-    "button": ("Arial", 8),
-    "button_bold": ("Arial", 8, "bold"),
-
-    "preview_text": ("Arial", 13, "bold")
+    'toolbar_title': ('Arial', -20, 'bold'), 'toolbar_text': ('Arial', -16),
+    'panel_title': ('Arial', -19, 'bold'), 'panel_text': ('Arial', -16),
+    'status': ('Arial', -16, 'bold'), 'info': ('Arial', -15),
+    'button': ('Arial', -18), 'button_bold': ('Arial', -18, 'bold'),
+    'preview_text': ('Arial', -18, 'bold'),
 }
+SPACING = {'main_padx': 10, 'main_pady': 6, 'panel_padx': 10, 'panel_pady': 6,
+           'toolbar_padx': 8, 'toolbar_pady': 4, 'button_pady': 4}
 
-
-# --------------------------------------------------
-# Spacing
-# --------------------------------------------------
-# Central spacing values used by the GUI.
-SPACING = {
-    "main_padx": 8,
-    "main_pady": 6,
-
-    "panel_padx": 9,
-    "panel_pady": 4,
-
-    "toolbar_padx": 10,
-    "toolbar_pady": 4,
-
-    "button_pady": 2
-}
-
-
-# --------------------------------------------------
-# Style Function
-# --------------------------------------------------
 
 def apply_styles(root):
-    """
-    Apply all Tkinter/ttk styles.
-
-    This file works like a CSS-style configuration file
-    for the Tkinter app.
-    """
-
-    style = ttk.Style()
-
-    # The "clam" theme allows better color customization for ttk widgets.
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
-
-    # Set main root background.
-    root.configure(bg=COLORS["main_bg"])
-
-    # --------------------------------------------------
-    # Frames
-    # --------------------------------------------------
-
-    style.configure(
-        "Main.TFrame",
-        background=COLORS["main_bg"]
-    )
-
-    style.configure(
-        "Toolbar.TFrame",
-        background=COLORS["toolbar_bg"]
-    )
-
-    style.configure(
-        "Panel.TFrame",
-        background=COLORS["panel_bg"]
-    )
-
-    style.configure(
-        "SoftPanel.TFrame",
-        background=COLORS["panel_bg_light"]
-    )
-
-    # --------------------------------------------------
-    # Labels
-    # --------------------------------------------------
-
-    style.configure(
-        "ToolbarTitle.TLabel",
-        background=COLORS["toolbar_bg"],
-        foreground=COLORS["text"],
-        font=FONTS["toolbar_title"]
-    )
-
-    style.configure(
-        "ToolbarText.TLabel",
-        background=COLORS["toolbar_bg"],
-        foreground=COLORS["muted_text"],
-        font=FONTS["toolbar_text"]
-    )
-
-    style.configure(
-        "PanelTitle.TLabel",
-        background=COLORS["panel_bg"],
-        foreground=COLORS["text"],
-        font=FONTS["panel_title"]
-    )
-
-    style.configure(
-        "PanelText.TLabel",
-        background=COLORS["panel_bg"],
-        foreground=COLORS["panel_text"],
-        font=FONTS["panel_text"]
-    )
-
-    style.configure(
-        "Info.TLabel",
-        background=COLORS["panel_bg"],
-        foreground=COLORS["info_text"],
-        font=FONTS["info"]
-    )
-
-    # --------------------------------------------------
-    # Helper Function for Colored Buttons
-    # --------------------------------------------------
-
-    def configure_colored_button(style_name, normal_color, hover_color, bold=False):
-        """
-        Create a colored ttk button style.
-
-        Parameters:
-            style_name:
-                Name of the ttk style.
-
-            normal_color:
-                Default button color.
-
-            hover_color:
-                Button color when active or pressed.
-
-            bold:
-                Whether to use bold button font.
-        """
-
-        style.configure(
-            style_name,
-            font=FONTS["button_bold"] if bold else FONTS["button"],
-            padding=(6, 4),
-            foreground=COLORS["text"],
-            background=normal_color,
-            borderwidth=0,
-            focusthickness=0
-        )
-
-        style.map(
-            style_name,
-            foreground=[
-                ("active", COLORS["text"]),
-                ("pressed", COLORS["text"])
-            ],
-            background=[
-                ("active", hover_color),
-                ("pressed", hover_color)
-            ]
-        )
-
-    # --------------------------------------------------
-    # Tracking Button Styles
-    # --------------------------------------------------
-
-    # Green Start Tracking button.
-    configure_colored_button(
-        "Start.TButton",
-        COLORS["start"],
-        COLORS["start_hover"],
-        bold=True
-    )
-
-    # Red Stop Tracking button.
-    configure_colored_button(
-        "Stop.TButton",
-        COLORS["stop"],
-        COLORS["stop_hover"],
-        bold=True
-    )
-
-    # --------------------------------------------------
-    # General Button Styles
-    # --------------------------------------------------
-
-    # Normal dark/blue tool button.
-    configure_colored_button(
-        "Tool.TButton",
-        COLORS["tool"],
-        COLORS["tool_hover"]
-    )
-
-    # Indigo settings/about toolbar buttons.
-    configure_colored_button(
-        "Settings.TButton",
-        COLORS["settings"],
-        COLORS["settings_hover"]
-    )
-
-    # Optional general primary button.
-    configure_colored_button(
-        "Primary.TButton",
-        COLORS["primary"],
-        COLORS["primary_hover"],
-        bold=True
-    )
-
-    # Optional general danger button.
-    configure_colored_button(
-        "Danger.TButton",
-        COLORS["danger"],
-        COLORS["danger_hover"],
-        bold=True
-    )
-
-    # Optional toolbar fallback button.
-    configure_colored_button(
-        "Toolbar.TButton",
-        COLORS["tool"],
-        COLORS["tool_hover"]
-    )
-
-    # --------------------------------------------------
-    # Combobox
-    # --------------------------------------------------
-
-    style.configure(
-        "TCombobox",
-        padding=3
-    )
-
-    style.configure(
-        "ThermalScale.TRadiobutton",
-        background=COLORS["panel_bg"],
-        foreground=COLORS["panel_text"],
-        font=FONTS["panel_text"],
-        padding=(1, 0)
-    )
-    style.map(
-        "ThermalScale.TRadiobutton",
-        background=[
-            ("active", COLORS["panel_bg"]),
-            ("disabled", COLORS["panel_bg"])
-        ],
-        foreground=[
-            ("active", COLORS["text"]),
-            ("disabled", COLORS["muted_text"])
-        ]
-    )
-
+    style = ttk.Style(root)
+    style.theme_use('clam')
+    root.configure(bg=COLORS['main_bg'])
+    for name, color in [('Main', 'main_bg'), ('Toolbar', 'toolbar_bg'), ('Panel', 'panel_bg'), ('SoftPanel', 'panel_bg_light')]:
+        style.configure(f'{name}.TFrame', background=COLORS[color])
+    for name, bg, fg, font in [('ToolbarTitle', 'toolbar_bg', 'text', 'toolbar_title'),
+            ('ToolbarText', 'toolbar_bg', 'muted_text', 'toolbar_text'),
+            ('PanelTitle', 'panel_bg', 'text', 'panel_title'),
+            ('PanelText', 'panel_bg', 'panel_text', 'panel_text'), ('Info', 'panel_bg', 'info_text', 'info')]:
+        style.configure(f'{name}.TLabel', background=COLORS[bg], foreground=COLORS[fg], font=FONTS[font])
+    style.configure('Number.TLabel', background=COLORS['preview_bg'], foreground=COLORS['accent'], font=('Arial', -30, 'bold'), padding=6)
+    for name, color, bold in [('Start','start',True), ('Stop','stop',True), ('Tool','tool',False),
+                              ('Settings','settings',False), ('Primary','primary',True), ('Danger','danger',True), ('Toolbar','tool',False)]:
+        style.configure(f'{name}.TButton', font=FONTS['button_bold' if bold else 'button'],
+                        padding=(12, 13), foreground=COLORS['text'], background=COLORS[color], borderwidth=0)
+        style.map(f'{name}.TButton', background=[('disabled', '#273244'), ('pressed', COLORS[color+'_hover']), ('active', COLORS[color+'_hover'])],
+                  foreground=[('disabled', COLORS['muted_text'])])
+    style.configure('Touch.TNotebook', background=COLORS['main_bg'], borderwidth=0, tabmargins=(0,0,0,5))
+    style.configure('Touch.TNotebook.Tab', font=FONTS['button_bold'], padding=(22,14), background=COLORS['tool'], foreground=COLORS['panel_text'])
+    style.map('Touch.TNotebook.Tab', padding=[('selected', (22,14))], background=[('selected', COLORS['primary'])], foreground=[('selected', COLORS['text'])])
+    style.configure('Vertical.TScrollbar', width=30, arrowsize=26)
+    style.configure('ThermalScale.TRadiobutton', font=FONTS['button'], padding=(12,13), background=COLORS['panel_bg'], foreground=COLORS['text'])
+    style.map('ThermalScale.TRadiobutton', foreground=[('disabled', COLORS['muted_text'])])
     return style
