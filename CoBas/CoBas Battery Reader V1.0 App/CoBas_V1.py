@@ -16,7 +16,7 @@ from pathlib import Path
 from tkinter import ttk
 from TouchUI import NumberControl, ask_number, dialogs as messagebox
 
-import sounddevice as sd
+from AudioDevices import list_audio_choices
 from About import show_about_window
 from Camera.thermal_camera import ThermalCamera
 from MMWave import MMWaveCaptureService
@@ -58,28 +58,37 @@ def battery_output_directory(base_dir, percentage):
 
 
 class AudioInputConfiguration:
-    """Store the microphone selection used by the chirp recorder."""
+    """Keep stable microphone and speaker selections for each chirp process."""
 
     def __init__(self):
         self.microphone_device_id = None
-        self.microphone_device_name = "System Default Microphone"
+        self.microphone_device_name = "Automatic USB microphone"
+        self.speaker_device_id = None
+        self.speaker_device_name = "Automatic USB speaker"
 
     @staticmethod
-    def get_input_microphones():
-        microphones = [{"id": None, "name": "System Default Microphone"}]
-        try:
-            for index, device in enumerate(sd.query_devices()):
-                if device.get("max_input_channels", 0) > 0:
-                    microphones.append(
-                        {"id": index, "name": device.get("name", f"Input {index}")}
-                    )
-        except (OSError, sd.PortAudioError) as error:
-            print(f"[WARNING] Could not list microphones: {error}")
-        return microphones
+    def _choices(kind):
+        label = "Automatic USB microphone" if kind == "input" else "Automatic USB speaker"
+        return [{"id": None, "name": label}] + [
+            {"id": item["selector"], "name": item["label"]}
+            for item in list_audio_choices(kind)
+        ]
+
+    @classmethod
+    def get_input_microphones(cls):
+        return cls._choices("input")
+
+    @classmethod
+    def get_output_speakers(cls):
+        return cls._choices("output")
 
     def set_microphone_device(self, device_id, device_name):
         self.microphone_device_id = device_id
         self.microphone_device_name = device_name
+
+    def set_speaker_device(self, device_id, device_name):
+        self.speaker_device_id = device_id
+        self.speaker_device_name = device_name
 
 
 class CoBasV1App:
@@ -342,7 +351,7 @@ class CoBasV1App:
     def build_system_panel(self, parent):
         info = ttk.Frame(parent, style="Panel.TFrame", padding=12)
         info.pack(fill="both", expand=True)
-        for attr in ("radar_info_label", "thermal_info_label", "microphone_info_label", "output_info_label", "rate_info_label"):
+        for attr in ("radar_info_label", "thermal_info_label", "microphone_info_label", "speaker_info_label", "output_info_label", "rate_info_label"):
             label = ttk.Label(info, style="PanelText.TLabel", wraplength=720)
             label.pack(anchor="w", pady=(0,6))
             setattr(self, attr, label)
@@ -394,6 +403,7 @@ class CoBasV1App:
         self.microphone_info_label.config(
             text=f"Mic: {self.audio.microphone_device_name}"
         )
+        self.speaker_info_label.config(text=f"Speaker: {self.audio.speaker_device_name}")
         self.output_info_label.config(text=f"Output: {self.captures_dir}/")
         self.rate_info_label.config(
             text=(
@@ -402,16 +412,18 @@ class CoBasV1App:
             )
         )
 
-    def apply_microphone_source_from_settings(self, device_id, device_name):
+    def apply_audio_sources_from_settings(self, microphone, speaker):
         if self.pulse_sequence_active:
             messagebox.showwarning(
                 "Capture Active",
-                "Stop tracking before changing the microphone.",
+                "Stop tracking before changing audio devices.",
             )
-            return
-        self.audio.set_microphone_device(device_id, device_name)
+            return False
+        self.audio.set_microphone_device(microphone["id"], microphone["name"])
+        self.audio.set_speaker_device(speaker["id"], speaker["name"])
         self.refresh_info_panel()
-        self.update_status(f"Status: Microphone set to {device_name}")
+        self.update_status("Status: Microphone and speaker settings updated")
+        return True
 
     def change_thermal_scale_mode(self):
         requested = self.thermal_scale_mode.get()
@@ -662,6 +674,8 @@ class CoBasV1App:
         ]
         if self.audio.microphone_device_id is not None:
             command.extend(["--input-device", str(self.audio.microphone_device_id)])
+        if self.audio.speaker_device_id is not None:
+            command.extend(["--output-device", str(self.audio.speaker_device_id)])
         return command, pulse_folder
 
     def get_pulse_recording_template(self):
@@ -692,6 +706,7 @@ class CoBasV1App:
             process = None
             completed = set()
             ready_received = False
+            audio_error = None
             start_result = {"started": False}
             start_result_event = threading.Event()
 
@@ -718,6 +733,8 @@ class CoBasV1App:
                     line = output_line.strip()
                     if line:
                         print(f"[CHIRP SEQUENCE] {line}")
+                    if line.startswith("AUDIO_ERROR "):
+                        audio_error = line[len("AUDIO_ERROR "):]
                     if line.startswith("SEQUENCE_READY"):
                         if ready_received:
                             raise RuntimeError("Pulse generator reported readiness twice")
@@ -751,7 +768,7 @@ class CoBasV1App:
                                 position_pulse, global_offset + position_pulse, path)
                 return_code = process.wait()
                 if return_code or not ready_received or len(completed) != pulse_count:
-                    publish(self.abort_capture, "Chirp playback or microphone recording failed")
+                    publish(self.abort_capture, audio_error or "Chirp playback or microphone recording failed")
                 else:
                     publish(self.handle_position_finished, start_token, position_number)
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:

@@ -10,12 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 
+from radar_ports import discover_radar_ports
 
-# Fixed hardware configuration. USB0 is the text command interface and USB1 is
-# the high-speed binary data interface exposed by the board's CP2105 bridge.
-# The application intentionally has no CLI arguments or external config file.
-CLI_PORT = "/dev/ttyUSB0"
-DATA_PORT = "/dev/ttyUSB1"
+# CP2105 interface 00 is control and interface 01 is binary data. Their paths
+# are discovered by USB identity on each connection, independent of socket.
 CLI_BAUD_RATE = 115_200
 DATA_BAUD_RATE = 921_600
 SERIAL_TIMEOUT_SECONDS = 0.25
@@ -287,6 +285,8 @@ class RadarUARTSource:
     def __init__(self) -> None:
         self._cli = None
         self._data = None
+        self.cli_port = ""
+        self.data_port = ""
 
     def __enter__(self) -> "RadarUARTSource":
         """Open both UARTs and apply every embedded command in order."""
@@ -297,16 +297,18 @@ class RadarUARTSource:
                 "PySerial is required. Install the folder's requirements.txt."
             ) from error
 
+        ports = discover_radar_ports()
+        self.cli_port, self.data_port = ports.cli_port, ports.data_port
         try:
             # USB1 is opened before sensorStart so the first binary frame is kept.
             self._data = serial.Serial(
-                DATA_PORT,
+                self.data_port,
                 DATA_BAUD_RATE,
                 timeout=SERIAL_TIMEOUT_SECONDS,
             )
             self._data.reset_input_buffer()
             self._cli = serial.Serial(
-                CLI_PORT,
+                self.cli_port,
                 CLI_BAUD_RATE,
                 timeout=0.1,
                 write_timeout=1.0,
@@ -318,7 +320,10 @@ class RadarUARTSource:
                 # already stopped; all other command errors are fatal.
                 self._send_command(command, allow_error=(command == "sensorStop"))
         except BaseException:
-            self.close(stop_sensor=False)
+            try:
+                self.close(stop_sensor=False)
+            except Exception:
+                pass  # Preserve the connection/configuration failure.
             raise
         return self
 
@@ -372,10 +377,14 @@ class RadarUARTSource:
                 self._send_command("sensorStop", allow_error=True)
             except BaseException:
                 pass
-        if self._cli is not None and self._cli.is_open:
-            self._cli.close()
-        if self._data is not None and self._data.is_open:
-            self._data.close()
+        cli, data = self._cli, self._data
+        self._cli = self._data = None
+        try:
+            if cli is not None and cli.is_open:
+                cli.close()
+        finally:
+            if data is not None and data.is_open:
+                data.close()
 
 
 class CSVSampleLogger:
@@ -441,13 +450,6 @@ def capture(
 ) -> CaptureResult:
     """Start the radar, decode USB1 complex I/Q frames, and log every sample."""
     log_path = log_path_for_name(log_name)
-    info = CaptureInfo(CLI_PORT, DATA_PORT, log_path)
-
-    # UI output is injected as callbacks so this module remains independent of
-    # terminal formatting or any future graphical interface.
-    if on_started is not None:
-        on_started(info)
-
     parser = MMWavePacketParser()
     frame_count = 0
     sample_count = 0
@@ -455,6 +457,9 @@ def capture(
 
     try:
         with RadarUARTSource() as source, CSVSampleLogger(log_path) as logger:
+            # Report the actual ports chosen for this connection.
+            if on_started is not None:
+                on_started(CaptureInfo(source.cli_port, source.data_port, log_path))
             first_frame_deadline = time.monotonic() + FIRST_IQ_FRAME_TIMEOUT_SECONDS
             while True:
                 chunk = source.read(READ_SIZE)

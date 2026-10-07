@@ -253,17 +253,61 @@ for number in (1, 2):
         self.assertEqual(file.read_bytes(), b'partial')
         self.assertEqual(self.app.track_button.configure.call_args.kwargs['state'], 'normal')
 
-    def test_missing_microphone_does_not_crash_apply(self):
+    def audio_window(self, input_selection=None, output_selection=None):
         window = object.__new__(settings.SettingsWindow)
-        window.app = SimpleNamespace(pulse_sequence_active=False)
-        window.selected_id = 999
-        window.microphones = [{'id': None, 'name': 'System default'}]
+        window.app = MagicMock(pulse_sequence_active=False)
+        window.selected = {'input': input_selection, 'output': output_selection}
+        window.devices = {
+            'input': [{'id': None, 'name': 'Automatic USB microphone'}],
+            'output': [{'id': None, 'name': 'Automatic USB speaker'}],
+        }
         window.dialog = MagicMock()
-        window.render = MagicMock()
+        window.refresh = MagicMock(return_value=True)
+        window.change_kind = MagicMock()
+        return window
+
+    def test_missing_microphone_does_not_crash_apply(self):
+        window = self.audio_window(input_selection='alsa:Missing:0')
         with patch.object(settings.dialogs, 'showwarning') as warning:
             window.apply()
         warning.assert_called_once()
         window.dialog.finish.assert_not_called()
+        window.app.apply_audio_sources_from_settings.assert_not_called()
+
+    def test_missing_speaker_does_not_partially_apply_audio_settings(self):
+        window = self.audio_window(output_selection='alsa:Missing:0')
+        with patch.object(settings.dialogs, 'showwarning') as warning:
+            window.apply()
+        warning.assert_called_once()
+        window.change_kind.assert_called_once_with('output')
+        window.dialog.finish.assert_not_called()
+        window.app.apply_audio_sources_from_settings.assert_not_called()
+
+    def test_audio_settings_block_changes_during_capture(self):
+        window = self.audio_window()
+        window.app.pulse_sequence_active = True
+        with patch.object(settings.dialogs, 'showwarning'):
+            window.apply()
+        window.refresh.assert_not_called()
+        window.app.apply_audio_sources_from_settings.assert_not_called()
+
+    def test_audio_settings_apply_both_devices_together(self):
+        window = self.audio_window()
+        window.apply()
+        window.app.apply_audio_sources_from_settings.assert_called_once_with(
+            window.devices['input'][0], window.devices['output'][0])
+        window.dialog.finish.assert_called_once_with(True)
+
+    def test_chirp_child_receives_stable_audio_selections(self):
+        self.app.audio = main.AudioInputConfiguration()
+        self.app.audio.set_microphone_device('alsa:Microphone:0', 'USB microphone')
+        self.app.audio.set_speaker_device('alsa:UACDemoV10:0', 'USB speaker')
+        self.app.base_dir = str(APP)
+        self.app.pulses_per_position = 2
+        self.app.get_pulse_recording_template = lambda: str(self.path / '{pulse}.wav')
+        command, folder = self.app.get_pulse_command()
+        self.assertEqual(command[command.index('--input-device') + 1], 'alsa:Microphone:0')
+        self.assertEqual(command[command.index('--output-device') + 1], 'alsa:UACDemoV10:0')
 
     def test_slow_thermal_worker_remains_tracked_after_stop(self):
         camera = object.__new__(thermal_gui.ThermalCamera)

@@ -4,28 +4,27 @@
 from __future__ import annotations
 
 import argparse
-import glob
+import sys
 import time
+from pathlib import Path
 
 import serial
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "CoBas MMWave Processing" / "Raw IQ Signals"))
+from radar_ports import discover_radar_ports
+
 
 def default_port() -> str:
-    matches = sorted(
-        glob.glob(
-            "/dev/serial/by-id/usb-Silicon_Labs_CP2105_Dual_USB_to_UART_"
-            "Bridge_Controller_*-if00-port0"
-        )
-    )
-    return matches[0] if matches else "/dev/ttyUSB0"
+    return discover_radar_ports().cli_port
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", help="TI mmWave configuration (.cfg)")
-    parser.add_argument("--port", default=default_port())
+    parser.add_argument("--port", help="Explicit control port; otherwise detect the CP2105 radar")
     parser.add_argument("--delay", type=float, default=0.05, help="seconds between commands")
     args = parser.parse_args()
+    port = args.port or default_port()
 
     with open(args.config, encoding="utf-8") as stream:
         commands = [
@@ -34,7 +33,7 @@ def main() -> int:
             if line.strip() and not line.lstrip().startswith("%")
         ]
 
-    with serial.Serial(args.port, 115200, timeout=0.25, write_timeout=1) as uart:
+    with serial.Serial(port, 115200, timeout=0.25, write_timeout=1) as uart:
         uart.reset_input_buffer()
         for command in commands:
             print(f"> {command}")

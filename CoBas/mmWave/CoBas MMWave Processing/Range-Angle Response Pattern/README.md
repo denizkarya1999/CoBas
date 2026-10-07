@@ -80,7 +80,7 @@ The Raw IQ log, Range-Angle log, and clean spectrogram frames remain one
 continuous session with the same filenames, folder, frame format, frame rate,
 and sequential frame naming. All three stop automatically when the countdown
 reaches zero; the Stop button can end them early. Close other programs using
-`/dev/ttyUSB0` or `/dev/ttyUSB1` before starting it because serial ports allow
+either of the radar's control/data UARTs before starting it because serial ports allow
 only one owner at a time.
 
 ## Session logs

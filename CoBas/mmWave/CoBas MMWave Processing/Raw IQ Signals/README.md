@@ -5,19 +5,30 @@ complex range-bin symbols from the SDK binary stream on USB1, displays selected
 samples in the terminal, and records every sample in a named CSV under the
 `Logs` folder.
 
-## Fixed configuration
+## USB connection and configuration
 
 All values and the complete radar profile are embedded in `iq_logic.py`:
 
 ```text
-CLI/control: /dev/ttyUSB0 at 115200 baud
-Binary data: /dev/ttyUSB1 at 921600 baud
+CLI/control: CP2105 USB interface 00 at 115200 baud
+Binary data: CP2105 USB interface 01 at 921600 baud
 Range bins: 64
 Frame period: 120 ms
 Sample layout: signed int16 imaginary, then signed int16 real
 ```
 
-There are no command-line arguments or external configuration files.
+Connect the radar to any USB socket. At each start, the app detects the
+Silicon Labs CP2105 bridge (USB ID `10c4:ea70`) and pairs the control and data
+interfaces from the same physical board. It prefers `/dev/serial/by-id/`
+paths when available and also works with changing `ttyUSB` numbers. It never
+guesses a port from its number or probes unrelated serial devices.
+
+With multiple radar boards connected, set `COBAS_RADAR_SERIAL` to the USB
+serial number of the board to use. For an explicit port assignment, set both
+`COBAS_RADAR_CLI_PORT` and `COBAS_RADAR_DATA_PORT` to the control and data paths.
+Clear both to restore automatic detection. Stop tracking before moving the
+cable, reconnect it, then start tracking again. A disconnect during recording
+still stops that recording; reconnecting does not silently resume it.
 
 ## Run
 
@@ -74,3 +85,4 @@ still requires LVDS/DCA1000 or different radar firmware.
 
 - `start_raw_iq_logger.py`: terminal interface and application entry point.
 - `iq_logic.py`: hard-coded radar profile, UART control, TLV parsing, and CSV.
+- `radar_ports.py`: USB identity and interface pairing on each connection.

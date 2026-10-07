@@ -16,12 +16,14 @@ SAMPLE_RATE = 48_000
 PULSE_DURATION_SECONDS = 2.0
 START_FREQUENCY = 15_000.0
 END_FREQUENCY = 19_200.0
-# Verified through duplex capture playback at 100% USB speaker volume.
-# Keep 2.5 dB of digital headroom; higher drive distorted on this speaker.
-AMPLITUDE = 0.75
+# Stronger drive for the UACDemo USB speaker; retain digital headroom.
+AMPLITUDE = 0.95
 FADE_MILLISECONDS = 5.0
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(SCRIPT_DIR))
+from AudioDevices import AudioDeviceError, resolve_audio_device
+
 INPUT_DIR = os.path.join(SCRIPT_DIR, "Inputs")
 OUTPUT_PATH = os.path.join(INPUT_DIR, "2_second_pulse.wav")
 
@@ -104,14 +106,25 @@ def generate_pulse():
     return signal
 
 
-def play_pulse(signal=None, rate=SAMPLE_RATE):
+def _playback_channels(signal, channels):
+    """Send the same mono chirp to every supported speaker channel."""
+    mono = np.asarray(signal, dtype=np.float32).reshape(-1, 1)
+    return np.repeat(mono, channels, axis=1)
+
+
+def play_pulse(signal=None, rate=SAMPLE_RATE, output_device=None):
     """Play one pulse without opening an input stream."""
     if signal is None:
         signal, rate = read_wav(OUTPUT_PATH)
 
+    output = resolve_audio_device("output", output_device, samplerate=rate)
+    playback = _playback_channels(signal, output.channels)
     try:
         playback_started_at = time.time()
-        sd.play(signal, samplerate=rate, blocking=False, latency="high")
+        sd.play(
+            playback, samplerate=rate, device=output.index,
+            blocking=False, latency="high",
+        )
         print(
             f"PLAYBACK_STARTED {playback_started_at:.9f}",
             flush=True,
@@ -126,6 +139,7 @@ def play_and_record_pulse(
     signal,
     recording_path,
     input_device=None,
+    output_device=None,
 ):
     """
     Play and record one pulse through a single duplex stream.
@@ -133,16 +147,18 @@ def play_and_record_pulse(
     sounddevice creates the input and output streams together, records exactly
     the number of samples in the pulse, and closes both when playback finishes.
     """
-    playback = np.asarray(signal, dtype=np.float32).reshape(-1, 1)
+    output = resolve_audio_device("output", output_device)
+    microphone = resolve_audio_device("input", input_device)
+    playback = _playback_channels(signal, output.channels)
 
     try:
         playback_started_at = time.time()
         recording = sd.playrec(
             playback,
             samplerate=SAMPLE_RATE,
-            channels=1,
+            channels=microphone.channels,
             dtype="float32",
-            device=(input_device, None),
+            device=(microphone.index, output.index),
             blocking=False,
             latency="high",
         )
@@ -151,7 +167,7 @@ def play_and_record_pulse(
             flush=True,
         )
         sd.wait()
-        write_wav(recording_path, recording.reshape(-1))
+        write_wav(recording_path, recording[:, 0])
         print(f"PULSE_FINISHED {recording_path}", flush=True)
     finally:
         sd.stop()
@@ -194,6 +210,7 @@ def play_and_record_pulse_sequence(
     pulse_count,
     input_device=None,
     wait_for_start=False,
+    output_device=None,
 ):
     """
     Play back-to-back pulses through one stream and save one WAV per pulse.
@@ -206,6 +223,8 @@ def play_and_record_pulse_sequence(
     if signal.size == 0:
         raise ValueError("The pulse signal cannot be empty.")
 
+    output = resolve_audio_device("output", output_device)
+    microphone = resolve_audio_device("input", input_device)
     recording_paths = get_sequence_recording_paths(
         recording_template,
         pulse_count,
@@ -245,8 +264,8 @@ def play_and_record_pulse_sequence(
             )
             outdata[
                 output_offset:output_offset + copy_count,
-                0,
-            ] = signal[pulse_offset:pulse_offset + copy_count]
+                :,
+            ] = signal[pulse_offset:pulse_offset + copy_count, np.newaxis]
             output_offset += copy_count
             sequence_position += copy_count
 
@@ -271,8 +290,8 @@ def play_and_record_pulse_sequence(
         samplerate=SAMPLE_RATE,
         blocksize=1024,
         dtype="float32",
-        channels=(1, 1),
-        device=(input_device, None),
+        channels=(microphone.channels, output.channels),
+        device=(microphone.index, output.index),
         latency="high",
         callback=callback,
         finished_callback=stream_finished.set,
@@ -425,9 +444,21 @@ def main():
     )
     parser.add_argument(
         "--input-device",
-        type=int,
         default=None,
-        help="sounddevice input-device index; defaults to the system input.",
+        help=(
+            "Microphone selector (alsa:card-id:pcm or name:device-name). "
+            "Defaults to automatic USB microphone selection. Legacy numeric "
+            "sounddevice indices are also accepted."
+        ),
+    )
+    parser.add_argument(
+        "--output-device",
+        default=None,
+        help=(
+            "Speaker selector (alsa:card-id:pcm or name:device-name). "
+            "Defaults to automatic USB speaker selection. Legacy numeric "
+            "sounddevice indices are also accepted."
+        ),
     )
     args = parser.parse_args()
 
@@ -436,7 +467,7 @@ def main():
         return
 
     if args.mode == "play-existing":
-        play_pulse()
+        play_pulse(output_device=args.output_device)
         return
 
     signal = generate_pulse()
@@ -453,7 +484,10 @@ def main():
                     args.count,
                     input_device=args.input_device,
                     wait_for_start=args.wait_for_start,
+                    output_device=args.output_device,
                 )
+            except AudioDeviceError:
+                raise
             except ValueError as exc:
                 parser.error(str(exc))
             return
@@ -472,11 +506,16 @@ def main():
             signal,
             args.record_output,
             input_device=args.input_device,
+            output_device=args.output_device,
         )
         return
 
-    play_pulse(signal)
+    play_pulse(signal, output_device=args.output_device)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (AudioDeviceError, sd.PortAudioError) as exc:
+        print(f"AUDIO_ERROR {exc}", file=sys.stderr, flush=True)
+        sys.exit(1)

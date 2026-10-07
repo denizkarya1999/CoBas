@@ -477,8 +477,9 @@ class MMWaveCaptureService:
             )
         return (
             f"No mmWave USB1 binary frames {phase}. Check radar power, firmware, "
-            "USB cable, /dev/ttyUSB0 and /dev/ttyUSB1 assignments, and serial "
-            "permissions."
+            "USB cable, and serial permissions. "
+            f"Control: {getattr(source, 'cli_port', 'auto-detected')}; "
+            f"data: {getattr(source, 'data_port', 'auto-detected')}."
         )
 
     def _wait_until_streaming(

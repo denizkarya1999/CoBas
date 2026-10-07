@@ -40,6 +40,14 @@ class RawIQFrameSource:
         self._is_open = False
 
     @property
+    def cli_port(self) -> str:
+        return self._uart.cli_port
+
+    @property
+    def data_port(self) -> str:
+        return self._uart.data_port
+
+    @property
     def malformed_packets(self) -> int:
         return self._parser.malformed_packets
 
