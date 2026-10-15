@@ -177,15 +177,21 @@ class AudioDeviceTests(unittest.TestCase):
             with self.assertRaisesRegex(audio.AudioDeviceError, "Could not refresh"):
                 audio.list_audio_choices("output")
 
-    def test_cue_is_a_short_faded_audible_tone(self):
+    def test_cue_is_a_short_faded_rising_audible_chirp(self):
         cue = pulse.build_audible_cue()
         self.assertEqual(cue.shape, (12000,))
         self.assertEqual(cue.dtype, np.float32)
         self.assertTrue(np.isfinite(cue).all())
         self.assertLessEqual(float(np.max(np.abs(cue))), 0.25)
         self.assertEqual((cue[0], cue[-1]), (0, 0))
-        peak = np.fft.rfftfreq(cue.size, 1 / 48000)[np.argmax(np.abs(np.fft.rfft(cue)))]
-        self.assertEqual(peak, 1000)
+        # Measure pitch at three points so a fixed beep or reversed sweep fails.
+        for center_seconds, expected_hz in ((.025, 1300), (.125, 2500), (.225, 3700)):
+            with self.subTest(center_seconds=center_seconds):
+                center = round(center_seconds * 48000)
+                segment = cue[center - 480:center + 480]
+                spectrum = np.abs(np.fft.rfft(segment * np.hanning(segment.size)))
+                peak = np.fft.rfftfreq(segment.size, 1 / 48000)[np.argmax(spectrum)]
+                self.assertAlmostEqual(peak, expected_hz, delta=60)
 
     def test_failed_cue_closes_output_without_starting_capture(self):
         self.sd.wait.side_effect = PortAudioError("speaker disconnected")

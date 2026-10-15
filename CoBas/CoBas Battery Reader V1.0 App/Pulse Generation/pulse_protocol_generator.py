@@ -20,8 +20,9 @@ END_FREQUENCY = 19_200.0
 AMPLITUDE = 0.95
 FADE_MILLISECONDS = 5.0
 
-# A separate cue confirms playback without changing the sensing waveform.
-CUE_FREQUENCY = 1_000.0
+# A separate audible chirp confirms playback before sensing starts.
+CUE_START_FREQUENCY = 1_000.0
+CUE_END_FREQUENCY = 4_000.0
 CUE_DURATION_SECONDS = 0.25
 CUE_AMPLITUDE = 0.25
 CUE_SETTLE_SECONDS = 0.20
@@ -119,10 +120,15 @@ def _playback_channels(signal, channels):
 
 
 def build_audible_cue():
-    """Build a short audible tone with smooth edges to prevent clicks."""
+    """Build a short 1–4 kHz rising chirp with smooth edges to prevent clicks."""
     samples = int(round(SAMPLE_RATE * CUE_DURATION_SECONDS))
     time_axis = np.arange(samples, dtype=np.float64) / SAMPLE_RATE
-    signal = (CUE_AMPLITUDE * np.sin(2 * np.pi * CUE_FREQUENCY * time_axis)).astype(np.float32)
+    sweep_rate = (CUE_END_FREQUENCY - CUE_START_FREQUENCY) / CUE_DURATION_SECONDS
+    phase = 2.0 * np.pi * (
+        CUE_START_FREQUENCY * time_axis
+        + 0.5 * sweep_rate * time_axis * time_axis
+    )
+    signal = (CUE_AMPLITUDE * np.sin(phase)).astype(np.float32)
     return apply_fade(signal, fade_milliseconds=10.0)
 
 
