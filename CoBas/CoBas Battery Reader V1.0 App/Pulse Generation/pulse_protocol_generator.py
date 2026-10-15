@@ -20,6 +20,12 @@ END_FREQUENCY = 19_200.0
 AMPLITUDE = 0.95
 FADE_MILLISECONDS = 5.0
 
+# A separate cue confirms playback without changing the sensing waveform.
+CUE_FREQUENCY = 1_000.0
+CUE_DURATION_SECONDS = 0.25
+CUE_AMPLITUDE = 0.25
+CUE_SETTLE_SECONDS = 0.20
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(SCRIPT_DIR))
 from AudioDevices import AudioDeviceError, resolve_audio_device
@@ -112,6 +118,29 @@ def _playback_channels(signal, channels):
     return np.repeat(mono, channels, axis=1)
 
 
+def build_audible_cue():
+    """Build a short audible tone with smooth edges to prevent clicks."""
+    samples = int(round(SAMPLE_RATE * CUE_DURATION_SECONDS))
+    time_axis = np.arange(samples, dtype=np.float64) / SAMPLE_RATE
+    signal = (CUE_AMPLITUDE * np.sin(2 * np.pi * CUE_FREQUENCY * time_axis)).astype(np.float32)
+    return apply_fade(signal, fade_milliseconds=10.0)
+
+
+def play_audible_cue(output):
+    """Finish and close the output-only cue before any recording starts."""
+    try:
+        sd.play(
+            _playback_channels(build_audible_cue(), output.channels),
+            samplerate=SAMPLE_RATE, device=output.index,
+            blocking=False, latency="high",
+        )
+        sd.wait()
+    finally:
+        sd.stop()
+    # Leave a short quiet gap before opening the sensing stream.
+    time.sleep(CUE_SETTLE_SECONDS)
+
+
 def play_pulse(signal=None, rate=SAMPLE_RATE, output_device=None):
     """Play one pulse without opening an input stream."""
     if signal is None:
@@ -119,6 +148,7 @@ def play_pulse(signal=None, rate=SAMPLE_RATE, output_device=None):
 
     output = resolve_audio_device("output", output_device, samplerate=rate)
     playback = _playback_channels(signal, output.channels)
+    play_audible_cue(output)
     try:
         playback_started_at = time.time()
         sd.play(
@@ -150,6 +180,7 @@ def play_and_record_pulse(
     output = resolve_audio_device("output", output_device)
     microphone = resolve_audio_device("input", input_device)
     playback = _playback_channels(signal, output.channels)
+    play_audible_cue(output)
 
     try:
         playback_started_at = time.time()
@@ -286,6 +317,9 @@ def play_and_record_pulse_sequence(
         if state["position"] >= total_samples:
             raise sd.CallbackStop
 
+    # Once per sequence, before SEQUENCE_READY lets CoBas start its sensors.
+    # Never insert cue samples between chirps or into their recorded WAVs.
+    play_audible_cue(output)
     stream = sd.Stream(
         samplerate=SAMPLE_RATE,
         blocksize=1024,
