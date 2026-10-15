@@ -177,31 +177,65 @@ class AudioDeviceTests(unittest.TestCase):
             with self.assertRaisesRegex(audio.AudioDeviceError, "Could not refresh"):
                 audio.list_audio_choices("output")
 
-    def test_cue_is_a_short_faded_rising_audible_chirp(self):
-        cue = pulse.build_audible_cue()
-        self.assertEqual(cue.shape, (12000,))
-        self.assertEqual(cue.dtype, np.float32)
-        self.assertTrue(np.isfinite(cue).all())
-        self.assertLessEqual(float(np.max(np.abs(cue))), 0.25)
-        self.assertEqual((cue[0], cue[-1]), (0, 0))
-        # Measure pitch at three points so a fixed beep or reversed sweep fails.
-        for center_seconds, expected_hz in ((.025, 1300), (.125, 2500), (.225, 3700)):
+    def test_playback_has_full_duration_rising_audible_chirp_without_mutating_reference(self):
+        signal = pulse.build_pulse()
+        reference = signal.copy()
+        playback = pulse.build_playback_pulse(signal)
+        self.assertEqual(playback.shape, (96000,))
+        self.assertEqual(playback.dtype, np.float32)
+        self.assertTrue(np.isfinite(playback).all())
+        self.assertLessEqual(float(np.max(np.abs(playback))), 0.95)
+        self.assertEqual((playback[0], playback[-1]), (0, 0))
+        np.testing.assert_array_equal(signal, reference)
+        self.assertEqual((pulse.START_FREQUENCY, pulse.END_FREQUENCY, pulse.AMPLITUDE), (15000, 19200, .95))
+        audible = playback - reference * (0.65 / 0.95)
+        # Check the start, middle, and end: a short cue, beep, or reversed sweep fails.
+        for center_seconds, expected_hz in ((.1, 1150), (1.0, 2500), (1.9, 3850)):
             with self.subTest(center_seconds=center_seconds):
                 center = round(center_seconds * 48000)
-                segment = cue[center - 480:center + 480]
+                segment = audible[center - 480:center + 480]
                 spectrum = np.abs(np.fft.rfft(segment * np.hanning(segment.size)))
                 peak = np.fft.rfftfreq(segment.size, 1 / 48000)[np.argmax(spectrum)]
                 self.assertAlmostEqual(peak, expected_hz, delta=60)
+                self.assertAlmostEqual(float(np.sqrt(np.mean(segment ** 2))), .30 / np.sqrt(2), delta=.005)
 
-    def test_failed_cue_closes_output_without_starting_capture(self):
+    def test_playback_uses_requested_rate_for_pitch_and_ten_millisecond_fades(self):
+        rate = 44100
+        audible = pulse.build_playback_pulse(np.zeros(2 * rate, dtype=np.float32), rate=rate)
+        self.assertEqual(audible.shape, (88200,))
+        self.assertEqual((audible[0], audible[-1]), (0, 0))
+        center = rate
+        segment = audible[center - 441:center + 441]
+        spectrum = np.abs(np.fft.rfft(segment * np.hanning(segment.size)))
+        peak = np.fft.rfftfreq(segment.size, 1 / rate)[np.argmax(spectrum)]
+        self.assertAlmostEqual(peak, 2500, delta=50)
+        # Halfway through the 10 ms fade, a raised-cosine window is half level.
+        halfway = 220
+        for index in (halfway, len(audible) - halfway - 1):
+            time_seconds = index / rate
+            raw_sample = .30 * np.sin(2 * np.pi * (1000 * time_seconds + 750 * time_seconds ** 2))
+            self.assertAlmostEqual(float(audible[index]), raw_sample * .5, delta=1e-6)
+
+    def test_playback_leaves_headroom_for_full_scale_input(self):
+        for level in (-1.0, 1.0):
+            with self.subTest(level=level):
+                signal = np.full(96000, level, dtype=np.float32)
+                playback = pulse.build_playback_pulse(signal)
+                self.assertLess(float(np.max(np.abs(playback))), 1.0)
+                np.testing.assert_array_equal(signal, np.full(96000, level, dtype=np.float32))
+
+    def test_failed_capture_stops_audio_without_writing_a_recording(self):
         self.sd.wait.side_effect = PortAudioError("speaker disconnected")
-        with self.assertRaisesRegex(PortAudioError, "speaker disconnected"):
-            pulse.play_and_record_pulse(pulse.build_pulse(), "unused.wav")
+        with patch.object(pulse, "write_wav") as write_wav:
+            with self.assertRaisesRegex(PortAudioError, "speaker disconnected"):
+                pulse.play_and_record_pulse(pulse.build_pulse(), "unused.wav")
+        write_wav.assert_not_called()
         self.sd.stop.assert_called_once()
-        self.sd.playrec.assert_not_called()
+        self.sd.playrec.assert_called_once()
+        self.sd.play.assert_not_called()
         self.sleep.assert_not_called()
 
-    def test_generate_only_does_not_play_a_cue(self):
+    def test_generate_only_does_not_play_audio(self):
         with patch.object(sys, "argv", ["pulse", "--mode", "generate-only"]), \
                 patch.object(pulse, "generate_pulse"):
             pulse.main()
@@ -213,20 +247,25 @@ class AudioDeviceTests(unittest.TestCase):
         pulse.play_pulse(signal)
         args, kwargs = self.sd.play.call_args
         self.assertEqual(args[0].shape, (96000, 2))
-        np.testing.assert_array_equal(args[0][:, 0], signal)
-        np.testing.assert_array_equal(args[0][:, 1], signal)
+        expected = pulse.build_playback_pulse(signal)
+        np.testing.assert_array_equal(args[0][:, 0], expected)
+        np.testing.assert_array_equal(args[0][:, 1], expected)
         self.assertEqual(kwargs["samplerate"], 48000)
         self.assertEqual(kwargs["device"], 2)
-        self.assertEqual(self.sd.stop.call_count, 2)
-        self.assertEqual(self.sd.play.call_count, 2)
-        cue_args, cue_kwargs = self.sd.play.call_args_list[0]
-        self.assertEqual(cue_args[0].shape, (12000, 2))
-        self.assertEqual(cue_kwargs["device"], kwargs["device"])
-        np.testing.assert_array_equal(cue_args[0][:, 0], cue_args[0][:, 1])
+        self.sd.stop.assert_called_once()
+        self.sd.play.assert_called_once()
         self.assertEqual([c[0] for c in self.calls.mock_calls],
-                         ["play", "wait", "stop", "sleep", "play", "wait", "stop"])
-        self.sleep.assert_called_once_with(0.20)
-        self.assertEqual((pulse.START_FREQUENCY, pulse.END_FREQUENCY, pulse.AMPLITUDE), (15000, 19200, .95))
+                         ["play", "wait", "stop"])
+        self.sleep.assert_not_called()
+
+    def test_play_uses_full_duration_audible_mix_at_44100_hz(self):
+        signal = np.zeros(88200, dtype=np.float32)
+        pulse.play_pulse(signal, rate=44100)
+        args, kwargs = self.sd.play.call_args
+        self.assertEqual(kwargs["samplerate"], 44100)
+        self.assertEqual(args[0].shape, (88200, 2))
+        np.testing.assert_array_equal(args[0][:, 0], pulse.build_playback_pulse(signal, rate=44100))
+        self.sd.play.assert_called_once()
 
     def test_duplex_uses_separate_devices_and_writes_mono_from_stereo_capture(self):
         self.sd.check_input_settings.side_effect = [PortAudioError("stereo required"), None]
@@ -240,10 +279,15 @@ class AudioDeviceTests(unittest.TestCase):
                 np.testing.assert_array_equal(samples, np.full(96000, 4096))
         args, kwargs = self.sd.playrec.call_args
         self.assertEqual(args[0].shape, (96000, 2))
+        expected = pulse.build_playback_pulse(pulse.build_pulse())
+        np.testing.assert_array_equal(args[0][:, 0], expected)
+        np.testing.assert_array_equal(args[0][:, 1], expected)
         self.assertEqual(kwargs["device"], (1, 2))
         self.assertEqual(kwargs["channels"], 2)
         self.assertEqual([c[0] for c in self.calls.mock_calls],
-                         ["play", "wait", "stop", "sleep", "playrec", "wait", "stop"])
+                         ["playrec", "wait", "stop"])
+        self.sd.play.assert_not_called()
+        self.sleep.assert_not_called()
 
     def test_sequence_preserves_stereo_pulses_and_exact_mono_recordings(self):
         captured = {}
@@ -256,7 +300,7 @@ class AudioDeviceTests(unittest.TestCase):
             def __init__(self, **kwargs):
                 calls.stream_created()
                 self_before = [c[0] for c in calls.mock_calls]
-                assert self_before == ["play", "wait", "stop", "sleep", "stream_created"]
+                assert self_before == ["stream_created"]
                 assert "SEQUENCE_READY" not in output_log.getvalue()
                 captured.update(kwargs)
                 captured["output"] = []
@@ -284,20 +328,24 @@ class AudioDeviceTests(unittest.TestCase):
         self.sd.Stream = FakeStream
         signal = pulse.build_pulse()
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(sys, "stdin", io.StringIO("START\n")), patch.object(sys, "stdout", output_log):
+            with patch.object(sys, "stdin", io.StringIO("START\n")), patch.object(sys, "stdout", output_log), \
+                    patch.object(pulse, "build_playback_pulse", wraps=pulse.build_playback_pulse) as mix:
                 pulse.play_and_record_pulse_sequence(signal, str(Path(directory) / "pulse_{pulse}.wav"), 2,
                                                     wait_for_start=True)
+            mix.assert_called_once()
             for number in (1, 2):
                 with wave.open(str(Path(directory) / f"pulse_{number}.wav"), "rb") as recorded:
                     self.assertEqual((recorded.getnchannels(), recorded.getframerate(), recorded.getnframes()), (1, 48000, 96000))
-        self.sd.play.assert_called_once()
+        self.sd.play.assert_not_called()
+        self.sd.playrec.assert_not_called()
+        self.sleep.assert_not_called()
         self.assertEqual([c[0] for c in calls.mock_calls],
-                         ["play", "wait", "stop", "sleep", "stream_created", "stream_started"])
+                         ["stream_created", "stream_started"])
         self.assertEqual(captured["device"], (1, 2))
         self.assertEqual(captured["channels"], (1, 2))
         self.assertTrue(captured["closed"])
         playback = np.concatenate(captured["output"])
-        expected = np.tile(signal, 2)
+        expected = np.tile(pulse.build_playback_pulse(signal), 2)
         np.testing.assert_array_equal(playback[:192000, 0], expected)
         np.testing.assert_array_equal(playback[:192000, 1], expected)
         self.assertTrue(np.all(playback[192000:] == 0))

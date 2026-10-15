@@ -16,16 +16,16 @@ SAMPLE_RATE = 48_000
 PULSE_DURATION_SECONDS = 2.0
 START_FREQUENCY = 15_000.0
 END_FREQUENCY = 19_200.0
-# Stronger drive for the UACDemo USB speaker; retain digital headroom.
+# Sensing reference level; playback reserves room for the audible sweep below.
 AMPLITUDE = 0.95
 FADE_MILLISECONDS = 5.0
 
-# A separate audible chirp confirms playback before sensing starts.
-CUE_START_FREQUENCY = 1_000.0
-CUE_END_FREQUENCY = 4_000.0
-CUE_DURATION_SECONDS = 0.25
-CUE_AMPLITUDE = 0.25
-CUE_SETTLE_SECONDS = 0.20
+# Mix an audible sweep into every pulse for its entire duration.
+# Reserve headroom: 0.65 sensing + 0.30 audible stays below full scale.
+AUDIBLE_START_FREQUENCY = 1_000.0
+AUDIBLE_END_FREQUENCY = 4_000.0
+AUDIBLE_AMPLITUDE = 0.30
+SENSING_PLAYBACK_GAIN = 0.65 / AMPLITUDE
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(SCRIPT_DIR))
@@ -35,10 +35,10 @@ INPUT_DIR = os.path.join(SCRIPT_DIR, "Inputs")
 OUTPUT_PATH = os.path.join(INPUT_DIR, "2_second_pulse.wav")
 
 
-def apply_fade(signal, fade_milliseconds=FADE_MILLISECONDS):
+def apply_fade(signal, fade_milliseconds=FADE_MILLISECONDS, rate=SAMPLE_RATE):
     """Apply smooth raised-cosine edges without adding broadband clicks."""
     fade_samples = int(
-        round(fade_milliseconds * 1e-3 * SAMPLE_RATE)
+        round(fade_milliseconds * 1e-3 * rate)
     )
 
     if fade_samples == 0 or 2 * fade_samples >= signal.size:
@@ -119,32 +119,26 @@ def _playback_channels(signal, channels):
     return np.repeat(mono, channels, axis=1)
 
 
-def build_audible_cue():
-    """Build a short 1–4 kHz rising chirp with smooth edges to prevent clicks."""
-    samples = int(round(SAMPLE_RATE * CUE_DURATION_SECONDS))
-    time_axis = np.arange(samples, dtype=np.float64) / SAMPLE_RATE
-    sweep_rate = (CUE_END_FREQUENCY - CUE_START_FREQUENCY) / CUE_DURATION_SECONDS
+def build_playback_pulse(signal, rate=SAMPLE_RATE):
+    """Mix a 1–4 kHz audible sweep over the full sensing pulse.
+
+    The generated sensing reference stays unchanged. Playback reduces its
+    level to leave room for the audible sweep, which is also picked up by the
+    microphone. No samples or setup sounds are added to the capture sequence.
+    """
+    signal = np.asarray(signal, dtype=np.float32).reshape(-1)
+    if signal.size == 0:
+        raise ValueError("The pulse signal cannot be empty.")
+    time_axis = np.arange(signal.size, dtype=np.float64) / rate
+    duration = signal.size / rate
+    sweep_rate = (AUDIBLE_END_FREQUENCY - AUDIBLE_START_FREQUENCY) / duration
     phase = 2.0 * np.pi * (
-        CUE_START_FREQUENCY * time_axis
+        AUDIBLE_START_FREQUENCY * time_axis
         + 0.5 * sweep_rate * time_axis * time_axis
     )
-    signal = (CUE_AMPLITUDE * np.sin(phase)).astype(np.float32)
-    return apply_fade(signal, fade_milliseconds=10.0)
-
-
-def play_audible_cue(output):
-    """Finish and close the output-only cue before any recording starts."""
-    try:
-        sd.play(
-            _playback_channels(build_audible_cue(), output.channels),
-            samplerate=SAMPLE_RATE, device=output.index,
-            blocking=False, latency="high",
-        )
-        sd.wait()
-    finally:
-        sd.stop()
-    # Leave a short quiet gap before opening the sensing stream.
-    time.sleep(CUE_SETTLE_SECONDS)
+    audible = (AUDIBLE_AMPLITUDE * np.sin(phase)).astype(np.float32)
+    audible = apply_fade(audible, fade_milliseconds=10.0, rate=rate)
+    return signal * np.float32(SENSING_PLAYBACK_GAIN) + audible
 
 
 def play_pulse(signal=None, rate=SAMPLE_RATE, output_device=None):
@@ -153,8 +147,7 @@ def play_pulse(signal=None, rate=SAMPLE_RATE, output_device=None):
         signal, rate = read_wav(OUTPUT_PATH)
 
     output = resolve_audio_device("output", output_device, samplerate=rate)
-    playback = _playback_channels(signal, output.channels)
-    play_audible_cue(output)
+    playback = _playback_channels(build_playback_pulse(signal, rate), output.channels)
     try:
         playback_started_at = time.time()
         sd.play(
@@ -185,8 +178,7 @@ def play_and_record_pulse(
     """
     output = resolve_audio_device("output", output_device)
     microphone = resolve_audio_device("input", input_device)
-    playback = _playback_channels(signal, output.channels)
-    play_audible_cue(output)
+    playback = _playback_channels(build_playback_pulse(signal), output.channels)
 
     try:
         playback_started_at = time.time()
@@ -256,9 +248,7 @@ def play_and_record_pulse_sequence(
     setup gaps that would otherwise extend an N-pulse sensor session beyond
     exactly N times the two-second pulse duration.
     """
-    signal = np.asarray(signal, dtype=np.float32).reshape(-1)
-    if signal.size == 0:
-        raise ValueError("The pulse signal cannot be empty.")
+    signal = build_playback_pulse(signal)
 
     output = resolve_audio_device("output", output_device)
     microphone = resolve_audio_device("input", input_device)
@@ -323,9 +313,6 @@ def play_and_record_pulse_sequence(
         if state["position"] >= total_samples:
             raise sd.CallbackStop
 
-    # Once per sequence, before SEQUENCE_READY lets CoBas start its sensors.
-    # Never insert cue samples between chirps or into their recorded WAVs.
-    play_audible_cue(output)
     stream = sd.Stream(
         samplerate=SAMPLE_RATE,
         blocksize=1024,
