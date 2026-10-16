@@ -71,7 +71,7 @@ class NumberDialog(TouchDialog):
         self.minimum, self.maximum, self.decimal = minimum, maximum, decimal
         self.value = tk.StringVar(value=str(initial))
         self.replace_next = True
-        self.error = tk.StringVar(value=f'Enter {minimum:g} to {maximum:g}' if decimal else f'Enter {minimum} to {maximum}')
+        self.error = tk.StringVar(value=f'Enter {self.range_description()}')
         ttk.Label(self.body, textvariable=self.value, style='Number.TLabel', anchor='e').pack(fill='x')
         ttk.Label(self.body, textvariable=self.error, style='PanelText.TLabel').pack(fill='x', pady=4)
         keys = ttk.Frame(self.body, style='Panel.TFrame')
@@ -92,6 +92,13 @@ class NumberDialog(TouchDialog):
         ttk.Button(actions, text='Done', style='Primary.TButton', command=self.accept).pack(side='left', fill='x', expand=True, padx=(4,0))
         self.bind('<Key>', self.keyboard)
 
+    def range_description(self):
+        minimum = f'{self.minimum:g}' if self.decimal else str(self.minimum)
+        if self.maximum is None:
+            return f'{minimum} or more'
+        maximum = f'{self.maximum:g}' if self.decimal else str(self.maximum)
+        return f'{minimum} to {maximum}'
+
     def keyboard(self, event):
         if event.keysym in ('Return', 'KP_Enter'):
             self.accept()
@@ -111,16 +118,19 @@ class NumberDialog(TouchDialog):
         else:
             current = ('' if self.replace_next else current) + key
         self.replace_next = False
-        self.value.set(current[:10])
+        self.value.set(current if self.maximum is None else current[:10])
 
     def accept(self):
         try:
             text = self.value.get()
             value = float(text) if self.decimal else int(text)
-            if not math.isfinite(value) or not self.minimum <= value <= self.maximum:
+            if (self.decimal and not math.isfinite(value)) or value < self.minimum:
+                raise ValueError
+            if self.maximum is not None and value > self.maximum:
                 raise ValueError
         except ValueError:
-            self.error.set(f'Use a number from {self.minimum:g} to {self.maximum:g}.')
+            relation = 'of' if self.maximum is None else 'from'
+            self.error.set(f'Use a number {relation} {self.range_description()}.')
             return
         self.finish(value)
 
@@ -158,10 +168,14 @@ class NumberControl(ttk.Frame):
         if self.disabled:
             return
         try:
-            value = float(self.variable.get())
+            value = float(self.variable.get()) if self.decimal else int(self.variable.get())
+            if self.decimal and not math.isfinite(value):
+                raise ValueError
         except ValueError:
             value = self.minimum
-        value = max(self.minimum, min(self.maximum, value + amount))
+        value = max(self.minimum, value + amount)
+        if self.maximum is not None:
+            value = min(self.maximum, value)
         self.variable.set(f'{value:g}' if self.decimal else str(int(value)))
 
     def edit(self):

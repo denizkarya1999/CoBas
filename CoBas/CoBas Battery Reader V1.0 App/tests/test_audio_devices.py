@@ -359,6 +359,98 @@ class AudioDeviceTests(unittest.TestCase):
         self.assertEqual(playrec.call_args.kwargs["input_device"], "alsa:Microphone:0")
         self.assertEqual(playrec.call_args.kwargs["output_device"], "alsa:UACDemoV10:0")
 
+    def test_sequence_records_all_200_chirps_in_one_continuous_stream(self):
+        pulse_count = 200
+        signal = pulse.build_pulse()
+        playback = pulse.build_playback_pulse(signal)
+        pulse_samples = 96000
+        total_samples = pulse_count * pulse_samples
+        output_log = io.StringIO()
+        captured = {"samples": 0, "closed": False, "padding": 0}
+        test = self
+
+        def microphone_pcm(positions):
+            # A continuous non-chirp-aligned pattern exposes dropped, duplicated,
+            # or misplaced samples at callback and recording-file boundaries.
+            return (positions % 30001 - 15000).astype(np.int16)
+
+        class FakeStream:
+            active = False
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def start(self):
+                test.assertIn("SEQUENCE_READY 200 400.000", output_log.getvalue())
+                self.active = True
+                # Fewer than 512 callbacks fit the recording queue while this
+                # synchronous fake runs. Boundaries deliberately cross chirps.
+                frames = 65537
+                while self.active:
+                    start = captured["samples"]
+                    positions = np.arange(start, start + frames)
+                    indata = (microphone_pcm(positions).astype(np.float32) / 32767)[:, None]
+                    outdata = np.empty((frames, self.kwargs["channels"][1]), dtype=np.float32)
+                    stopped = False
+                    try:
+                        self.kwargs["callback"](indata, outdata, frames, None, None)
+                    except CallbackStop:
+                        stopped = True
+                    valid_frames = min(frames, total_samples - start)
+                    expected = playback[positions[:valid_frames] % pulse_samples]
+                    for channel in range(outdata.shape[1]):
+                        np.testing.assert_array_equal(outdata[:valid_frames, channel], expected)
+                    np.testing.assert_array_equal(outdata[valid_frames:], 0)
+                    captured["samples"] += valid_frames
+                    test.assertEqual(stopped, captured["samples"] == total_samples)
+                    if stopped:
+                        test.assertEqual(captured["samples"], total_samples)
+                        captured["padding"] = frames - valid_frames
+                        self.active = False
+                        self.kwargs["finished_callback"]()
+
+            def close(self):
+                captured["closed"] = True
+
+        self.sd.Stream = MagicMock(side_effect=FakeStream)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(sys, "stdout", output_log):
+                pulse.play_and_record_pulse_sequence(
+                    signal, str(Path(directory) / "pulse_{pulse}.wav"), pulse_count
+                )
+            self.assertEqual(len(list(Path(directory).glob("*.wav"))), pulse_count)
+            for number in range(1, pulse_count + 1):
+                with self.subTest(pulse=number):
+                    with wave.open(str(Path(directory) / f"pulse_{number}.wav"), "rb") as recorded:
+                        self.assertEqual(
+                            (recorded.getnchannels(), recorded.getsampwidth(),
+                             recorded.getframerate(), recorded.getnframes()),
+                            (1, 2, 48000, pulse_samples),
+                        )
+                        samples = np.frombuffer(recorded.readframes(pulse_samples), dtype=np.int16)
+                    positions = np.arange((number - 1) * pulse_samples, number * pulse_samples)
+                    np.testing.assert_array_equal(samples, microphone_pcm(positions))
+            events = [line.split() for line in output_log.getvalue().splitlines()]
+            started = [event for event in events if event[0] == "PLAYBACK_STARTED"]
+            finished = [event for event in events if event[0] == "PULSE_FINISHED"]
+            expected_numbers = list(range(1, pulse_count + 1))
+            self.assertEqual([int(event[1]) for event in started], expected_numbers)
+            self.assertEqual([int(event[1]) for event in finished], expected_numbers)
+            for number, event in enumerate(finished, start=1):
+                self.assertEqual(event[2], str(Path(directory) / f"pulse_{number}.wav"))
+            start_time = float(started[0][2])
+            for index, event in enumerate(started):
+                self.assertAlmostEqual(float(event[2]) - start_time, index * 2)
+        self.sd.Stream.assert_called_once()
+        self.assertEqual(self.sd.Stream.call_args.kwargs["device"], (1, 2))
+        self.assertEqual(self.sd.Stream.call_args.kwargs["channels"], (1, 2))
+        self.assertEqual(captured["samples"], total_samples)
+        self.assertGreater(captured["padding"], 0)
+        self.assertTrue(captured["closed"])
+        self.sd.play.assert_not_called()
+        self.sd.playrec.assert_not_called()
+        self.sleep.assert_not_called()
+
 
 class AlsaIdentityTests(unittest.TestCase):
     def test_alsa_id_and_usb_bus_are_read_without_fixed_card_number(self):

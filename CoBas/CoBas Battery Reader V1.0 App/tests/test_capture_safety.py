@@ -73,6 +73,71 @@ class CaptureSafetyTests(unittest.TestCase):
         self.app.start_tracking()
         self.assertEqual(self.app.tracking_start_token, 2)
 
+    def configure_capture_start(self, count):
+        self.app.pulse_count_text = SimpleNamespace(get=lambda: str(count))
+        self.app.mmwave_capture = SimpleNamespace(is_running=False)
+        self.app.capture_attempted = False
+        self.app.captures_dir = str(self.path)
+        self.app.base_dir = str(APP)
+        self.app.voices_dir = str(self.path)
+        self.app.current_recording_timestamp = None
+        self.app.audio = main.AudioInputConfiguration()
+        self.app.new_mmwave_capture = MagicMock(return_value=MagicMock())
+        for name in ('refresh_info_panel', 'start_thermal_feed', 'set_thermal_controls_state',
+                     'update_status', 'abort_capture', 'pulse_count_spinbox',
+                     'track_button', 'mmwave_label'):
+            setattr(self.app, name, MagicMock())
+
+    def test_requested_count_launches_one_complete_sequence_without_positions(self):
+        for count in (1, 7, 200, 1000):
+            with self.subTest(count=count):
+                self.app.pulse_sequence_active = False
+                self.configure_capture_start(count)
+                with patch.object(main.messagebox, 'showwarning') as warning:
+                    self.app.start_tracking()
+                warning.assert_not_called()
+                self.app.abort_capture.assert_not_called()
+                self.app.mmwave_capture.start.assert_called_once()
+                command, _ = self.app.get_pulse_command()
+                self.assertEqual(command[command.index('--count') + 1], str(count))
+                self.assertTrue(self.app.pulse_sequence_active)
+
+    def test_invalid_chirp_count_does_not_start_sensors(self):
+        for count in ('', '0', '-1', '1.5', 'abc'):
+            with self.subTest(count=count):
+                self.configure_capture_start(count)
+                with patch.object(main.messagebox, 'showwarning') as warning:
+                    self.app.start_tracking()
+                warning.assert_called_once()
+                self.app.start_thermal_feed.assert_not_called()
+                self.app.new_mmwave_capture.assert_not_called()
+                self.assertFalse(self.app.pulse_sequence_active)
+
+    def test_200_chirps_finish_without_repositioning_or_another_sequence(self):
+        self.app.requested_pulse_count = 200
+        self.app.pulse_recordings = [{'pulse_number': number} for number in range(1, 201)]
+        self.app.update_status = MagicMock()
+        self.app.finalize_position_segment = MagicMock(return_value={'position': 1})
+        self.app.finish_capture = MagicMock()
+        self.app.start_pulse_sequence = MagicMock()
+        with patch.object(main.messagebox, 'askokcancel') as reposition:
+            self.app.handle_position_finished(2, 1)
+        reposition.assert_not_called()
+        self.app.start_pulse_sequence.assert_not_called()
+        self.app.finalize_position_segment.assert_called_once_with(1)
+        self.app.finish_capture.assert_called_once_with('Completed 200 chirps')
+
+    def test_incomplete_sequence_is_not_reported_as_complete(self):
+        self.app.requested_pulse_count = 200
+        self.app.pulse_recordings = [{'pulse_number': number} for number in range(1, 200)]
+        self.app.update_status = MagicMock()
+        self.app.finalize_position_segment = MagicMock(return_value={'position': 1})
+        self.app.finish_capture = MagicMock()
+        self.app.abort_capture = MagicMock()
+        self.app.handle_position_finished(2, 1)
+        self.app.abort_capture.assert_called_once()
+        self.app.finish_capture.assert_not_called()
+
     def test_export_blocks_close(self):
         self.app.export_in_progress = True
         self.app.root = MagicMock()
@@ -158,7 +223,7 @@ for number in (1, 2):
     print(f'PULSE_FINISHED {number} {path}', flush=True)
 """)
         self.app.current_position_number = 1
-        self.app.pulses_per_position = 2
+        self.app.requested_pulse_count = 2
         self.app.pulse_sequence_active = True
         self.app.pulse_recordings = []
         self.app.pulse_process = None
@@ -303,7 +368,7 @@ for number in (1, 2):
         self.app.audio.set_microphone_device('alsa:Microphone:0', 'USB microphone')
         self.app.audio.set_speaker_device('alsa:UACDemoV10:0', 'USB speaker')
         self.app.base_dir = str(APP)
-        self.app.pulses_per_position = 2
+        self.app.requested_pulse_count = 2
         self.app.get_pulse_recording_template = lambda: str(self.path / '{pulse}.wav')
         command, folder = self.app.get_pulse_command()
         self.assertEqual(command[command.index('--input-device') + 1], 'alsa:Microphone:0')

@@ -177,8 +177,10 @@ shows the selected/input channel counts beside the peak measurement.
 
 The CoBas V1 battery reader imports this processing pipeline through its
 `MMWave/capture.py` bridge. CoBas remains the sole owner of chirp duration and
-battery-position prompts. The bridge only enables acquisition during an active
-position, pauses while the battery is moved, and stops after the final chirp.
+count. The selected number of two-second chirps runs continuously, with no
+battery-position setting or repositioning pauses. For example, 200 chirps run
+for 400 seconds. The chirp keypad has no fixed upper count limit. The bridge
+enables acquisition for the sequence and stops after the final chirp.
 It reports the radar as ready only after a valid complex I/Q frame arrives and
 aborts the coordinated capture if the USB1 stream stops. The integrated live
 preview includes calibrated angle, range, relative-power, peak, frame, and
@@ -195,6 +197,5 @@ mmWave Data/
 └── References/<battery>_Reference.jpg
 ```
 
-Frame numbering and both logs remain continuous across positions. No mmWave
-data is written during a position-change pause, and the integration does not
-create a spectrogram video.
+Frame numbering and both logs remain continuous throughout the sequence. The
+integration does not create a spectrogram video.

@@ -1,7 +1,7 @@
 """Externally controlled mmWave capture used by the CoBas battery workflow.
 
-CoBas owns chirp duration and battery-position transitions. This bridge opens
-and validates the radar stream, captures while CoBas marks a position active,
+CoBas owns chirp duration and the continuous capture sequence. This bridge opens
+and validates the radar stream, captures while CoBas marks the session active,
 and writes the Range-Angle application's logs, clean frames, and reference.
 """
 
@@ -400,7 +400,7 @@ class MMWaveCaptureService:
         self._publish(
             MMWaveCaptureEvent(
                 "status",
-                f"Capturing mmWave Position {self._position_number}",
+                "Capturing mmWave",
             )
         )
 
