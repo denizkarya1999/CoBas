@@ -127,8 +127,11 @@ class CoBasV1App:
         self.pulse_process_lock = threading.Lock()
 
         self.pulse_count_text = tk.StringVar(master=self.root, value="20")
+        self.position_mode_text = tk.StringVar(master=self.root, value="no-change")
+        self.position_count_text = tk.StringVar(master=self.root, value="4")
         self.requested_pulse_count = 1
-        # Keep a single segment for the existing sensor/export file format.
+        self.requested_position_count = 1
+        self.pulses_per_position = 1
         self.current_position_number = 1
         self.current_pulse_number = 0
         self.pulse_recordings = []
@@ -321,9 +324,59 @@ class CoBasV1App:
         thermal.grid(row=0, column=1, sticky="nsew")
         ttk.Label(controls, text="Capture", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
         self.pulse_count_spinbox = self.build_spinbox_row(controls, "Chirp count", self.pulse_count_text, None)
-        ttk.Label(controls, text="All chirps run continuously.", style="PanelText.TLabel").pack(anchor="w", pady=(5,0))
+        ttk.Label(controls, text="Position handling", style="PanelText.TLabel").pack(anchor="w", pady=(5,2))
+        mode_row = ttk.Frame(controls, style="Panel.TFrame")
+        mode_row.pack(fill="x")
+        self.position_mode_buttons = {}
+        for mode, label in (("no-change", "No Position Change"),
+                            ("position-based", "Position-based")):
+            button = ttk.Button(
+                mode_row,
+                text=label,
+                style="Primary.TButton" if mode == self.position_mode_text.get() else "Tool.TButton",
+                command=lambda value=mode: self.set_position_mode(value),
+            )
+            button.pack(side="left", fill="x", expand=True, padx=2)
+            self.position_mode_buttons[mode] = button
+        self.position_count_spinbox = self.build_spinbox_row(
+            controls, "Battery positions", self.position_count_text, 99
+        )
+        self.position_mode_hint = ttk.Label(controls, style="PanelText.TLabel", wraplength=350)
+        self.position_mode_hint.pack(anchor="w", pady=(3,0))
+        self.set_position_mode(self.position_mode_text.get())
         ttk.Label(controls, text="Tap a number to open the keypad.", style="PanelText.TLabel").pack(anchor="w", pady=(5,0))
         self.build_thermal_controls(thermal)
+
+    def set_position_mode(self, mode):
+        """Update the capture mode and keep its options clear on the touch UI."""
+        self.position_mode_text.set(mode)
+        for name, button in self.position_mode_buttons.items():
+            button.configure(style="Primary.TButton" if name == mode else "Tool.TButton")
+        position_based = mode == "position-based"
+        self.position_count_spinbox.configure(
+            state="normal" if position_based else "disabled"
+        )
+        self.position_mode_hint.configure(
+            text=(
+                "Capture pauses after each equal chirp group so you can change the battery position."
+                if position_based
+                else "All chirps run continuously without position prompts."
+            )
+        )
+
+    def set_capture_options_state(self, enabled):
+        """Enable or lock capture settings while sensor collection is active."""
+        state = "normal" if enabled else "disabled"
+        self.pulse_count_spinbox.configure(state=state)
+        for button in self.position_mode_buttons.values():
+            button.configure(state=state)
+        self.position_count_spinbox.configure(
+            state=(
+                "normal"
+                if enabled and self.position_mode_text.get() == "position-based"
+                else "disabled"
+            )
+        )
 
     def build_thermal_controls(self, parent):
         ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
@@ -584,6 +637,35 @@ class CoBasV1App:
             )
             return
 
+        position_based = self.position_mode_text.get() == "position-based"
+        position_count = 1
+        if position_based:
+            try:
+                position_count = int(self.position_count_text.get())
+                if position_count < 1:
+                    raise ValueError
+            except (TypeError, ValueError):
+                messagebox.showwarning(
+                    "Invalid Capture Settings",
+                    "Battery positions must be a whole number above zero.",
+                    parent=self.root,
+                )
+                return
+            if position_count > pulse_count:
+                messagebox.showwarning(
+                    "Too Many Positions",
+                    "The position count cannot be greater than the chirp count.",
+                    parent=self.root,
+                )
+                return
+            if pulse_count % position_count:
+                messagebox.showwarning(
+                    "Chirps Must Divide Evenly",
+                    "The chirp count must divide evenly across positions. For example, 200 chirps and 4 positions records 50 chirps per position.",
+                    parent=self.root,
+                )
+                return
+
         if self.capture_attempted:
             try:
                 self.prepare_capture_session()
@@ -594,6 +676,8 @@ class CoBasV1App:
         self.refresh_info_panel()
         self.tracking_start_token += 1
         self.requested_pulse_count = pulse_count
+        self.requested_position_count = position_count
+        self.pulses_per_position = pulse_count // position_count
         self.current_position_number = 1
         self.current_pulse_number = 0
         self.pulse_recordings = []
@@ -621,7 +705,7 @@ class CoBasV1App:
         except (OSError, RuntimeError) as error:
             self.abort_capture(f"Sensors could not start: {error}")
             return
-        self.pulse_count_spinbox.configure(state="disabled")
+        self.set_capture_options_state(False)
         self.set_thermal_controls_state("disabled")
         self.track_button.configure(
             text="Stop Tracking",
@@ -649,7 +733,7 @@ class CoBasV1App:
             "--mode",
             "generate-play-record",
             "--count",
-            str(self.requested_pulse_count),
+            str(self.pulses_per_position),
             "--record-output-template",
             os.path.abspath(self.get_pulse_recording_template()),
             "--wait-for-start",
@@ -675,7 +759,8 @@ class CoBasV1App:
         if start_token != self.tracking_start_token or not self.pulse_sequence_active:
             return
         position_number = self.current_position_number
-        pulse_count = self.requested_pulse_count
+        pulse_count = self.pulses_per_position
+        global_offset = (position_number - 1) * pulse_count
         self.current_recording_timestamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
         # Snapshot the command before a worker starts, so retries cannot change its paths.
         command, pulse_folder = self.get_pulse_command()
@@ -734,7 +819,7 @@ class CoBasV1App:
                             continue
                         position_pulse, started_at = int(parts[1]), float(parts[2])
                         publish(self.handle_pulse_started, start_token, position_number,
-                                position_pulse, position_pulse, started_at)
+                                position_pulse, global_offset + position_pulse, started_at)
                     elif line.startswith("PULSE_FINISHED"):
                         parts = line.split(maxsplit=2)
                         if len(parts) != 3:
@@ -746,7 +831,7 @@ class CoBasV1App:
                             raise RuntimeError("Pulse generator reported an invalid recording")
                         completed.add(position_pulse)
                         publish(self.register_pulse_recording, start_token, position_number,
-                                position_pulse, position_pulse, path)
+                                position_pulse, global_offset + position_pulse, path)
                 return_code = process.wait()
                 if return_code or not ready_received or len(completed) != pulse_count:
                     publish(self.abort_capture, audio_error or "Chirp playback or microphone recording failed")
@@ -804,9 +889,9 @@ class CoBasV1App:
             self.abort_capture(f"mmWave capture could not resume: {error}")
             return False
         self.is_preparing_tracking = False
-        target_duration = self.requested_pulse_count * PULSE_DURATION_SECONDS
+        target_duration = self.pulses_per_position * PULSE_DURATION_SECONDS
         self.update_status(
-            f"Status: {self.requested_pulse_count} chirps; "
+            f"Status: Position {position_number}/{self.requested_position_count}; "
             f"recording {target_duration:g} seconds",
             "● REC",
         )
@@ -826,7 +911,8 @@ class CoBasV1App:
             self.pulse_sequence_started_at = playback_started_at
         self.current_pulse_number = global_pulse_number
         self.update_status(
-            f"Status: Chirp {global_pulse_number}/{self.requested_pulse_count}",
+            f"Status: Position {position_number}/{self.requested_position_count}, "
+            f"chirp {position_pulse_number}/{self.pulses_per_position}",
             "● REC",
         )
 
@@ -853,6 +939,7 @@ class CoBasV1App:
             return
         self.record_timer_label.config(
             text=(
+                f"Position {position_number}/{self.requested_position_count} • "
                 f"Chirps {global_pulse_number}/{self.requested_pulse_count}"
             )
         )
@@ -975,16 +1062,44 @@ class CoBasV1App:
             return
         self.is_preparing_tracking = True
         self.update_status(
-            "Status: Finalizing capture...",
+            f"Status: Finalizing Position {position_number}...",
             "● WARNING",
         )
         segment = self.finalize_position_segment(position_number)
-        if segment is None or len(self.pulse_recordings) != self.requested_pulse_count:
+        if segment is None:
             self.abort_capture(
-                f"Capture did not produce complete data for all {self.requested_pulse_count} chirps"
+                f"Position {position_number} did not produce complete data"
             )
             return
-        self.finish_capture(f"Completed {len(self.pulse_recordings)} chirps")
+        if position_number >= self.requested_position_count:
+            self.finish_capture(
+                f"Completed {len(self.pulse_recordings)} chirps across "
+                f"{len(self.position_segments)} positions"
+            )
+            return
+
+        next_position = position_number + 1
+        should_continue = messagebox.askokcancel(
+            "Change Battery Position",
+            f"Position {position_number} is complete.\n\n"
+            f"Move the battery to Position {next_position}, then tap OK.\n\n"
+            "Capture is paused and repositioning time is excluded.",
+            parent=self.root,
+        )
+        if not should_continue:
+            self.finish_capture(
+                f"Stopped after Position {position_number}; captured "
+                f"{len(self.pulse_recordings)} chirps"
+            )
+            return
+        self.current_position_number = next_position
+        self.pulse_sequence_started_at = None
+        self.thermal_segment_started_at = None
+        self.update_status(
+            f"Status: Preparing Position {next_position}...",
+            "● STARTING",
+        )
+        self.start_pulse_sequence(start_token)
 
     def abort_capture(self, message):
         if not self.pulse_sequence_active:
@@ -1009,7 +1124,7 @@ class CoBasV1App:
             style="Start.TButton",
             state="normal",
         )
-        self.pulse_count_spinbox.configure(state="normal")
+        self.set_capture_options_state(True)
         self.set_thermal_controls_state("normal")
         self.update_status(
             f"Status: {message}; generating battery outputs",
