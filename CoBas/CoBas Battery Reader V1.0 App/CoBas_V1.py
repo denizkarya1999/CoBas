@@ -260,6 +260,7 @@ class CoBasV1App:
         self.build_preview_panel(preview)
         self.build_control_panel(setup)
         self.build_system_panel(system)
+        self.notebook.select(setup)
 
     def build_toolbar(self, parent):
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(8, 4))
