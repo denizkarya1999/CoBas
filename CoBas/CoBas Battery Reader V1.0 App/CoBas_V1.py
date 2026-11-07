@@ -423,13 +423,52 @@ class CoBasV1App:
         self.refresh_model_button()
 
     def build_inference_result(self, parent):
-        """Right column of the Inference setup tab: the read-out, then the thermal range."""
+        """Right column of the Inference setup tab: the read-out and a thermal-range button."""
         ttk.Label(parent, text="Result", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
         self.estimate_label = ttk.Label(parent, text=format_battery_level("—"), style="Number.TLabel", anchor="center")
         self.estimate_label.pack(fill="x")
         self.estimate_detail_label = ttk.Label(parent, text="No estimate yet.", style="PanelText.TLabel", wraplength=360)
-        self.estimate_detail_label.pack(anchor="w", pady=(4, 0))
-        self.build_thermal_controls(parent, compact=True)
+        self.estimate_detail_label.pack(anchor="w", pady=(4, 10))
+        # The range controls live in a dialog here; the column is too narrow for them.
+        self.thermal_min_entry = self.thermal_max_entry = None
+        self.thermal_range_button = ttk.Button(parent, style="Tool.TButton", command=self.open_thermal_range_dialog)
+        self.thermal_range_button.pack(fill="x")
+        self.refresh_thermal_range_button()
+
+    def refresh_thermal_range_button(self):
+        if not self.inference_mode:
+            return
+        low, high = self.thermal_camera.get_temperature_range()
+        mode = "Color" if self.thermal_camera.display_mode == "rgb" else "Grey"
+        self.thermal_range_button.configure(text=f"Thermal display: {low:g}–{high:g} °C · {mode}")
+
+    def open_thermal_range_dialog(self):
+        """Touch dialog with the same thermal controls Data Collection shows inline."""
+        from TouchUI import TouchDialog
+
+        dialog = TouchDialog(self.root, "Thermal display (°C)", width=560, height=330)
+        row = ttk.Frame(dialog.body, style="Panel.TFrame")
+        row.pack(fill="x")
+        for title, variable in (("Minimum", self.thermal_min_text), ("Maximum", self.thermal_max_text)):
+            ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
+            NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True).pack(fill="x", pady=(0, 4))
+        modes = ttk.Frame(dialog.body, style="Panel.TFrame")
+        modes.pack(fill="x", pady=(2, 0))
+        for label, value in (("Color", "rgb"), ("Grey", "grayscale")):
+            ttk.Radiobutton(modes, text=label, value=value, variable=self.thermal_scale_mode,
+                            command=self.change_thermal_scale_mode, style="ThermalScale.TRadiobutton").pack(side="left")
+        actions = ttk.Frame(dialog.body, style="Panel.TFrame")
+        actions.pack(fill="x", pady=(10, 0))
+
+        def apply_and_close():
+            self.configure_thermal_temperature_range()
+            self.refresh_thermal_range_button()
+            dialog.finish(True)
+
+        ttk.Button(actions, text="Cancel", style="Tool.TButton", command=dialog.cancel).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        ttk.Button(actions, text="Apply", style="Primary.TButton", command=apply_and_close).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        dialog.show()
+        self.refresh_thermal_range_button()
 
     def refresh_model_button(self):
         if not self.inference_mode:
@@ -540,25 +579,15 @@ class CoBasV1App:
         if self.inference_mode:
             self.model_button.configure(state=state)
 
-    def build_thermal_controls(self, parent, compact=False):
-        """Thermal range controls; ``compact`` puts min and max side by side (Inference tab)."""
-        ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(
-            anchor="w", pady=(8, 2) if compact else (0, 5)
-        )
+    def build_thermal_controls(self, parent):
+        ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
         row = ttk.Frame(parent, style="Panel.TFrame")
         row.pack(fill="x")
         for title, variable, attr in (("Minimum", self.thermal_min_text, "thermal_min_entry"),
                                       ("Maximum", self.thermal_max_text, "thermal_max_entry")):
-            if compact:
-                column = ttk.Frame(row, style="Panel.TFrame")
-                column.pack(side="left", fill="x", expand=True, padx=(0, 6))
-                ttk.Label(column, text=title, style="PanelText.TLabel").pack(anchor="w")
-                control = NumberControl(column, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
-                control.pack(fill="x")
-            else:
-                ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
-                control = NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
-                control.pack(fill="x", pady=(0,4))
+            ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
+            control = NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
+            control.pack(fill="x", pady=(0,4))
             setattr(self, attr, control)
         modes = ttk.Frame(parent, style="Panel.TFrame")
         modes.pack(fill="x", pady=(2,0))
@@ -681,7 +710,8 @@ class CoBasV1App:
             self.thermal_range_button,
             *self.thermal_scale_buttons,
         ):
-            widget.configure(state=state)
+            if widget is not None:
+                widget.configure(state=state)
 
     def start_thermal_feed(self):
         self.thermal_camera.start_camera()

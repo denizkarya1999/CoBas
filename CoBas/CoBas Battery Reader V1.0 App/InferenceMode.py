@@ -104,7 +104,10 @@ class ModelChoice:
 
     @property
     def short_label(self) -> str:
-        return f"{self.path.parent.name} · {FAMILY_LABELS.get(self.family, self.family)}"
+        """Compact form for a touch button: '1-1-1 · mmWave+Thermal+Voice'."""
+        ratio = self.path.parent.name.replace(" Fusions", "").replace(" - ", "-").strip()
+        family = FAMILY_LABELS.get(self.family, self.family).replace(" + ", "+")
+        return f"{ratio} · {family}"
 
 
 def discover_models(models_directory=DEFAULT_MODELS_DIRECTORY):
