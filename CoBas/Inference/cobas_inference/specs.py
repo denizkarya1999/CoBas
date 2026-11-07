@@ -33,14 +33,19 @@ PER_IMAGE_MINMAX = "per_image_minmax"  # each image min-max -> [0,1], weighted s
 DIV255 = "div255"  # each image /255, weighted sum, clip [0,1], x255
 RAW255 = "raw255"  # weighted sum on 0..255, clip, round
 
-# Tensor normalization after the 224 center crop (see preprocess.to_model_input).
+# Tensor normalization after the crop/resize (see preprocess.to_model_input).
 IMAGENET = "imagenet"  # ToTensor then Normalize(ImageNet mean/std)
 UNIT = "unit"  # ToTensor only (0..1)
+
+# How the fused (or single) image becomes the network input.
+RESIZE256_CROP224 = "resize256_crop224"  # fusion families: 256x256 image, center crop 224
+RESIZE224 = "resize224"  # voice standalone: Resize((224, 224)) bilinear, no crop
+NATIVE = "native"  # mmWave standalone: ToTensor on the raw frame, no resize
 
 
 @dataclass(frozen=True)
 class VoiceSpec:
-    """How a 2 s chirp recording becomes a 256x256 grayscale spectrogram image."""
+    """How a 2 s chirp recording becomes a spectrogram image."""
 
     fmin: float = 17_500.0
     fmax: float = 20_000.0
@@ -51,14 +56,20 @@ class VoiceSpec:
     # either the mel matrix before the LANCZOS resize or the finished 256x256
     # image after it; the two differ by at most one LSB, so keep them distinct.
     flip_stage: str = "before_resize"
+    # Fusion families save a grayscale 256x256 LANCZOS image; the voice
+    # standalone applies matplotlib's magma colormap and keeps the native
+    # n_mels x frames size (the network transform resizes it to 224x224).
+    colormap: str | None = None
+    save_size: int | None = 256
 
 
 @dataclass(frozen=True)
 class ImageSpec:
-    """How a raster modality (mmWave JPG or thermal PNG) becomes 256x256 RGB."""
+    """How a raster modality (mmWave JPG or thermal PNG) is prepared."""
 
-    # PIL filter used to reach 256x256 from the source size.
-    resize: str = "bilinear"  # "bilinear" | "lanczos"
+    # PIL filter used to reach 256x256 from the source size; "none" keeps the
+    # native frame (mmWave standalone).
+    resize: str = "bilinear"  # "bilinear" | "lanczos" | "none"
     # Thermal-Voice quirk: Resize(256) -> CenterCrop(224) was saved to disk and
     # the fusion step later resized that 224 image back to 256 with LANCZOS.
     pre_crop_224: bool = False
@@ -75,6 +86,7 @@ class FusionSpec:
     images: Mapping[str, ImageSpec] = field(default_factory=dict)
     voice: VoiceSpec | None = None
     weights_source: str = "registry default (equal)"
+    tensor_pipeline: str = RESIZE256_CROP224
 
     def with_weights(self, weights: Sequence[float], source: str) -> "FusionSpec":
         total = float(sum(weights))
@@ -97,13 +109,15 @@ class FusionSpec:
             "modalities=" + ":".join(self.modalities),
             "weights=" + ":".join(f"{w:.4f}" for w in self.weights) + f" ({self.weights_source})",
             f"fusion={self.fusion_norm}",
-            f"tensor={self.tensor_norm}",
+            f"tensor={self.tensor_norm} via {self.tensor_pipeline}",
         ]
         for name in self.modalities:
             if name == VOICE and self.voice is not None:
+                colour = f" {self.voice.colormap}" if self.voice.colormap else " gray"
+                size = f" {self.voice.save_size}px" if self.voice.save_size else " native"
                 parts.append(
                     f"voice=mel{self.voice.n_mels} {self.voice.fmin:g}-{self.voice.fmax:g}Hz "
-                    f"{self.voice.quantize} flip:{self.voice.flip_stage}"
+                    f"{self.voice.quantize} flip:{self.voice.flip_stage}{colour}{size}"
                 )
             elif name in self.images:
                 image = self.images[name]
@@ -160,9 +174,45 @@ THERMAL_VOICE = FusionSpec(
     voice=VoiceSpec(quantize="floor", flip_stage="after_resize"),
 )
 
+# --------------------------------------------------------------------------- #
+# Standalone (single-modality) models from the "Standalone" training notebooks
+# --------------------------------------------------------------------------- #
+
+THERMAL_ONLY = FusionSpec(
+    family="thermal",
+    model_filename="CoBas_thermal_model.pth",
+    modalities=(THERMAL,),
+    weights=(1.0,),
+    fusion_norm=RAW255,  # a single image passes through unchanged
+    tensor_norm=UNIT,  # Resize(256) -> CenterCrop(224) -> ToTensor
+    images={THERMAL: ImageSpec("bilinear")},
+)
+
+MMWAVE_ONLY = FusionSpec(
+    family="mmwave",
+    model_filename="CoBas_mmWave_model.pth",
+    modalities=(MMWAVE,),
+    weights=(1.0,),
+    fusion_norm=RAW255,
+    tensor_norm=UNIT,  # ToTensor only: the raw 724x256 range-angle frame
+    images={MMWAVE: ImageSpec("none")},
+    tensor_pipeline=NATIVE,
+)
+
+VOICE_ONLY = FusionSpec(
+    family="voice",
+    model_filename="CoBas_voice_reflection_recognition_model.pth",
+    modalities=(VOICE,),
+    weights=(1.0,),
+    fusion_norm=RAW255,
+    tensor_norm=UNIT,  # Resize((224, 224)) -> ToTensor on the magma spectrogram
+    voice=VoiceSpec(quantize="floor", flip_stage="before_resize", colormap="magma", save_size=None),
+    tensor_pipeline=RESIZE224,
+)
+
 REGISTRY: dict[str, FusionSpec] = {
     spec.model_filename.lower(): spec
-    for spec in (THREE_MODAL, MMWAVE_THERMAL, MMWAVE_VOICE, THERMAL_VOICE)
+    for spec in (THREE_MODAL, MMWAVE_THERMAL, MMWAVE_VOICE, THERMAL_VOICE, THERMAL_ONLY, MMWAVE_ONLY, VOICE_ONLY)
 }
 
 FAMILIES: dict[str, FusionSpec] = {spec.family: spec for spec in REGISTRY.values()}

@@ -20,8 +20,11 @@ from .specs import (
     IMAGENET_MEAN,
     IMAGENET_STD,
     MODEL_INPUT_SIZE,
+    NATIVE,
     PER_IMAGE_MINMAX,
     RAW255,
+    RESIZE224,
+    RESIZE256_CROP224,
     UNIT,
     VOICE,
     FusionSpec,
@@ -58,8 +61,14 @@ def center_crop(image: Image.Image, size: int) -> Image.Image:
 
 
 def modality_image_256(path: str | Path, spec: ImageSpec) -> np.ndarray:
-    """Raster modality -> uint8 [256, 256, 3], exactly as the notebooks saved it."""
+    """Raster modality -> uint8 [256, 256, 3], exactly as the notebooks saved it.
+
+    With ``spec.resize == "none"`` (mmWave standalone) the native frame is
+    returned unchanged, e.g. [256, 724, 3].
+    """
     image = load_rgb(path)
+    if spec.resize == "none":
+        return np.asarray(image, dtype=np.uint8)
     if spec.pre_crop_224:
         # Thermal-Voice notebook: Resize(256) -> CenterCrop(224) saved to disk,
         # then the fusion step reloaded it and resized to 256 with LANCZOS.
@@ -124,18 +133,50 @@ def spectrogram_to_uint8(db: np.ndarray, spec: VoiceSpec) -> np.ndarray:
     raise ValueError(f"Unknown quantize rule {spec.quantize!r}")
 
 
+def spectrogram_to_rgb(db: np.ndarray, colormap: str) -> np.ndarray:
+    """Voice standalone: per-clip min-max, matplotlib colormap, floor to uint8 RGB."""
+    import matplotlib
+
+    db = db.astype(np.float32, copy=False)
+    db_min, db_max = db.min(), db.max()  # np.float32 scalars, as in the notebook
+    if db_max > db_min:
+        unit = (db - db_min) / (db_max - db_min)
+    else:
+        unit = np.zeros_like(db)
+    try:
+        cmap = matplotlib.colormaps[colormap]
+    except AttributeError:  # older matplotlib
+        from matplotlib import cm
+
+        cmap = cm.get_cmap(colormap)
+    coloured = cmap(unit)[:, :, :3]
+    return (coloured * 255).astype(np.uint8)
+
+
 def voice_spectrogram_256(path: str | Path, spec: VoiceSpec) -> np.ndarray:
-    """WAV -> uint8 [256, 256] grayscale spectrogram with low frequencies at the bottom."""
+    """WAV -> spectrogram image with low frequencies at the bottom.
+
+    Fusion families: uint8 [256, 256] grayscale (LANCZOS). Voice standalone
+    (``colormap`` set, ``save_size`` None): uint8 [n_mels, frames, 3] at native size.
+    """
+    if spec.flip_stage not in ("before_resize", "after_resize"):
+        raise ValueError(f"Unknown flip stage {spec.flip_stage!r}")
     signal, sample_rate = load_audio(path)
-    matrix = spectrogram_to_uint8(mel_db(signal, sample_rate, spec), spec)
+    db = mel_db(signal, sample_rate, spec)
+    if spec.colormap:
+        matrix = spectrogram_to_rgb(db, spec.colormap)
+    else:
+        matrix = spectrogram_to_uint8(db, spec)
     if spec.flip_stage == "before_resize":
         matrix = np.flipud(matrix)
-    image = Image.fromarray(np.ascontiguousarray(matrix), mode="L")
-    image = image.resize((FUSED_SIZE, FUSED_SIZE), Image.Resampling.LANCZOS)
+    if spec.save_size is None:
+        if spec.flip_stage == "after_resize":
+            matrix = np.flipud(matrix)
+        return np.ascontiguousarray(matrix)
+    image = Image.fromarray(np.ascontiguousarray(matrix), mode="L" if matrix.ndim == 2 else "RGB")
+    image = image.resize((spec.save_size, spec.save_size), Image.Resampling.LANCZOS)
     if spec.flip_stage == "after_resize":
         image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
-    elif spec.flip_stage != "before_resize":
-        raise ValueError(f"Unknown flip stage {spec.flip_stage!r}")
     return np.asarray(image, dtype=np.uint8)
 
 
@@ -194,12 +235,29 @@ def fuse(arrays: Sequence[np.ndarray], weights: Sequence[float], mode: str) -> n
     raise ValueError(f"Unknown fusion mode {mode!r}")
 
 
-def to_model_input(fused: np.ndarray, tensor_norm: str) -> np.ndarray:
-    """Fused uint8 [256,256,3] -> float32 [1, 3, 224, 224] ready for the network."""
-    if fused.shape != (FUSED_SIZE, FUSED_SIZE, 3):
-        raise ValueError(f"Fused image must be 256x256x3, got {fused.shape}")
-    offset = (FUSED_SIZE - MODEL_INPUT_SIZE) // 2
-    crop = fused[offset : offset + MODEL_INPUT_SIZE, offset : offset + MODEL_INPUT_SIZE]
+def to_model_input(fused: np.ndarray, tensor_norm: str, pipeline: str = RESIZE256_CROP224) -> np.ndarray:
+    """Fused/single uint8 image [H, W, 3] -> float32 [1, 3, h, w] ready for the network.
+
+    - RESIZE256_CROP224: 256x256 input, center crop to 224 (fusion families)
+    - RESIZE224: torchvision Resize((224, 224)), bilinear (voice standalone)
+    - NATIVE: no resize or crop (mmWave standalone, 256x724)
+    """
+    if fused.ndim != 3 or fused.shape[2] != 3:
+        raise ValueError(f"Image must be HxWx3, got {fused.shape}")
+    if pipeline == RESIZE256_CROP224:
+        if fused.shape != (FUSED_SIZE, FUSED_SIZE, 3):
+            raise ValueError(f"Fused image must be 256x256x3, got {fused.shape}")
+        offset = (FUSED_SIZE - MODEL_INPUT_SIZE) // 2
+        crop = fused[offset : offset + MODEL_INPUT_SIZE, offset : offset + MODEL_INPUT_SIZE]
+    elif pipeline == RESIZE224:
+        image = Image.fromarray(np.ascontiguousarray(fused)).resize(
+            (MODEL_INPUT_SIZE, MODEL_INPUT_SIZE), Image.Resampling.BILINEAR
+        )
+        crop = np.asarray(image, dtype=np.uint8)
+    elif pipeline == NATIVE:
+        crop = fused
+    else:
+        raise ValueError(f"Unknown tensor pipeline {pipeline!r}")
     tensor = crop.astype(np.float32) / np.float32(255.0)
     tensor = np.ascontiguousarray(tensor.transpose(2, 0, 1))
     if tensor_norm == IMAGENET:
@@ -225,7 +283,8 @@ def modality_arrays(paths: Mapping[str, str | Path], spec: FusionSpec) -> list[n
         if name == VOICE:
             if spec.voice is None:
                 raise ValueError("Spec has no voice recipe")
-            arrays.append(gray_to_rgb(voice_spectrogram_256(path, spec.voice)))
+            spectrogram = voice_spectrogram_256(path, spec.voice)
+            arrays.append(gray_to_rgb(spectrogram) if spectrogram.ndim == 2 else spectrogram)
         else:
             arrays.append(modality_image_256(path, spec.images[name]))
     return arrays
@@ -236,4 +295,4 @@ def fused_image(paths: Mapping[str, str | Path], spec: FusionSpec) -> np.ndarray
 
 
 def model_input(paths: Mapping[str, str | Path], spec: FusionSpec) -> np.ndarray:
-    return to_model_input(fused_image(paths, spec), spec.tensor_norm)
+    return to_model_input(fused_image(paths, spec), spec.tensor_norm, spec.tensor_pipeline)

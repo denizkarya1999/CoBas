@@ -6,13 +6,30 @@ import pytest
 from cobas_inference import specs
 
 
-def test_registry_covers_the_four_checkpoint_names():
+def test_registry_covers_the_seven_checkpoint_names():
     assert set(specs.REGISTRY) == {
         "cobas_mmwave_thermal_voice_fusion_model.pth",
         "cobas_mmwave_thermal_fusion_model.pth",
         "cobas_mmwave_and_voice_fusion_model.pth",
         "cobas_thermal_and_voice_model.pth",
+        "cobas_thermal_model.pth",
+        "cobas_mmwave_model.pth",
+        "cobas_voice_reflection_recognition_model.pth",
     }
+
+
+def test_standalone_specs_are_single_modality():
+    thermal = specs.spec_for_model_file("Standalone/CoBas_thermal_model.pth")
+    mmwave = specs.spec_for_model_file("Standalone/CoBas_mmWave_model.pth")
+    voice = specs.spec_for_model_file("Standalone/CoBas_voice_reflection_recognition_model.pth")
+    assert thermal.modalities == ("thermal",) and thermal.tensor_pipeline == specs.RESIZE256_CROP224
+    assert mmwave.modalities == ("mmwave",) and mmwave.tensor_pipeline == specs.NATIVE
+    assert mmwave.images["mmwave"].resize == "none"
+    assert voice.modalities == ("voice",) and voice.tensor_pipeline == specs.RESIZE224
+    assert voice.voice.colormap == "magma" and voice.voice.save_size is None
+    # "Standalone" is not a ratio folder, so weights stay the single default.
+    resolved = specs.resolve_spec("models/Standalone/CoBas_thermal_model.pth", {"label_to_index": {"0%": 0}})
+    assert resolved.weights == (1.0,)
 
 
 def test_spec_lookup_accepts_onnx_name():

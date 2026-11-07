@@ -38,6 +38,9 @@ FAMILY_LABELS = {
     "mmwave_thermal": "mmWave + Thermal",
     "mmwave_voice": "mmWave + Voice",
     "thermal_voice": "Thermal + Voice",
+    "thermal": "Thermal only",
+    "mmwave": "mmWave only",
+    "voice": "Voice only",
 }
 
 if str(INFERENCE_PACKAGE_DIRECTORY) not in sys.path:
@@ -128,8 +131,8 @@ def discover_models(models_directory=DEFAULT_MODELS_DIRECTORY):
         family_label = FAMILY_LABELS.get(spec.family, spec.family)
         label = f"{path.parent.name} · {family_label} ({path.suffix[1:]})"
         choices.append(ModelChoice(path, spec.family, spec.modalities, label))
-    # Three-modal first, then by ratio folder name.
-    choices.sort(key=lambda choice: (len(choice.modalities) < 3, choice.path.parent.name, choice.family))
+    # Three-modal first, then two-modal, then standalone; within a group by folder name.
+    choices.sort(key=lambda choice: (-len(choice.modalities), choice.path.parent.name, choice.family))
     return choices
 
 

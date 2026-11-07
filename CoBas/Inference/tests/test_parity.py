@@ -65,6 +65,10 @@ def _assert_identical(
 
 # Allowance for the round-to-nearest spectrogram families (see _assert_identical).
 ULP_TOLERANCE = dict(tolerance=1, max_fraction_differing=0.0005)
+# The magma-coloured standalone spectrogram goes through a 256-entry colour
+# table, so the same last-bit difference moves one pixel by one table entry,
+# i.e. up to a few levels in a channel (observed: 1 pixel of 42,112, max 2).
+LUT_TOLERANCE = dict(tolerance=4, max_fraction_differing=0.0005)
 
 
 @pytest.fixture(scope="module")
@@ -155,6 +159,18 @@ class TestMmwaveVoice:
     def test_fused(self, raw_available):
         got = preprocess.fused_image(RAW_PATHS, self.spec)
         _assert_identical(got, _load(self.folder / "fused.png", "RGB"), "fused mmwave-voice", **ULP_TOLERANCE)
+
+
+# --------------------------------------------------------------------------- #
+# Voice standalone: magma-coloured spectrogram at native size, flipped
+# --------------------------------------------------------------------------- #
+
+def test_voice_standalone_magma_spectrogram(raw_available):
+    pytest.importorskip("matplotlib")
+    expected = _load(EXPECTED / "voice_standalone" / "spectrogram.png", "RGB")
+    got = preprocess.voice_spectrogram_256(RAW_PATHS[specs.VOICE], specs.VOICE_ONLY.voice)
+    assert got.ndim == 3 and got.shape[0] == 224
+    _assert_identical(got, expected, "voice standalone spectrogram", **LUT_TOLERANCE)
 
 
 # --------------------------------------------------------------------------- #

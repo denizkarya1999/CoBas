@@ -17,6 +17,9 @@ with the CoBas Portable on 2026-10-21 (`Session_20261021_183911_h0fwcc0u`).
     and `fused.png` from "1 - 1 Fusions / CoBas Thermal-Voice Fusion Dataset".
   - `mmwave_voice_1-1/` — `mmwave.png`, `voice.png` and `fused.png` from
     "1 - 1 Fusions / mmWave - Voice Fusion Dataset".
+  - `voice_standalone/spectrogram.png` — the Voice standalone notebook's
+    magma-coloured 224×188 spectrogram of the same recording, from
+    "CoBas Spectrogram Dataset / 100_ Percent".
 
 `tests/test_parity.py` regenerates each of these from `raw/` and requires a
 byte-for-byte match, with one documented exception: the round-to-nearest

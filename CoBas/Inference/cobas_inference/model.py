@@ -158,7 +158,8 @@ def export_onnx(
     kwargs: dict[str, Any] = dict(
         input_names=["input"],
         output_names=["logits"],
-        dynamic_axes={"input": {0: "batch"}, "logits": {0: "batch"}},
+        # Height/width stay dynamic: the mmWave standalone feeds 256x724 frames.
+        dynamic_axes={"input": {0: "batch", 2: "height", 3: "width"}, "logits": {0: "batch"}},
         opset_version=opset,
     )
     model.eval()

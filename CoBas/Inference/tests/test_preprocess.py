@@ -102,6 +102,34 @@ def test_to_model_input_shapes_and_normalization(rng):
     assert imagenet[0, 0, 0, 0] == pytest.approx(expected, abs=1e-5)
 
 
+def test_native_pipeline_keeps_frame_size(tmp_path, rng):
+    source = rng.integers(0, 256, size=(256, 724, 3), dtype=np.uint8)
+    path = _save_rgb(tmp_path / "frame.jpg", source)
+    native = preprocess.modality_image_256(path, specs.ImageSpec("none"))
+    assert native.shape == (256, 724, 3)
+    tensor = preprocess.to_model_input(native, specs.UNIT, specs.NATIVE)
+    assert tensor.shape == (1, 3, 256, 724)
+    assert tensor[0, 1, 5, 7] == pytest.approx(native[5, 7, 1] / 255.0)
+
+
+def test_resize224_pipeline_matches_torchvision_resize(rng):
+    image = rng.integers(0, 256, size=(224, 188, 3), dtype=np.uint8)  # native spectrogram shape
+    tensor = preprocess.to_model_input(image, specs.UNIT, specs.RESIZE224)
+    expected = np.asarray(Image.fromarray(image).resize((224, 224), Image.Resampling.BILINEAR)).astype(np.float32) / 255.0
+    assert tensor.shape == (1, 3, 224, 224)
+    np.testing.assert_allclose(tensor[0].transpose(1, 2, 0), expected, atol=1e-7)
+
+
+def test_spectrogram_to_rgb_uses_magma_lut():
+    matplotlib = pytest.importorskip("matplotlib")
+    db = np.linspace(-80.0, 0.0, 224 * 10, dtype=np.float32).reshape(224, 10)
+    rgb = preprocess.spectrogram_to_rgb(db, "magma")
+    assert rgb.shape == (224, 10, 3) and rgb.dtype == np.uint8
+    lut = matplotlib.colormaps["magma"]
+    np.testing.assert_array_equal(rgb[0, 0], (np.asarray(lut(0.0)[:3]) * 255).astype(np.uint8))
+    np.testing.assert_array_equal(rgb[-1, -1], (np.asarray(lut(1.0)[:3]) * 255).astype(np.uint8))
+
+
 def test_gray_to_rgb():
     gray = np.arange(256 * 256, dtype=np.uint8).reshape(256, 256)
     rgb = preprocess.gray_to_rgb(gray)

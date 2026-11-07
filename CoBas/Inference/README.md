@@ -91,6 +91,14 @@ capture, pulse and sensor code is untouched.
 | `CoBas_mmwave_thermal_fusion_model.pth` | mmWave, thermal | /255, weighted mean | 0–1 only |
 | `CoBas_mmwave_and_voice_fusion_model.pth` | mmWave, voice | raw 0–255 mean | 0–1 only |
 | `CoBas_thermal_and_voice_model.pth` | thermal, voice | raw 0–255 mean (thermal via a 224 crop) | 0–1 only |
+| `Standalone/CoBas_thermal_model.pth` | thermal | none (resize 256, crop 224) | 0–1 only |
+| `Standalone/CoBas_mmWave_model.pth` | mmWave | none (the raw 724×256 frame, no resize) | 0–1 only |
+| `Standalone/CoBas_voice_reflection_recognition_model.pth` | voice | none (magma-coloured spectrogram, resized to 224×224) | 0–1 only |
+
+The three standalone checkpoints on Drive sit under "CoBas Portable 11
+Batteries Outside with Random Positions Model/Standalone", but their training
+run metadata shows they were trained on the same "4 Positions" dataset as the
+fusion models (the notebooks' output path was updated after that run).
 
 `cobas_inference/specs.py` is the single source of truth for these recipes;
 `tests/test_parity.py` proves them against images the training notebooks saved
