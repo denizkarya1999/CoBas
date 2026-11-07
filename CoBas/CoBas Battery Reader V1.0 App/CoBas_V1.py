@@ -125,6 +125,9 @@ class CoBasV1App:
             self.battery_percentage = 0
             self.battery_output_name = "Inference"
             self.thermal_frame_prefix = "Thermal_Image_Inference_"
+            self.captures_dir = None
+            self.thermal_frames_staging_directory = None
+            self.remove_capture_directory()  # purge sessions a previous run left behind
         else:
             self.battery_percentage = self.request_battery_percentage()
             self.battery_output_name = battery_output_folder_name(self.battery_percentage)
@@ -291,7 +294,7 @@ class CoBasV1App:
         self.track_button.pack(side="right", padx=(10, 0))
         self.record_timer_label = ttk.Label(
             footer,
-            text="Estimate: —" if self.inference_mode else "Pulses: 0/20",
+            text=format_battery_level("—") if self.inference_mode else "Pulses: 0/20",
             style="PanelTitle.TLabel",
         )
         self.record_timer_label.pack(anchor="w")
@@ -378,7 +381,7 @@ class CoBasV1App:
         thermal.grid(row=0, column=1, sticky="nsew")
         if self.inference_mode:
             self.build_inference_controls(controls)
-            self.build_inference_result(thermal)
+            self.build_thermal_controls(thermal)
             return
         ttk.Label(controls, text="Capture", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
         self.pulse_count_spinbox = self.build_spinbox_row(controls, "Chirp count", self.pulse_count_text, None)
@@ -422,54 +425,6 @@ class CoBasV1App:
         ).pack(anchor="w", pady=(2, 0))
         self.refresh_model_button()
 
-    def build_inference_result(self, parent):
-        """Right column of the Inference setup tab: the read-out and a thermal-range button."""
-        ttk.Label(parent, text="Result", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
-        self.estimate_label = ttk.Label(parent, text=format_battery_level("—"), style="Number.TLabel", anchor="center")
-        self.estimate_label.pack(fill="x")
-        self.estimate_detail_label = ttk.Label(parent, text="No estimate yet.", style="PanelText.TLabel", wraplength=360)
-        self.estimate_detail_label.pack(anchor="w", pady=(4, 10))
-        # The range controls live in a dialog here; the column is too narrow for them.
-        self.thermal_min_entry = self.thermal_max_entry = None
-        self.thermal_range_button = ttk.Button(parent, style="Tool.TButton", command=self.open_thermal_range_dialog)
-        self.thermal_range_button.pack(fill="x")
-        self.refresh_thermal_range_button()
-
-    def refresh_thermal_range_button(self):
-        if not self.inference_mode:
-            return
-        low, high = self.thermal_camera.get_temperature_range()
-        mode = "Color" if self.thermal_camera.display_mode == "rgb" else "Grey"
-        self.thermal_range_button.configure(text=f"Thermal display: {low:g}–{high:g} °C · {mode}")
-
-    def open_thermal_range_dialog(self):
-        """Touch dialog with the same thermal controls Data Collection shows inline."""
-        from TouchUI import TouchDialog
-
-        dialog = TouchDialog(self.root, "Thermal display (°C)", width=560, height=330)
-        row = ttk.Frame(dialog.body, style="Panel.TFrame")
-        row.pack(fill="x")
-        for title, variable in (("Minimum", self.thermal_min_text), ("Maximum", self.thermal_max_text)):
-            ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
-            NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True).pack(fill="x", pady=(0, 4))
-        modes = ttk.Frame(dialog.body, style="Panel.TFrame")
-        modes.pack(fill="x", pady=(2, 0))
-        for label, value in (("Color", "rgb"), ("Grey", "grayscale")):
-            ttk.Radiobutton(modes, text=label, value=value, variable=self.thermal_scale_mode,
-                            command=self.change_thermal_scale_mode, style="ThermalScale.TRadiobutton").pack(side="left")
-        actions = ttk.Frame(dialog.body, style="Panel.TFrame")
-        actions.pack(fill="x", pady=(10, 0))
-
-        def apply_and_close():
-            self.configure_thermal_temperature_range()
-            self.refresh_thermal_range_button()
-            dialog.finish(True)
-
-        ttk.Button(actions, text="Cancel", style="Tool.TButton", command=dialog.cancel).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        ttk.Button(actions, text="Apply", style="Primary.TButton", command=apply_and_close).pack(side="left", fill="x", expand=True, padx=(4, 0))
-        dialog.show()
-        self.refresh_thermal_range_button()
-
     def refresh_model_button(self):
         if not self.inference_mode:
             return
@@ -501,27 +456,29 @@ class CoBasV1App:
         self.update_status(f"Status: Inference problem: {message}", "● WARNING")
 
     def handle_inference_result(self, result):
-        if result.token != self.tracking_start_token and not self.export_in_progress:
-            # A result from an earlier run; still worth showing, but not as live.
-            pass
-        self.estimate_label.configure(text=format_battery_level(result.vote_label))
-        self.estimate_detail_label.configure(text=format_detail(result))
+        """The result lives in the footer: 'Battery Level: N%' plus a detail line."""
         self.record_timer_label.configure(text=format_estimate(result))
-        self.notebook.select(1)
+        self.update_status(f"Status: {format_detail(result)}", "● LIVE")
 
-    def remove_capture_directory(self):
-        """Inference Mode keeps nothing: delete this session's capture folder."""
+    def remove_capture_directory(self, keep_current=False):
+        """Inference Mode keeps nothing: delete this session's folder and any stale ones."""
         self.remove_thermal_frame_staging_directory()
-        removed = False
-        if self.captures_dir and os.path.isdir(self.captures_dir):
-            shutil.rmtree(self.captures_dir, ignore_errors=True)
-            removed = not os.path.exists(self.captures_dir)
         parent = os.path.join(self.base_dir, "Captures", self.battery_output_name)
-        try:
-            if os.path.isdir(parent) and not os.listdir(parent):
-                os.rmdir(parent)
-        except OSError:
-            pass
+        current = os.path.abspath(self.captures_dir) if getattr(self, "captures_dir", None) else None
+        removed = True
+        if os.path.isdir(parent):
+            for name in os.listdir(parent):
+                path = os.path.join(parent, name)
+                if keep_current and current and os.path.abspath(path) == current:
+                    continue
+                shutil.rmtree(path, ignore_errors=True)
+                if os.path.exists(path):
+                    removed = False
+            try:
+                if not os.listdir(parent):
+                    os.rmdir(parent)
+            except OSError:
+                pass
         return removed
 
     def discard_inference_capture(self):
@@ -539,11 +496,10 @@ class CoBasV1App:
         for label, sensor in ((self.mmwave_label, "Radar"), (self.thermal_video_label, "Thermal")):
             label.config(image="", text=f"{sensor} input discarded.\n\nTap 'Estimate Again' for another chirp.")
             label.image = None
-        self.update_status(
-            "Status: Estimate complete; capture inputs deleted" if removed
-            else f"Status: Estimate complete; some inputs could not be deleted from {self.captures_dir}",
-            "● IDLE" if removed else "● WARNING",
-        )
+        if not removed:
+            self.update_status(
+                f"Status: Some inputs could not be deleted from {self.captures_dir}", "● WARNING"
+            )
 
     def set_position_mode(self, mode):
         """Update the capture mode and keep its options clear on the touch UI."""
@@ -895,9 +851,7 @@ class CoBasV1App:
             except (OSError, RuntimeError) as error:
                 messagebox.showerror("Inference", f"Could not start the estimate: {error}", parent=self.root)
                 return
-            self.estimate_label.configure(text="…")
-            self.estimate_detail_label.configure(text="Listening to the chirp and reading the sensors…")
-            self.record_timer_label.configure(text="Estimate: …")
+            self.record_timer_label.configure(text=format_battery_level("…"))
         self.refresh_info_panel()
         self.tracking_start_token += 1
         self.requested_pulse_count = pulse_count
