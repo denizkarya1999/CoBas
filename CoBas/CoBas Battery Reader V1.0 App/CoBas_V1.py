@@ -28,7 +28,6 @@ from InferenceMode import (
     default_model,
     discover_models,
     format_battery_level,
-    format_detail,
     format_estimate,
 )
 from MMWave import MMWaveCaptureService
@@ -456,9 +455,8 @@ class CoBasV1App:
         self.update_status(f"Status: Inference problem: {message}", "● WARNING")
 
     def handle_inference_result(self, result):
-        """The result lives in the footer: 'Battery Level: N%' plus a detail line."""
+        """Show only 'Battery Level: N%' in the footer; no confidence or breakdown."""
         self.record_timer_label.configure(text=format_estimate(result))
-        self.update_status(f"Status: {format_detail(result)}", "● LIVE")
 
     def remove_capture_directory(self, keep_current=False):
         """Inference Mode keeps nothing: delete this session's folder and any stale ones."""
@@ -496,7 +494,9 @@ class CoBasV1App:
         for label, sensor in ((self.mmwave_label, "Radar"), (self.thermal_video_label, "Thermal")):
             label.config(image="", text=f"{sensor} input discarded.\n\nTap 'Estimate Again' for another chirp.")
             label.image = None
-        if not removed:
+        if removed:
+            self.update_status("Status: Ready. Tap Estimate Again for another chirp.", "● IDLE")
+        else:
             self.update_status(
                 f"Status: Some inputs could not be deleted from {self.captures_dir}", "● WARNING"
             )

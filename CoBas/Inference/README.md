@@ -74,11 +74,10 @@ for example on a kiosk. In Inference Mode:
   (default 1). The equal-weight three-modal model is pre-selected and loads in
   the background;
 - "Start Estimate" runs the normal chirp capture; as each chirp's thermal,
-  mmWave and voice files land they are classified and the footer shows
-  "Battery Level: N%", with the confidence, top-3 and agreement across chirps
-  in the status line. The setup tab itself holds only the model, the chirps
-  per estimate and the thermal display controls. Several chirps are combined
-  by averaging log-probabilities;
+  mmWave and voice files land they are classified and the footer shows only
+  "Battery Level: N%" (no confidence or breakdown on screen). The setup tab
+  holds the model, the chirps per estimate and the thermal display controls.
+  Several chirps are combined by averaging log-probabilities;
 - results are shown on screen only; no prediction file is written.
 
 The app side lives in `CoBas Battery Reader V1.0 App/InferenceMode.py`; the
