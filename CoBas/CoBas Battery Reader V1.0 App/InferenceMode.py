@@ -435,9 +435,9 @@ def format_estimate(result):
 
 
 def format_detail(result):
+    """Two short lines under the read-out: confidence and top-3, then chirp agreement."""
     top = ", ".join(f"{label} {p:.0%}" for label, p in result.top3)
     return (
-        f"Confidence {result.vote_confidence:.0%}. Chirp {result.count}: {result.label} "
-        f"({result.confidence:.0%}), {result.elapsed_ms:.0f} ms. Top-3: {top}. "
-        f"Agreement across chirps: {result.consistency:.0%}."
+        f"Confidence {result.vote_confidence:.0%} · top-3: {top}\n"
+        f"Chirps: {result.count} · agreement {result.consistency:.0%} · last chirp {result.label}"
     )

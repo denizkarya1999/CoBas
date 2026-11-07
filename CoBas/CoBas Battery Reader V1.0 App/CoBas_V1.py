@@ -378,7 +378,7 @@ class CoBasV1App:
         thermal.grid(row=0, column=1, sticky="nsew")
         if self.inference_mode:
             self.build_inference_controls(controls)
-            self.build_thermal_controls(thermal)
+            self.build_inference_result(thermal)
             return
         ttk.Label(controls, text="Capture", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
         self.pulse_count_spinbox = self.build_spinbox_row(controls, "Chirp count", self.pulse_count_text, None)
@@ -406,25 +406,30 @@ class CoBasV1App:
         self.build_thermal_controls(thermal)
 
     def build_inference_controls(self, parent):
-        """Model picker, chirps per estimate, and the estimate read-out."""
+        """Left column of the Inference setup tab: model and chirps per estimate."""
         self.position_mode_buttons = {}
         self.position_count_spinbox = None
         self.pulse_count_text.set("1")
         ttk.Label(parent, text="Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
         ttk.Label(parent, text="Model", style="PanelText.TLabel").pack(anchor="w")
         self.model_button = ttk.Button(parent, style="Tool.TButton", command=self.choose_model)
-        self.model_button.pack(fill="x", pady=(0, 4))
+        self.model_button.pack(fill="x", pady=(0, 6))
         self.pulse_count_spinbox = self.build_spinbox_row(parent, "Chirps per estimate", self.pulse_count_text, 50)
         ttk.Label(
             parent,
-            text="One chirp gives one estimate; more chirps are averaged for a steadier answer.",
+            text="More chirps are averaged for a steadier answer.",
             style="PanelText.TLabel", wraplength=350,
-        ).pack(anchor="w", pady=(0, 6))
-        self.estimate_label = ttk.Label(parent, text="—", style="Number.TLabel", anchor="center")
-        self.estimate_label.pack(fill="x", pady=(2, 2))
-        self.estimate_detail_label = ttk.Label(parent, text="No estimate yet.", style="PanelText.TLabel", wraplength=350)
-        self.estimate_detail_label.pack(anchor="w")
+        ).pack(anchor="w", pady=(2, 0))
         self.refresh_model_button()
+
+    def build_inference_result(self, parent):
+        """Right column of the Inference setup tab: the read-out, then the thermal range."""
+        ttk.Label(parent, text="Result", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
+        self.estimate_label = ttk.Label(parent, text=format_battery_level("—"), style="Number.TLabel", anchor="center")
+        self.estimate_label.pack(fill="x")
+        self.estimate_detail_label = ttk.Label(parent, text="No estimate yet.", style="PanelText.TLabel", wraplength=360)
+        self.estimate_detail_label.pack(anchor="w", pady=(4, 0))
+        self.build_thermal_controls(parent, compact=True)
 
     def refresh_model_button(self):
         if not self.inference_mode:
@@ -535,15 +540,25 @@ class CoBasV1App:
         if self.inference_mode:
             self.model_button.configure(state=state)
 
-    def build_thermal_controls(self, parent):
-        ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
+    def build_thermal_controls(self, parent, compact=False):
+        """Thermal range controls; ``compact`` puts min and max side by side (Inference tab)."""
+        ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(
+            anchor="w", pady=(8, 2) if compact else (0, 5)
+        )
         row = ttk.Frame(parent, style="Panel.TFrame")
         row.pack(fill="x")
         for title, variable, attr in (("Minimum", self.thermal_min_text, "thermal_min_entry"),
                                       ("Maximum", self.thermal_max_text, "thermal_max_entry")):
-            ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
-            control = NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
-            control.pack(fill="x", pady=(0,4))
+            if compact:
+                column = ttk.Frame(row, style="Panel.TFrame")
+                column.pack(side="left", fill="x", expand=True, padx=(0, 6))
+                ttk.Label(column, text=title, style="PanelText.TLabel").pack(anchor="w")
+                control = NumberControl(column, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
+                control.pack(fill="x")
+            else:
+                ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
+                control = NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
+                control.pack(fill="x", pady=(0,4))
             setattr(self, attr, control)
         modes = ttk.Frame(parent, style="Panel.TFrame")
         modes.pack(fill="x", pady=(2,0))
