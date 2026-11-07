@@ -156,7 +156,29 @@ The two-modal 1-1 models behave the same way on the unseen Oct 16 sessions
 
 On the unseen day the models are confidently wrong (three-modal mean
 confidence 0.69 when wrong; mmWave-Voice and Thermal-Voice above 0.9), so
-confidence is not a usable reliability signal either. The clearest
+confidence is not a usable reliability signal either.
+
+**Full check (2026-11-07, every 8th chirp, 12 per session, both datasets).**
+All 16 checkpoints load, run on the fixture chirp and predict its true label
+(100 %); per-chirp latency including preprocessing is 106–322 ms on the Pi 5
+with four threads, and the ONNX export agrees with PyTorch to 1e-11. A real
+chirp on the device through the three-modal model returned "Battery Level:
+50%" (`Screenshots/8.png`). Accuracy per model:
+
+| Model | Oct 21 sessions (trained on) | Oct 16 sessions (unseen) | Unseen-day votes |
+|---|---|---|---|
+| Three-modal 1-1-1 | 100 % (132/132) | 9.1 % | all "100 %" |
+| mmWave-Thermal 1-1 | 100 % (132/132) | 9.8 % | all "60 %" |
+| mmWave-Voice 1-1 | 99.2 % (131/132) | 9.1 % | all "10 %" |
+| Thermal-Voice 1-1 | 96.2 % (127/132) | 9.1 % | all "60 %" |
+| Standalone thermal | 99.2 % (131/132) | 9.8 % | all "50 %" |
+| Standalone mmWave | 98.5 % (130/132) | 5.3 % | "60 %" or "10 %" |
+| Standalone voice | 97.7 % (129/132) | 8.3 % | mostly "40 %" |
+
+Chance is 9.1 %. The integration is correct (every model reproduces its
+training-day behaviour through the device pipeline); the models themselves do
+not transfer to a different recording day, and the standalone models are no
+exception. The clearest
 measurable shift between the two days is the thermal channel: mean thermal
 frame colour is (0, 134, 233) on Oct 16 versus (2, 213, 208) on Oct 21 while
 the logged temperatures differ by only 1–2 °C, which is what the absolute
