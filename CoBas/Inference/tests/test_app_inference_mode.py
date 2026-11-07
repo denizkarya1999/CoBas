@@ -101,6 +101,7 @@ def test_engine_classifies_fixture_chirp_and_writes_csv(tmp_path):
     )
     engine.enqueue(job)
     engine.enqueue(InferenceMode.ChirpJob(**{**job.__dict__, "index": 2, "global_index": 2}))
+    assert engine.wait_until_idle(10.0)
     engine.stop()
     engine._worker.join(timeout=10)
     assert not errors, errors
@@ -110,7 +111,9 @@ def test_engine_classifies_fixture_chirp_and_writes_csv(tmp_path):
     assert set(stub.calls[0]) == {"mmwave", "thermal", "voice"}
     # Inference leaves no prediction files behind.
     assert not list(session.rglob("*.csv"))
-    assert InferenceMode.format_estimate(results[-1]).startswith("Estimate: 60%")
+    assert InferenceMode.format_estimate(results[-1]) == "Battery Level: 60%"
+    assert InferenceMode.format_battery_level("100%") == "Battery Level: 100%"
+    assert InferenceMode.format_detail(results[-1]).startswith("Confidence ")
 
 
 def test_engine_reports_missing_mmwave_frame(tmp_path):

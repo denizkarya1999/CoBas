@@ -289,6 +289,8 @@ class InferenceEngine:
         self._lock = threading.Lock()
         self._loading = False
         self._stopped = False
+        self._pending = 0
+        self._idle = threading.Condition()
         self._worker = threading.Thread(target=self._run, name="cobas-inference", daemon=True)
         self._worker.start()
 
@@ -345,7 +347,20 @@ class InferenceEngine:
         self.aggregator = VoteAggregator(predictor.class_names)
 
     def enqueue(self, job):
+        with self._idle:
+            self._pending += 1
         self._jobs.put(job)
+
+    def wait_until_idle(self, timeout_seconds):
+        """Block until every queued chirp has been classified (or the timeout passes)."""
+        deadline = time.monotonic() + timeout_seconds
+        with self._idle:
+            while self._pending > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._idle.wait(remaining)
+        return True
 
     def stop(self):
         self._stopped = True
@@ -363,7 +378,11 @@ class InferenceEngine:
                 result = self._process(job)
             except Exception as error:  # Worker boundary.
                 self.post_ui(self.on_error, f"Chirp {job.global_index}: {error}")
-                continue
+                result = None
+            finally:
+                with self._idle:
+                    self._pending = max(0, self._pending - 1)
+                    self._idle.notify_all()
             if result is not None:
                 self.post_ui(self.on_result, result)
 
@@ -405,14 +424,20 @@ class InferenceEngine:
             consistency=consistency, count=aggregator.count, elapsed_ms=elapsed_ms,
         )
 
+def format_battery_level(label):
+    """The read-out the device shows: 'Battery Level: 60%'."""
+    return f"Battery Level: {label}"
+
+
 def format_estimate(result):
-    """Short text for the footer: the running vote with its confidence."""
-    return f"Estimate: {result.vote_label}  ({result.vote_confidence:.0%})"
+    """Footer text: the running vote in the Battery Level form."""
+    return format_battery_level(result.vote_label)
 
 
 def format_detail(result):
     top = ", ".join(f"{label} {p:.0%}" for label, p in result.top3)
     return (
-        f"Chirp {result.count}: {result.label} ({result.confidence:.0%}), {result.elapsed_ms:.0f} ms. "
-        f"Top-3: {top}. Agreement across chirps: {result.consistency:.0%}."
+        f"Confidence {result.vote_confidence:.0%}. Chirp {result.count}: {result.label} "
+        f"({result.confidence:.0%}), {result.elapsed_ms:.0f} ms. Top-3: {top}. "
+        f"Agreement across chirps: {result.consistency:.0%}."
     )

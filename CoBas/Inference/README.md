@@ -66,17 +66,19 @@ Collection** (unchanged: labelled sessions for training) or **Inference**.
 Set `COBAS_APP_MODE=collect` or `COBAS_APP_MODE=infer` to skip the question,
 for example on a kiosk. In Inference Mode:
 
-- no battery percentage is asked; sessions are written to `Captures/Inference/`;
+- no battery percentage is asked; the chirp is captured into a temporary
+  `Captures/Inference/` session that is deleted as soon as the estimate is done
+  (nothing from an inference run stays on disk);
 - the "Inference setup" tab has a model picker (checkpoints under
   `CoBas/Inference/models`, or `COBAS_MODELS_DIR`) and "Chirps per estimate"
   (default 1). The equal-weight three-modal model is pre-selected and loads in
   the background;
 - "Start Estimate" runs the normal chirp capture; as each chirp's thermal,
-  mmWave and voice files land they are classified and the estimate, its
-  confidence and the top-3 appear on the tab and in the footer. Several chirps
-  are combined by averaging log-probabilities;
-- predictions are shown on screen only; no prediction file is written. The
-  chirp files themselves are still saved like any capture.
+  mmWave and voice files land they are classified and the read-out
+  "Battery Level: N%" appears on the tab and in the footer, with the
+  confidence, top-3 and agreement across chirps underneath. Several chirps are
+  combined by averaging log-probabilities;
+- results are shown on screen only; no prediction file is written.
 
 The app side lives in `CoBas Battery Reader V1.0 App/InferenceMode.py`; the
 capture, pulse and sensor code is untouched.

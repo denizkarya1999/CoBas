@@ -27,6 +27,7 @@ from InferenceMode import (
     choose_app_mode,
     default_model,
     discover_models,
+    format_battery_level,
     format_detail,
     format_estimate,
 )
@@ -459,10 +460,46 @@ class CoBasV1App:
         if result.token != self.tracking_start_token and not self.export_in_progress:
             # A result from an earlier run; still worth showing, but not as live.
             pass
-        self.estimate_label.configure(text=f"{result.vote_label}")
+        self.estimate_label.configure(text=format_battery_level(result.vote_label))
         self.estimate_detail_label.configure(text=format_detail(result))
         self.record_timer_label.configure(text=format_estimate(result))
         self.notebook.select(1)
+
+    def remove_capture_directory(self):
+        """Inference Mode keeps nothing: delete this session's capture folder."""
+        self.remove_thermal_frame_staging_directory()
+        removed = False
+        if self.captures_dir and os.path.isdir(self.captures_dir):
+            shutil.rmtree(self.captures_dir, ignore_errors=True)
+            removed = not os.path.exists(self.captures_dir)
+        parent = os.path.join(self.base_dir, "Captures", self.battery_output_name)
+        try:
+            if os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
+        except OSError:
+            pass
+        return removed
+
+    def discard_inference_capture(self):
+        """Worker: let the radar and the classifier finish, then delete the inputs."""
+        try:
+            self.mmwave_capture.stop(wait=True, timeout=20.0)
+            self.inference.wait_until_idle(20.0)
+        finally:
+            removed = self.remove_capture_directory()
+            self.post_ui(self.handle_inference_capture_discarded, removed)
+
+    def handle_inference_capture_discarded(self, removed):
+        self.export_in_progress = False
+        self.track_button.configure(text="Estimate Again", style="Start.TButton", state="normal")
+        for label, sensor in ((self.mmwave_label, "Radar"), (self.thermal_video_label, "Thermal")):
+            label.config(image="", text=f"{sensor} input discarded.\n\nTap 'Estimate Again' for another chirp.")
+            label.image = None
+        self.update_status(
+            "Status: Estimate complete; capture inputs deleted" if removed
+            else f"Status: Estimate complete; some inputs could not be deleted from {self.captures_dir}",
+            "● IDLE" if removed else "● WARNING",
+        )
 
     def set_position_mode(self, mode):
         """Update the capture mode and keep its options clear on the touch UI."""
@@ -575,7 +612,10 @@ class CoBasV1App:
             text=f"Mic: {self.audio.microphone_device_name}"
         )
         self.speaker_info_label.config(text=f"Speaker: {self.audio.speaker_device_name}")
-        self.output_info_label.config(text=f"Output: {self.captures_dir}/")
+        self.output_info_label.config(
+            text="Output: none; inference inputs are deleted after each estimate"
+            if self.inference_mode else f"Output: {self.captures_dir}/"
+        )
         rate_text = (
             "Dataset export: 1 mmWave + 1 thermal frame/chirp\n"
             f"Thermal video: {self.thermal_camera.record_fps:g} FPS"
@@ -1193,11 +1233,13 @@ class CoBasV1App:
                 0.0,
                 self.pulse_sequence_started_at - self.thermal_segment_started_at,
             )
-        thermal_path = self.sync_video_duration(
-            thermal_path,
-            target_duration,
-            start_offset,
-        )
+        if not self.inference_mode:
+            # Inference discards the video afterwards, so skip the ffmpeg alignment.
+            thermal_path = self.sync_video_duration(
+                thermal_path,
+                target_duration,
+                start_offset,
+            )
         segment = {
             "position": position_number,
             "pulse_recordings": list(position_recordings),
@@ -1282,6 +1324,17 @@ class CoBasV1App:
         )
         self.set_capture_options_state(True)
         self.set_thermal_controls_state("normal")
+        if self.inference_mode:
+            self.update_status(
+                f"Status: {message}; finishing the estimate",
+                "● WARNING" if warning else "● IDLE",
+            )
+            if not self.export_started:
+                self.export_started = True
+                self.export_in_progress = True
+                self.track_button.configure(text="Finishing…", state="disabled")
+                threading.Thread(target=self.discard_inference_capture, daemon=True).start()
+            return
         self.update_status(
             f"Status: {message}; generating battery outputs",
             "● WARNING" if warning else "● IDLE",
@@ -1617,16 +1670,6 @@ class CoBasV1App:
 
     def handle_export_finished(self):
         self.export_in_progress = False
-        if self.inference_mode:
-            self.track_button.configure(text="Estimate Again", style="Start.TButton", state="normal")
-            for label, sensor in ((self.mmwave_label, "Radar"), (self.thermal_video_label, "Thermal")):
-                label.config(image="", text=f"{sensor} capture saved.\n\nTap 'Estimate Again' for another chirp.")
-                label.image = None
-            self.update_status(
-                f"Status: Estimate complete; chirp files saved in {self.captures_dir}",
-                "● IDLE",
-            )
-            return
         self.track_button.configure(text="Start Tracking", style="Start.TButton", state="normal")
         self.mmwave_label.config(
             image="",
@@ -1688,6 +1731,8 @@ class CoBasV1App:
         if self.thermal_camera.is_recording:
             self.thermal_camera.stop_recording()
         self.thermal_camera.stop_camera()
+        if self.inference_mode:
+            self.remove_capture_directory()
         self.root.destroy()
 
 
