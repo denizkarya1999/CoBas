@@ -83,6 +83,17 @@ for example on a kiosk. In Inference Mode:
 The app side lives in `CoBas Battery Reader V1.0 App/InferenceMode.py`; the
 capture, pulse and sensor code is untouched.
 
+## Screenshots
+
+Captured on the Pi's 800×480 touchscreen (`CoBas/Screenshots/`):
+
+| | |
+|---|---|
+| `1.png` startup mode chooser | `2.png` Data Collection: capture setup |
+| `3.png` Data Collection: live sensors (idle) | `4.png` Data Collection: system tab |
+| `5.png` Inference setup with the model loaded | `6.png` model picker (fusion ratios and standalone models) |
+| `7.png` live sensors during the chirp | `8.png` result after a real chirp: "Battery Level: N%" |
+
 ## Model families and their recipes
 
 | Checkpoint | Inputs | Fusion | Tensor |

@@ -887,7 +887,7 @@ class CoBasV1App:
         self.set_capture_options_state(False)
         self.set_thermal_controls_state("disabled")
         self.track_button.configure(
-            text="Stop Tracking",
+            text="Stop Estimate" if self.inference_mode else "Stop Tracking",
             style="Stop.TButton",
             state="normal",
         )

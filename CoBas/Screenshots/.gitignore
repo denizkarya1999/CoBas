@@ -1,0 +1,2 @@
+# The repository ignores *.png globally; these documentation screenshots are tracked.
+!*.png
