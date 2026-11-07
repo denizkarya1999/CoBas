@@ -1,0 +1,12 @@
+# Inference-only dependencies for the CoBas fusion models on the Raspberry Pi 5.
+# Install into the app's virtual environment:
+#   .venv/bin/python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   .venv/bin/python -m pip install -r "CoBas/Inference/requirements.txt"
+numpy
+Pillow
+librosa        # mel spectrogram parity with the Colab training notebooks
+soundfile
+onnxruntime    # preferred runtime on the Pi once a checkpoint is exported
+torch          # loading .pth checkpoints and ONNX export (CPU wheel from the index above)
+torchvision
+pytest         # tests only

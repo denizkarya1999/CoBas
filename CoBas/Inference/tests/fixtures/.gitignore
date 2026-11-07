@@ -1,0 +1,5 @@
+# The repository ignores media files globally; the parity fixtures are small and
+# must be tracked so the tests run on a fresh checkout.
+!*.png
+!*.jpg
+!*.wav

@@ -1,0 +1,4 @@
+# Checkpoints and exported graphs are fetched from Drive, not versioned (≈45 MB each).
+models/
+*.onnx
+*.onnx.json
