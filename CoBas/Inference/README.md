@@ -59,6 +59,28 @@ for chirp in discover_session("Captures/100_Percent_Battery/Session_..."):
 print(votes.result().label, votes.consistency())
 ```
 
+## Inference Mode in the Battery Reader app
+
+The app (`run-cobas.sh`) now asks at startup whether to run in **Data
+Collection** (unchanged: labelled sessions for training) or **Inference**.
+Set `COBAS_APP_MODE=collect` or `COBAS_APP_MODE=infer` to skip the question,
+for example on a kiosk. In Inference Mode:
+
+- no battery percentage is asked; sessions are written to `Captures/Inference/`;
+- the "Inference setup" tab has a model picker (checkpoints under
+  `CoBas/Inference/models`, or `COBAS_MODELS_DIR`) and "Chirps per estimate"
+  (default 1). The equal-weight three-modal model is pre-selected and loads in
+  the background;
+- "Start Estimate" runs the normal chirp capture; as each chirp's thermal,
+  mmWave and voice files land they are classified and the estimate, its
+  confidence and the top-3 appear on the tab and in the footer. Several chirps
+  are combined by averaging log-probabilities;
+- predictions are shown on screen only; no prediction file is written. The
+  chirp files themselves are still saved like any capture.
+
+The app side lives in `CoBas Battery Reader V1.0 App/InferenceMode.py`; the
+capture, pulse and sensor code is untouched.
+
 ## Model families and their recipes
 
 | Checkpoint | Inputs | Fusion | Tensor |

@@ -19,6 +19,17 @@ from TouchUI import NumberControl, ask_number, dialogs as messagebox
 from AudioDevices import list_audio_choices
 from About import show_about_window
 from Camera.thermal_camera import ThermalCamera
+from InferenceMode import (
+    MODE_INFER,
+    ChirpJob,
+    InferenceEngine,
+    ModelPickerDialog,
+    choose_app_mode,
+    default_model,
+    discover_models,
+    format_detail,
+    format_estimate,
+)
 from MMWave import MMWaveCaptureService
 from PIL import Image, ImageTk
 from Settings import SettingsWindow
@@ -105,8 +116,18 @@ class CoBasV1App:
         apply_styles(self.root)
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.battery_percentage = self.request_battery_percentage()
-        self.battery_output_name = battery_output_folder_name(self.battery_percentage)
+        self.app_mode = self.request_app_mode()
+        self.inference_mode = self.app_mode == MODE_INFER
+        if self.inference_mode:
+            # The battery level is what Inference Mode estimates, so there is no
+            # label; the radar service still needs an integer for its log names.
+            self.battery_percentage = 0
+            self.battery_output_name = "Inference"
+            self.thermal_frame_prefix = "Thermal_Image_Inference_"
+        else:
+            self.battery_percentage = self.request_battery_percentage()
+            self.battery_output_name = battery_output_folder_name(self.battery_percentage)
+            self.thermal_frame_prefix = f"Thermal_Image_{self.battery_percentage}_Percent_"
         self.prepare_capture_session()
         self.capture_attempted = False
         self.ui_callbacks = queue.Queue()
@@ -117,6 +138,18 @@ class CoBasV1App:
             output_dir=self.thermal_references_dir,
         )
         self.mmwave_capture = self.new_mmwave_capture()
+        self.inference = None
+        self.selected_model = None
+        self.model_choices = []
+        if self.inference_mode:
+            self.inference = InferenceEngine(
+                self.post_ui,
+                self.handle_inference_result,
+                self.handle_inference_status,
+                self.handle_inference_error,
+            )
+            self.model_choices = discover_models()
+            self.selected_model = default_model(self.model_choices)
 
         self.is_closing = False
         self.is_preparing_tracking = False
@@ -165,10 +198,24 @@ class CoBasV1App:
         self.refresh_info_panel()
         self.mmwave_poll_after_id = self.root.after(50, self.poll_mmwave_events)
         self.root.deiconify()
+        if self.inference_mode and self.selected_model is not None:
+            self.inference.select_model(self.selected_model)
+        elif self.inference_mode:
+            self.update_status("Status: No models found. Tap Model to choose one once checkpoints are installed.", "● WARNING")
+
+    def request_app_mode(self):
+        mode = choose_app_mode(self.root)
+        if mode is None:
+            self.root.destroy()
+            raise SystemExit(0)
+        return mode
+
+    def start_button_text(self):
+        return "Start Estimate" if self.inference_mode else "Start Tracking"
 
     def prepare_capture_session(self):
         """Reserve a fresh output folder without modifying earlier captures."""
-        battery_directory = Path(battery_output_directory(self.base_dir, self.battery_percentage))
+        battery_directory = Path(os.path.join(self.base_dir, "Captures", self.battery_output_name))
         battery_directory.mkdir(parents=True, exist_ok=True)
         prefix = datetime.now().astimezone().strftime("Session_%Y%m%d_%H%M%S_")
         self.captures_dir = tempfile.mkdtemp(prefix=prefix, dir=battery_directory)
@@ -238,12 +285,16 @@ class CoBasV1App:
         footer = ttk.Frame(outer, style="Panel.TFrame", padding=(10, 6), height=76)
         footer.pack(side="bottom", fill="x")
         footer.pack_propagate(False)
-        self.track_button = ttk.Button(footer, text="Start Tracking", style="Start.TButton",
+        self.track_button = ttk.Button(footer, text=self.start_button_text(), style="Start.TButton",
                                        command=self.toggle_tracking, width=17)
         self.track_button.pack(side="right", padx=(10, 0))
-        self.record_timer_label = ttk.Label(footer, text="Pulses: 0/20", style="PanelTitle.TLabel")
+        self.record_timer_label = ttk.Label(
+            footer,
+            text="Estimate: —" if self.inference_mode else "Pulses: 0/20",
+            style="PanelTitle.TLabel",
+        )
         self.record_timer_label.pack(anchor="w")
-        self.status_label = ttk.Label(footer, text="Ready. Tap Start Tracking to begin.",
+        self.status_label = ttk.Label(footer, text=f"Ready. Tap {self.start_button_text()} to begin.",
                                       style="Info.TLabel", wraplength=500)
         self.status_label.pack(fill="x", expand=True, anchor="w")
         self.status_label.bind("<Button-1>", lambda e: messagebox.showinfo("Capture status", self.status_label.cget("text"), parent=self.root))
@@ -255,7 +306,7 @@ class CoBasV1App:
         setup = ttk.Frame(self.notebook, style="Panel.TFrame")
         system = ttk.Frame(self.notebook, style="Panel.TFrame")
         self.notebook.add(preview, text="Live sensors")
-        self.notebook.add(setup, text="Capture setup")
+        self.notebook.add(setup, text="Inference setup" if self.inference_mode else "Capture setup")
         self.notebook.add(system, text="System")
         self.build_preview_panel(preview)
         self.build_control_panel(setup)
@@ -265,7 +316,8 @@ class CoBasV1App:
     def build_toolbar(self, parent):
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(8, 4))
         toolbar.pack(fill="x")
-        ttk.Label(toolbar, text=f"CoBas  ·  {self.battery_percentage}%", style="ToolbarTitle.TLabel").pack(side="left", padx=(0, 10))
+        title = "CoBas  ·  Inference" if self.inference_mode else f"CoBas  ·  {self.battery_percentage}%"
+        ttk.Label(toolbar, text=title, style="ToolbarTitle.TLabel").pack(side="left", padx=(0, 10))
         ttk.Button(toolbar, text="Close", width=5, style="Danger.TButton", command=self.request_close).pack(side="right", padx=(6,0))
         self.window_button = ttk.Button(toolbar, text="Window", width=7, style="Tool.TButton", command=self.toggle_touch_mode)
         self.window_button.pack(side="right", padx=3)
@@ -323,6 +375,10 @@ class CoBasV1App:
         controls.grid(row=0, column=0, sticky="nsew")
         thermal = ttk.Frame(parent, style="Panel.TFrame", padding=10)
         thermal.grid(row=0, column=1, sticky="nsew")
+        if self.inference_mode:
+            self.build_inference_controls(controls)
+            self.build_thermal_controls(thermal)
+            return
         ttk.Label(controls, text="Capture", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
         self.pulse_count_spinbox = self.build_spinbox_row(controls, "Chirp count", self.pulse_count_text, None)
         ttk.Label(controls, text="Position handling", style="PanelText.TLabel").pack(anchor="w", pady=(5,2))
@@ -348,6 +404,66 @@ class CoBasV1App:
         ttk.Label(controls, text="Tap a number to open the keypad.", style="PanelText.TLabel").pack(anchor="w", pady=(5,0))
         self.build_thermal_controls(thermal)
 
+    def build_inference_controls(self, parent):
+        """Model picker, chirps per estimate, and the estimate read-out."""
+        self.position_mode_buttons = {}
+        self.position_count_spinbox = None
+        self.pulse_count_text.set("1")
+        ttk.Label(parent, text="Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
+        ttk.Label(parent, text="Model", style="PanelText.TLabel").pack(anchor="w")
+        self.model_button = ttk.Button(parent, style="Tool.TButton", command=self.choose_model)
+        self.model_button.pack(fill="x", pady=(0, 4))
+        self.pulse_count_spinbox = self.build_spinbox_row(parent, "Chirps per estimate", self.pulse_count_text, 50)
+        ttk.Label(
+            parent,
+            text="One chirp gives one estimate; more chirps are averaged for a steadier answer.",
+            style="PanelText.TLabel", wraplength=350,
+        ).pack(anchor="w", pady=(0, 6))
+        self.estimate_label = ttk.Label(parent, text="—", style="Number.TLabel", anchor="center")
+        self.estimate_label.pack(fill="x", pady=(2, 2))
+        self.estimate_detail_label = ttk.Label(parent, text="No estimate yet.", style="PanelText.TLabel", wraplength=350)
+        self.estimate_detail_label.pack(anchor="w")
+        self.refresh_model_button()
+
+    def refresh_model_button(self):
+        if not self.inference_mode:
+            return
+        if self.selected_model is None:
+            text = "Choose a model…"
+        else:
+            text = self.selected_model.short_label
+        self.model_button.configure(text=text if len(text) <= 44 else text[:41] + "…")
+
+    def choose_model(self):
+        if self.pulse_sequence_active or self.export_in_progress:
+            messagebox.showwarning("Estimate running", "Wait for the current estimate to finish before changing the model.", parent=self.root)
+            return
+        self.model_choices = discover_models()
+        choice = ModelPickerDialog(self.root, self.model_choices, self.selected_model).show()
+        if choice is None:
+            return
+        self.selected_model = choice
+        self.refresh_model_button()
+        self.inference.select_model(choice)
+        self.refresh_info_panel()
+
+    def handle_inference_status(self, message):
+        self.update_status(f"Status: {message}", "● READY")
+        self.refresh_info_panel()
+
+    def handle_inference_error(self, message):
+        print(f"[WARNING] Inference: {message}")
+        self.update_status(f"Status: Inference problem: {message}", "● WARNING")
+
+    def handle_inference_result(self, result):
+        if result.token != self.tracking_start_token and not self.export_in_progress:
+            # A result from an earlier run; still worth showing, but not as live.
+            pass
+        self.estimate_label.configure(text=f"{result.vote_label}")
+        self.estimate_detail_label.configure(text=format_detail(result))
+        self.record_timer_label.configure(text=format_estimate(result))
+        self.notebook.select(1)
+
     def set_position_mode(self, mode):
         """Update the capture mode and keep its options clear on the touch UI."""
         self.position_mode_text.set(mode)
@@ -371,13 +487,16 @@ class CoBasV1App:
         self.pulse_count_spinbox.configure(state=state)
         for button in self.position_mode_buttons.values():
             button.configure(state=state)
-        self.position_count_spinbox.configure(
-            state=(
-                "normal"
-                if enabled and self.position_mode_text.get() == "position-based"
-                else "disabled"
+        if self.position_count_spinbox is not None:
+            self.position_count_spinbox.configure(
+                state=(
+                    "normal"
+                    if enabled and self.position_mode_text.get() == "position-based"
+                    else "disabled"
+                )
             )
-        )
+        if self.inference_mode:
+            self.model_button.configure(state=state)
 
     def build_thermal_controls(self, parent):
         ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
@@ -457,12 +576,15 @@ class CoBasV1App:
         )
         self.speaker_info_label.config(text=f"Speaker: {self.audio.speaker_device_name}")
         self.output_info_label.config(text=f"Output: {self.captures_dir}/")
-        self.rate_info_label.config(
-            text=(
-                "Dataset export: 1 mmWave + 1 thermal frame/chirp\n"
-                f"Thermal video: {self.thermal_camera.record_fps:g} FPS"
-            )
+        rate_text = (
+            "Dataset export: 1 mmWave + 1 thermal frame/chirp\n"
+            f"Thermal video: {self.thermal_camera.record_fps:g} FPS"
         )
+        if self.inference_mode:
+            model_name = self.selected_model.label if self.selected_model else "none selected"
+            model_state = "loading" if self.inference.is_loading else ("ready" if self.inference.is_ready else "not loaded")
+            rate_text += f"\nModel: {model_name} ({model_state})"
+        self.rate_info_label.config(text=rate_text)
 
     def apply_audio_sources_from_settings(self, microphone, speaker):
         if self.pulse_sequence_active:
@@ -667,6 +789,14 @@ class CoBasV1App:
                 )
                 return
 
+        if self.inference_mode:
+            if self.selected_model is None:
+                messagebox.showwarning("No model", "Choose a model before starting an estimate.", parent=self.root)
+                return
+            if not self.inference.is_ready:
+                messagebox.showinfo("Model loading", "The model is still loading. Try again in a moment.", parent=self.root)
+                return
+
         if self.capture_attempted:
             try:
                 self.prepare_capture_session()
@@ -674,6 +804,15 @@ class CoBasV1App:
                 messagebox.showerror("Capture folder", f"Cannot create a new capture folder: {error}", parent=self.root)
                 return
         self.capture_attempted = True
+        if self.inference_mode:
+            try:
+                self.inference.start_session(self.captures_dir)
+            except (OSError, RuntimeError) as error:
+                messagebox.showerror("Inference", f"Could not start the estimate: {error}", parent=self.root)
+                return
+            self.estimate_label.configure(text="…")
+            self.estimate_detail_label.configure(text="Listening to the chirp and reading the sensors…")
+            self.record_timer_label.configure(text="Estimate: …")
         self.refresh_info_panel()
         self.tracking_start_token += 1
         self.requested_pulse_count = pulse_count
@@ -938,6 +1077,22 @@ class CoBasV1App:
                 f"{global_pulse_number}: {error}"
             )
             return
+        if self.inference_mode:
+            thermal_record = self.thermal_frame_records[-1]
+            self.inference.enqueue(ChirpJob(
+                token=start_token,
+                position=position_number,
+                index=position_pulse_number,
+                global_index=global_pulse_number,
+                thermal_path=str(thermal_record["path"]),
+                thermal_fallback_path=os.path.join(self.thermal_frames_dir, os.path.basename(str(thermal_record["path"]))),
+                voice_path=str(self.pulse_recordings[-1]["path"]),
+                mmwave_path=os.path.join(self.mmwave_frames_dir, f"frame_{global_pulse_number:06d}.jpg"),
+            ))
+            self.record_timer_label.config(
+                text=f"Chirp {global_pulse_number}/{self.requested_pulse_count} captured • estimating…"
+            )
+            return
         self.record_timer_label.config(
             text=(
                 f"Position {position_number}/{self.requested_position_count} • "
@@ -956,7 +1111,7 @@ class CoBasV1App:
             raise RuntimeError("Thermal chirp-frame output was not initialized")
 
         thermal_path = self.thermal_frames_staging_directory / (
-            f"Thermal_Image_{self.battery_percentage}_Percent_"
+            f"{self.thermal_frame_prefix}"
             f"Position_{position_number}_{position_pulse_number:03d}.png"
         )
         saved_path = self.thermal_camera.save_latest_frame(thermal_path)
@@ -1121,7 +1276,7 @@ class CoBasV1App:
         self.cancel_thermal_preview_loop()
         self.thermal_camera.stop_camera()
         self.track_button.configure(
-            text="Start Tracking",
+            text=self.start_button_text(),
             style="Start.TButton",
             state="normal",
         )
@@ -1258,7 +1413,7 @@ class CoBasV1App:
 
     def handle_export_failed(self, error):
         self.export_in_progress = False
-        self.track_button.configure(text="Start Tracking", style="Start.TButton", state="normal")
+        self.track_button.configure(text=self.start_button_text(), style="Start.TButton", state="normal")
         self.update_status(f"Status: Saving failed: {error}. Files retained in {self.captures_dir}", "● ERROR")
 
     def finalize_thermal_frames(self, expected_count):
@@ -1462,6 +1617,16 @@ class CoBasV1App:
 
     def handle_export_finished(self):
         self.export_in_progress = False
+        if self.inference_mode:
+            self.track_button.configure(text="Estimate Again", style="Start.TButton", state="normal")
+            for label, sensor in ((self.mmwave_label, "Radar"), (self.thermal_video_label, "Thermal")):
+                label.config(image="", text=f"{sensor} capture saved.\n\nTap 'Estimate Again' for another chirp.")
+                label.image = None
+            self.update_status(
+                f"Status: Estimate complete; chirp files saved in {self.captures_dir}",
+                "● IDLE",
+            )
+            return
         self.track_button.configure(text="Start Tracking", style="Start.TButton", state="normal")
         self.mmwave_label.config(
             image="",
@@ -1515,6 +1680,8 @@ class CoBasV1App:
         self.cancel_thermal_preview_loop()
         self.tracking_start_token += 1
         self.stop_pulse_process()
+        if self.inference is not None:
+            self.inference.stop()
         if self.mmwave_capture.is_running:
             self.mmwave_capture.pause()
             self.mmwave_capture.stop(wait=True)
