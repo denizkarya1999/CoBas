@@ -37,6 +37,11 @@ _PIL_FILTERS = {
     "lanczos": Image.Resampling.LANCZOS,
 }
 
+# The mmWave standalone runs on the frame at its native size (724x256, about
+# 0.19 megapixels). A photo opened by mistake would cost gigabytes of
+# activations on the Pi, so anything far beyond a radar frame is refused.
+NATIVE_MAX_PIXELS = 1_000_000
+
 
 # --------------------------------------------------------------------------- #
 # Raster modalities (mmWave JPG, thermal PNG)
@@ -296,3 +301,31 @@ def fused_image(paths: Mapping[str, str | Path], spec: FusionSpec) -> np.ndarray
 
 def model_input(paths: Mapping[str, str | Path], spec: FusionSpec) -> np.ndarray:
     return to_model_input(fused_image(paths, spec), spec.tensor_norm, spec.tensor_pipeline)
+
+
+def is_raw_frame_model(spec: FusionSpec) -> bool:
+    """True for the thermal and mmWave standalone models, whose input is one sensor frame."""
+    return len(spec.modalities) == 1 and spec.modalities[0] in spec.images
+
+
+def image_model_input(path: str | Path, spec: FusionSpec) -> np.ndarray:
+    """One picture from disk -> network input, with no chirp capture behind it.
+
+    The thermal and mmWave standalone models take the raw sensor frame through
+    their usual recipe. Every other model takes the picture its notebook fed
+    the network: the fused image for the fusion families (256x256; any other
+    size is resized to it) and the magma spectrogram for the voice standalone.
+    """
+    if is_raw_frame_model(spec):
+        with Image.open(path) as image:
+            width, height = image.size
+        if spec.tensor_pipeline == NATIVE and width * height > NATIVE_MAX_PIXELS:
+            raise ValueError(
+                f"{width}x{height} is too large for this model, "
+                "which runs on a radar frame at its own size (724x256)"
+            )
+        return model_input({spec.modalities[0]: path}, spec)
+    image = load_rgb(path)
+    if spec.tensor_pipeline == RESIZE256_CROP224 and image.size != (FUSED_SIZE, FUSED_SIZE):
+        image = resize(image, FUSED_SIZE, "bilinear")
+    return to_model_input(np.asarray(image, dtype=np.uint8), spec.tensor_norm, spec.tensor_pipeline)

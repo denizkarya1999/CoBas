@@ -105,6 +105,14 @@ class Predictor:
         probabilities = softmax(logits)[0]
         return Prediction(probabilities, self.class_names, (time.perf_counter() - started) * 1000.0)
 
+    def predict_image(self, path: str | Path) -> Prediction:
+        """Classify one picture from disk (see ``preprocess.image_model_input``)."""
+        started = time.perf_counter()
+        x = preprocess.image_model_input(path, self.spec)
+        logits = self.runner(x)
+        probabilities = softmax(logits)[0]
+        return Prediction(probabilities, self.class_names, (time.perf_counter() - started) * 1000.0)
+
     def predict_triplet(self, triplet: ChirpTriplet) -> Prediction:
         paths = triplet.paths()
         missing = [name for name in self.spec.modalities if name not in paths]

@@ -83,6 +83,43 @@ for example on a kiosk. In Inference Mode:
 The app side lives in `CoBas Battery Reader V1.0 App/InferenceMode.py`; the
 capture, pulse and sensor code is untouched.
 
+### Local Image Inference
+
+Inference Mode also has a **Local Image Inference** tab that estimates the
+battery level of one picture already on disk. No chirp is played and no sensor
+is read.
+
+- "Open Image" opens a touch file browser: folders first, then PNG, JPG and BMP
+  files; tap a folder to enter it and an image to open it, and tap
+  "Page N / M" for a keypad to jump in a long folder. It starts in the app's
+  `Captures` folder and reopens where the last image came from.
+- The picture is classified in the background and the result appears under it
+  as "Battery Level: N%". Nothing is written to disk.
+- The tab has its own model button (the thermal standalone model by default),
+  independent of the model used for live estimates. Changing the model
+  re-runs the open image.
+- The live-capture footer is hidden on this tab so the picture has the room;
+  it stays while a live estimate is running, and an image cannot be opened
+  until that estimate has finished.
+
+The opened picture is taken as the selected model's own input image:
+
+| Model | Open |
+|---|---|
+| Thermal standalone | a thermal camera image (`Thermal Frames/*.png`) |
+| mmWave standalone | a mmWave range-angle frame (`mmWave Frames/*.jpg`) |
+| Voice standalone | a magma spectrogram image, as its notebook saved it |
+| Fusion models | the already fused image (256×256; another size is resized to it) |
+
+The picture is not checked against the model: a thermal image given to the
+mmWave model still produces a number, so the tab names what the selected model
+expects. The one refusal is an image far larger than a radar frame for the
+mmWave standalone, which runs at the picture's own size.
+
+The screen lives in `CoBas Battery Reader V1.0 App/LocalImageInference.py`; the
+recipe is `preprocess.image_model_input`, also available as
+`Predictor.predict_image(path)`.
+
 ## Screenshots
 
 Captured on the Pi's 800×480 touchscreen (`CoBas/Screenshots/`):
@@ -93,6 +130,7 @@ Captured on the Pi's 800×480 touchscreen (`CoBas/Screenshots/`):
 | `3.png` Data Collection: live sensors (idle) | `4.png` Data Collection: system tab |
 | `5.png` Inference setup with the model loaded | `6.png` model picker (fusion ratios and standalone models) |
 | `7.png` live sensors during the chirp | `8.png` result after a real chirp: "Battery Level: N%" |
+| `9.png` Local Image Inference: result for an opened thermal image | `10.png` Local Image Inference: image browser |
 
 ## Model families and their recipes
 

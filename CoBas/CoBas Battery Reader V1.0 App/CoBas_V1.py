@@ -30,6 +30,7 @@ from InferenceMode import (
     format_battery_level,
     format_estimate,
 )
+from LocalImageInference import LocalImageInferencePanel
 from MMWave import MMWaveCaptureService
 from PIL import Image, ImageTk
 from Settings import SettingsWindow
@@ -310,11 +311,26 @@ class CoBasV1App:
         system = ttk.Frame(self.notebook, style="Panel.TFrame")
         self.notebook.add(preview, text="Live sensors")
         self.notebook.add(setup, text="Inference setup" if self.inference_mode else "Capture setup")
+        if self.inference_mode:
+            self.footer = footer
+            self.local_image_tab = ttk.Frame(self.notebook, style="Panel.TFrame")
+            self.notebook.add(self.local_image_tab, text="Local Image Inference")
+            self.local_image_panel = LocalImageInferencePanel(self.local_image_tab, self)
+            self.notebook.bind("<<NotebookTabChanged>>", self.handle_tab_changed)
         self.notebook.add(system, text="System")
         self.build_preview_panel(preview)
         self.build_control_panel(setup)
         self.build_system_panel(system)
         self.notebook.select(setup)
+
+    def handle_tab_changed(self, event=None):
+        """Local Image Inference has its own read-out, so the live-capture footer
+        makes way for the picture there unless a capture is running."""
+        on_local_image = self.notebook.select() == str(self.local_image_tab)
+        if on_local_image and not (self.pulse_sequence_active or self.export_in_progress):
+            self.footer.pack_forget()
+        elif not self.footer.winfo_manager():
+            self.footer.pack(side="bottom", fill="x", before=self.notebook)
 
     def build_toolbar(self, parent):
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(8, 4))
