@@ -55,6 +55,24 @@ standalone models open the saved frame itself; a session holds no ready-made
 picture for the other models, so their fused image (or voice spectrogram) is
 written to a PNG first and that file is opened.
 
+```bash
+.venv/bin/python -m cobas_inference build-test-dataset "/home/tailab/Datasets/CoBas/10 Battery 4 Positions Outside Dataset" "/home/tailab/Datasets/CoBas/CoBas Test Dataset"
+```
+
+```bash
+.venv/bin/python -m cobas_inference check-test-dataset "/home/tailab/Datasets/CoBas/CoBas Test Dataset"
+```
+
+`build-test-dataset` writes a small dataset of ready-to-open pictures: for
+every checkpoint under `models/`, ten pictures per battery level (110 per
+model), laid out as `<models sub-folder>/<model name>/<N>_Percent_Battery/`,
+for example `Standalone/CoBas Thermal Model/60_Percent_Battery/`. Each picture
+is what that model takes in Local Image Inference (the saved frame, the
+spectrogram, or the image fused with that checkpoint's own weights), every
+model gets the same chirps, spread evenly over each level's recordings, and
+`manifest.csv` lists the source files. `check-test-dataset` classifies every
+picture with its own model and reports the misses.
+
 ## Python API
 
 ```python
@@ -270,3 +288,37 @@ recorded level.
 
 These are sessions the models were trained on, so this checks that the screen
 and its recipe work; it says nothing about a new recording day.
+
+### CoBas Test Dataset (2026-11-09)
+
+`/home/tailab/Datasets/CoBas/CoBas Test Dataset` was built from the same Oct 21
+dataset with `build-test-dataset`: 16 checkpoints × 11 battery levels × 10
+pictures = 110 pictures per model, 1,760 in total (129 MB). Each level's ten
+chirps are numbers 11, 31, … 191 of its session, so all four positions are
+covered. `check-test-dataset` reads 1,731 of 1,760 correctly:
+
+| Models sub-folder | Model folder | Correct of 110 |
+|---|---|---|
+| Standalone | CoBas Thermal Model | 107 |
+| Standalone | CoBas mmWave Model | 110 |
+| Standalone | CoBas Voice Reflection Recognition Model | 110 |
+| 1 - 1 - 1, 1 - 1 - 2, 1 - 2 - 1 and 2 - 1 - 1 Fusions | CoBas mmWave Thermal Voice Fusion Model | 110 each |
+| 1 - 1, 1 - 2 and 2 - 1 Fusions | CoBas mmWave Thermal Fusion Model | 110 each |
+| 1 - 1 Fusions | CoBas mmWave and Voice Fusion Model | 109 |
+| 1 - 2 Fusions | CoBas mmWave and Voice Fusion Model | 110 |
+| 2 - 1 Fusions | CoBas mmWave and Voice Fusion Model | 107 |
+| 1 - 1 Fusions | CoBas Thermal and Voice Model | 106 |
+| 1 - 2 Fusions | CoBas Thermal and Voice Model | 102 |
+| 2 - 1 Fusions | CoBas Thermal and Voice Model | 100 |
+
+The misses are the models' own: the Thermal and Voice ratio folders give the
+same 102 and 100 from the raw chirps, and reading their folder ratio the other
+way round drops them to chance (10 and 12 of 110). The misses and the date are
+kept beside the pictures in `check_results_2026-11-09.txt`. One picture per
+model type was also opened on the Pi through the Local Image Inference screen
+(seven pictures, all read correctly).
+
+The 1 - 2 and 2 - 1 mmWave Thermal checkpoints make the loader warn that their
+stored description (mmWave min-max, ImageNet normalization) differs from the
+registry recipe. The registry recipe is the one that fits them: it reads
+110/110 on these chirps, while the stored description reads 10 and 13 of 110.

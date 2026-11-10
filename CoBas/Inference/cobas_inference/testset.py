@@ -1,0 +1,255 @@
+"""Build and check a small test dataset: a few pictures per battery level for every model.
+
+Each picture is the one that model takes in Local Image Inference: the saved
+thermal or mmWave frame for those standalone models, the spectrogram for the
+voice standalone, and the fused image for a fusion model (built with that
+checkpoint's own fusion weights). The layout mirrors the models folder::
+
+    CoBas Test Dataset/
+        Standalone/CoBas Thermal Model/60_Percent_Battery/Thermal_Image_60_Percent_Position_1_011.png
+        1 - 1 - 1 Fusions/CoBas mmWave Thermal Voice Fusion Model/60_Percent_Battery/Fused_Image_60_Percent_Position_1_011.png
+        manifest.csv
+        README.txt
+
+Every model gets the same chirps, spread evenly over each class's recordings.
+"""
+
+from __future__ import annotations
+
+import csv
+import shutil
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Callable, Mapping
+
+from PIL import Image
+
+from . import preprocess
+from .session import ChirpTriplet, discover_session, find_sessions, label_from_path
+from .specs import MODALITIES, THERMAL, VOICE, FusionSpec, resolve_spec
+
+# Folder names spell out the checkpoint file names.
+MODEL_NAMES = {
+    "thermal": "CoBas Thermal Model",
+    "mmwave": "CoBas mmWave Model",
+    "voice": "CoBas Voice Reflection Recognition Model",
+    "mmwave_thermal_voice": "CoBas mmWave Thermal Voice Fusion Model",
+    "mmwave_thermal": "CoBas mmWave Thermal Fusion Model",
+    "mmwave_voice": "CoBas mmWave and Voice Fusion Model",
+    "thermal_voice": "CoBas Thermal and Voice Model",
+}
+MANIFEST = "manifest.csv"
+README = "README.txt"
+
+
+@dataclass(frozen=True)
+class DatasetModel:
+    path: Path
+    spec: FusionSpec
+
+    @property
+    def group(self) -> str:
+        """The models sub-folder: 'Standalone' or a ratio such as '1 - 1 - 1 Fusions'."""
+        return self.path.parent.name
+
+    @property
+    def name(self) -> str:
+        return MODEL_NAMES[self.spec.family]
+
+    @property
+    def folder(self) -> Path:
+        return Path(self.group) / self.name
+
+
+def _checkpoint_metadata(path: Path) -> Mapping:
+    from .model import checkpoint_metadata, load_checkpoint
+
+    return checkpoint_metadata(load_checkpoint(path))
+
+
+def find_models(models_directory: str | Path, read_metadata: Callable[[Path], Mapping] = _checkpoint_metadata) -> list[DatasetModel]:
+    """Every checkpoint (.pth) with a known recipe; standalone models first, then by ratio folder."""
+    models = []
+    for path in sorted(Path(models_directory).rglob("*.pth")):
+        try:
+            spec = resolve_spec(path, read_metadata(path))
+        except KeyError:
+            continue  # Not one of the CoBas model files.
+        models.append(DatasetModel(path, spec))
+    return sorted(models, key=lambda m: (len(m.spec.modalities) > 1, m.group, m.name))
+
+
+def pick_evenly(items: list, count: int) -> list:
+    """``count`` items spread evenly over ``items`` (centred, so never just the first ones)."""
+    if count >= len(items):
+        return list(items)
+    step = len(items) / count
+    return [items[int(step * i + step / 2)] for i in range(count)]
+
+
+def picture_name(spec: FusionSpec, chirp: ChirpTriplet, percent: int, session_tag: str = "") -> str:
+    """Thermal frames keep the app's file name; the other pictures follow the same pattern."""
+    suffix = f"{percent}_Percent_Position_{chirp.position}_{chirp.index:03d}"
+    if session_tag:
+        suffix = f"{suffix}_{session_tag}"
+    if preprocess.is_raw_frame_model(spec):
+        if spec.modalities == (THERMAL,):
+            return f"Thermal_Image_{suffix}.png"
+        return f"mmWave_Frame_{suffix}{chirp.mmwave.suffix.lower()}"
+    if spec.modalities == (VOICE,):
+        return f"Voice_Spectrogram_{suffix}.png"
+    return f"Fused_Image_{suffix}.png"
+
+
+def write_picture(spec: FusionSpec, chirp: ChirpTriplet, target: Path) -> None:
+    """Copy the saved frame unchanged, or save the fused image / spectrogram as a PNG."""
+    paths = chirp.paths()
+    if preprocess.is_raw_frame_model(spec):
+        shutil.copyfile(paths[spec.modalities[0]], target)
+    else:
+        Image.fromarray(preprocess.fused_image(paths, spec)).save(target)
+
+
+def chirps_by_class(source: str | Path) -> dict[str, list[tuple[Path, ChirpTriplet]]]:
+    """Complete chirps (thermal, mmWave and voice all present) of every labelled session, per class folder."""
+    classes: dict[str, list[tuple[Path, ChirpTriplet]]] = defaultdict(list)
+    for session in find_sessions(source):
+        if label_from_path(session) is None:
+            continue
+        try:
+            chirps = discover_session(session)
+        except FileNotFoundError:
+            continue  # An aborted capture: the folder skeleton with no chirp files.
+        complete = [(session, chirp) for chirp in chirps if all(m in chirp.paths() for m in MODALITIES)]
+        if complete:
+            classes[session.parent.name].extend(complete)
+    return dict(sorted(classes.items(), key=lambda item: int(label_from_path(Path(item[0])).rstrip("%"))))
+
+
+def build(
+    source: str | Path,
+    models_directory: str | Path,
+    out: str | Path,
+    per_class: int = 10,
+    read_metadata: Callable[[Path], Mapping] = _checkpoint_metadata,
+    progress: Callable[[str], None] = print,
+) -> list[dict]:
+    """Write the test dataset to ``out`` (which must not exist yet) and return the manifest rows."""
+    source, out = Path(source), Path(out)
+    if out.exists():
+        raise FileExistsError(f"{out} already exists; remove it or choose another folder")
+    models = find_models(models_directory, read_metadata)
+    if not models:
+        raise FileNotFoundError(f"No CoBas checkpoints found under {models_directory}")
+    classes = chirps_by_class(source)
+    if not classes:
+        raise FileNotFoundError(f"No labelled capture sessions with complete chirps under {source}")
+
+    rows: list[dict] = []
+    out.mkdir(parents=True)
+    for model in models:
+        written = len(rows)
+        for class_folder, candidates in classes.items():
+            percent = int(label_from_path(Path(class_folder)).rstrip("%"))
+            several_sessions = len({session for session, _ in candidates}) > 1
+            target_directory = out / model.folder / class_folder
+            target_directory.mkdir(parents=True)
+            for session, chirp in pick_evenly(candidates, per_class):
+                tag = session.name.removeprefix("Session_") if several_sessions else ""
+                name = picture_name(model.spec, chirp, percent, tag)
+                write_picture(model.spec, chirp, target_directory / name)
+                rows.append({
+                    "group": model.group,
+                    "model": model.name,
+                    "checkpoint": model.path.name,
+                    "class": class_folder,
+                    "picture": str(model.folder / class_folder / name),
+                    "session": session.name,
+                    "position": chirp.position,
+                    "chirp": chirp.index,
+                    "sources": "; ".join(chirp.paths()[m].name for m in model.spec.modalities),
+                })
+        progress(f"{model.folder}: {len(rows) - written} pictures")
+
+    with open(out / MANIFEST, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    (out / README).write_text(_readme(source, models, classes, per_class), encoding="utf-8")
+    return rows
+
+
+def _readme(source: Path, models: list[DatasetModel], classes: Mapping[str, list], per_class: int) -> str:
+    per_model = sum(min(per_class, len(chirps)) for chirps in classes.values())
+    lines = [
+        "CoBas Test Dataset",
+        "==================",
+        "",
+        f"Built on {date.today().isoformat()} from: {source}",
+        f"{len(models)} models x {len(classes)} battery levels x {per_class} pictures "
+        f"= {per_model} pictures per model, {per_model * len(models)} in total.",
+        "",
+        "Layout: <models sub-folder>/<model name>/<battery level>/<picture>",
+        "The sub-folders and model names follow CoBas/Inference/models, so each",
+        "checkpoint has its own pictures. A fusion model's pictures are fused with",
+        "that checkpoint's own weights and must not be used with another ratio.",
+        "",
+        "What each model's picture is:",
+        "  CoBas Thermal Model                       the saved thermal frame (unchanged copy)",
+        "  CoBas mmWave Model                        the saved mmWave frame (unchanged copy)",
+        "  CoBas Voice Reflection Recognition Model  the spectrogram of the voice recording",
+        "  fusion models                             the fused 256x256 image",
+        "",
+        "Every model has the same chirps: for each battery level, the chirps are",
+        f"spread evenly over that level's recordings ({per_class} per level). The",
+        "position and chirp number are in each file name, and manifest.csv lists the",
+        "session and source files of every picture.",
+        "",
+        "To use: in the app's Local Image Inference tab choose the model, tap Open",
+        "Image and open a picture from that model's folder. The battery level in the",
+        "folder name is the expected read-out.",
+        "",
+        "To check every picture against its model:",
+        "  python -m cobas_inference check-test-dataset <this folder>",
+        "",
+        "Models:",
+    ]
+    lines += [f"  {model.folder}  ({model.path.name})" for model in models]
+    return "\n".join(lines) + "\n"
+
+
+def check(
+    dataset: str | Path,
+    models_directory: str | Path,
+    load_predictor: Callable[[Path], object] | None = None,
+    progress: Callable[[str], None] = print,
+    read_metadata: Callable[[Path], Mapping] = _checkpoint_metadata,
+) -> list[dict]:
+    """Classify every picture with its own model; return one row per model with the misses."""
+    if load_predictor is None:
+        from .predictor import Predictor
+
+        load_predictor = Predictor.from_model
+    dataset = Path(dataset)
+    results = []
+    for model in find_models(models_directory, read_metadata):
+        folder = dataset / model.folder
+        if not folder.is_dir():
+            progress(f"{model.folder}: no pictures in the dataset")
+            continue
+        predictor = load_predictor(model.path)
+        total, misses = 0, []
+        for class_folder in sorted(p for p in folder.iterdir() if p.is_dir()):
+            expected = label_from_path(class_folder)
+            for picture in sorted(class_folder.iterdir()):
+                predicted = predictor.predict_image(picture).label
+                total += 1
+                if predicted != expected:
+                    misses.append((picture.name, expected, predicted))
+        results.append({"model": str(model.folder), "pictures": total, "correct": total - len(misses), "misses": misses})
+        progress(f"{model.folder}: {total - len(misses)}/{total} correct")
+        for name, expected, predicted in misses:
+            progress(f"    {name}: recorded {expected}, read as {predicted}")
+    return results

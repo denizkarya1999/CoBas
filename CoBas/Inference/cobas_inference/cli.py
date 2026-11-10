@@ -5,6 +5,8 @@
     python -m cobas_inference replay    --model MODEL.pth SESSION_OR_DATASET_DIR [--csv out.csv] [--as-images]
     python -m cobas_inference export-onnx --model MODEL.pth --out MODEL.onnx
     python -m cobas_inference bench     --model MODEL.pth|MODEL.onnx
+    python -m cobas_inference build-test-dataset SOURCE_DATASET_DIR OUT_DIR [--per-class 10]
+    python -m cobas_inference check-test-dataset TEST_DATASET_DIR
 """
 
 from __future__ import annotations
@@ -212,6 +214,31 @@ def image_classifier(predictor: Predictor, scratch: Path):
     return classify
 
 
+def cmd_build_test_dataset(args: argparse.Namespace) -> int:
+    from . import testset
+
+    try:
+        rows = testset.build(args.source, args.models, args.out, per_class=args.per_class)
+    except (FileExistsError, FileNotFoundError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    print(f"{len(rows)} pictures written to {args.out}")
+    return 0
+
+
+def cmd_check_test_dataset(args: argparse.Namespace) -> int:
+    from . import testset
+
+    results = testset.check(args.path, args.models, lambda path: Predictor.from_model(path, threads=args.threads))
+    if not results:
+        print(f"error: no model folders found under {args.path}", file=sys.stderr)
+        return 2
+    pictures = sum(r["pictures"] for r in results)
+    correct = sum(r["correct"] for r in results)
+    print(f"overall: {correct}/{pictures} correct over {len(results)} models")
+    return 0
+
+
 def select_chirps(chirps: list, stride: int | None = 1, limit: int | None = None) -> list:
     """Every ``stride``-th chirp (so a short run still spans all positions), then at most ``limit``."""
     if stride and stride > 1:
@@ -279,6 +306,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--runs", type=int, default=20)
     p.set_defaults(func=cmd_bench)
+
+    default_models = str(Path(__file__).resolve().parents[1] / "models")
+    p = sub.add_parser("build-test-dataset", help="write a few pictures per battery level for every model")
+    p.add_argument("source", help="dataset root containing <N>_Percent_Battery/Session_...")
+    p.add_argument("out", help="folder to create, e.g. '.../CoBas Test Dataset'")
+    p.add_argument("--models", default=default_models, help="folder holding the checkpoints")
+    p.add_argument("--per-class", type=int, default=10, help="pictures per battery level for each model")
+    p.set_defaults(func=cmd_build_test_dataset)
+
+    p = sub.add_parser("check-test-dataset", help="classify every picture of a test dataset with its own model")
+    p.add_argument("path", help="folder written by build-test-dataset")
+    p.add_argument("--models", default=default_models, help="folder holding the checkpoints")
+    p.add_argument("--threads", type=int, default=None, help="CPU threads for inference")
+    p.set_defaults(func=cmd_check_test_dataset)
     return parser
 
 
