@@ -45,6 +45,16 @@ frame (exactly as the training notebooks paired them), prints a per-session
 vote and per-chirp accuracy when the folder name carries the label, and can
 write every prediction to CSV.
 
+```bash
+.venv/bin/python -m cobas_inference replay --as-images --model "models/Standalone/CoBas_thermal_model.pth" "/home/tailab/Datasets/CoBas/10 Battery 4 Positions Outside Dataset"
+```
+
+`--as-images` runs the same walk through the Local Image Inference recipe: one
+picture per chirp, opened as that screen opens it. The thermal and mmWave
+standalone models open the saved frame itself; a session holds no ready-made
+picture for the other models, so their fused image (or voice spectrogram) is
+written to a PNG first and that file is opened.
+
 ## Python API
 
 ```python
@@ -165,6 +175,11 @@ difference between the Colab and Raspberry Pi FFT stacks; see
 
 ## Phase 1 results (2026-11-07, Raspberry Pi 5)
 
+Since 2026-11-09 the device holds only the latest dataset, Oct 21 "10 Battery
+4 Positions Outside Dataset", and all testing uses it. The Oct 16 "ELB
+Outside" dataset was removed from the device that day, so the Oct 16 figures
+below are a record of the 2026-11-07 runs and cannot be re-run here.
+
 **Parity.** Regenerating the training images from the raw chirp files matches
 the notebook output byte for byte for every resize, the floor-quantized
 spectrogram and all fusion arithmetic; the round-to-nearest spectrograms
@@ -228,3 +243,30 @@ session, not the battery level, and must be retrained with several sessions
 per class (and validated leave-one-session-out) before Inference Mode can show
 a trustworthy number. The pipeline itself is ready; `replay` is the harness for
 that validation.
+
+## Local Image Inference check (2026-11-09, latest dataset only)
+
+Eleven pictures per model: the first chirp of each battery level's session in
+the Oct 21 "4 Positions" dataset, opened through the Local Image Inference
+recipe with `replay --as-images --stride 200 --limit 1`.
+
+| Model | Picture opened | Correct |
+|---|---|---|
+| Standalone thermal | thermal frame | 11/11 |
+| Standalone mmWave | mmWave frame | 10/11 (40 % read as 30 %) |
+| Standalone voice | spectrogram PNG | 11/11 |
+| Three-modal 1-1-1 | fused PNG | 11/11 |
+| mmWave-Thermal 1-1 | fused PNG | 11/11 |
+| mmWave-Voice 1-1 | fused PNG | 10/11 (40 % read as 30 %) |
+| Thermal-Voice 1-1 | fused PNG | 10/11 (90 % read as 80 %) |
+
+On all 77 chirps the picture gives the same answer as the raw chirp through
+`replay`, so the three misses are the models' own, not the picture path.
+
+The screen itself was also driven on the Pi: for each battery level one
+thermal frame and one mmWave frame (a different chirp per level) were opened
+by tapping through the image browser, and all 22 read-outs matched the
+recorded level.
+
+These are sessions the models were trained on, so this checks that the screen
+and its recipe work; it says nothing about a new recording day.

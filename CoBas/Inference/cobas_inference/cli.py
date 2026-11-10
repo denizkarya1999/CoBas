@@ -2,7 +2,7 @@
 
     python -m cobas_inference inspect   MODEL.pth
     python -m cobas_inference predict   --model MODEL.pth --mmwave f.jpg --thermal f.png --voice f.wav
-    python -m cobas_inference replay    --model MODEL.pth SESSION_OR_DATASET_DIR [--csv out.csv]
+    python -m cobas_inference replay    --model MODEL.pth SESSION_OR_DATASET_DIR [--csv out.csv] [--as-images]
     python -m cobas_inference export-onnx --model MODEL.pth --out MODEL.onnx
     python -m cobas_inference bench     --model MODEL.pth|MODEL.onnx
 """
@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import sys
+import tempfile
 import time
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -20,6 +21,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from . import preprocess
 from .model import checkpoint_metadata, load_checkpoint, load_model, parameter_count, export_onnx
 from .predictor import Predictor, VoteAggregator
 from .session import discover_session, find_sessions, label_from_path
@@ -89,6 +91,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
         return 2
     print(f"model: {predictor.spec.family} ({predictor.runner.name}); weights {predictor.spec.weights_source}")
     print(f"sessions: {len(sessions)}")
+    scratch = tempfile.TemporaryDirectory(prefix="cobas-replay-") if args.as_images else None
+    if scratch:
+        classify = image_classifier(predictor, Path(scratch.name))
+        print("input: one picture per chirp, opened as Local Image Inference opens it")
+    else:
+        classify = predictor.predict_triplet
 
     writer = None
     csv_file = None
@@ -120,7 +128,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
         correct = 0
         elapsed = []
         for triplet in usable:
-            prediction = predictor.predict_triplet(triplet)
+            prediction = classify(triplet)
             aggregator.add(prediction)
             elapsed.append(prediction.elapsed_ms)
             if true_label is not None and prediction.label == true_label:
@@ -145,6 +153,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
             summary += f" {np.mean(elapsed):.0f} ms/chirp"
         print(summary)
 
+    if scratch:
+        scratch.cleanup()
     if csv_file:
         csv_file.close()
         print(f"per-chirp predictions written to {args.csv}")
@@ -180,6 +190,26 @@ def cmd_bench(args: argparse.Namespace) -> int:
         model, _, _ = load_model(args.model)
         print(f"parameters: {parameter_count(model):,}")
     return 0
+
+
+def image_classifier(predictor: Predictor, scratch: Path):
+    """Classify a chirp the way Local Image Inference does: from one picture on disk.
+
+    A thermal or mmWave standalone model opens the saved frame itself. A capture
+    session holds no ready-made picture for the other models, so their fused
+    image (or voice spectrogram) is written to a PNG first and that file is opened.
+    """
+    raw_frame = preprocess.is_raw_frame_model(predictor.spec)
+    picture = scratch / "picture.png"
+
+    def classify(triplet):
+        paths = triplet.paths()
+        if raw_frame:
+            return predictor.predict_image(paths[predictor.spec.modalities[0]])
+        Image.fromarray(predictor.fused_image(paths)).save(picture)
+        return predictor.predict_image(picture)
+
+    return classify
 
 
 def select_chirps(chirps: list, stride: int | None = 1, limit: int | None = None) -> list:
@@ -231,6 +261,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stride", type=int, default=1, help="use every N-th chirp (spreads a limited run over all positions)")
     p.add_argument("--limit", type=int, default=None, help="max chirps per session (applied after --stride)")
     p.add_argument("--csv", help="write per-chirp predictions to this CSV")
+    p.add_argument(
+        "--as-images", action="store_true",
+        help="classify one picture per chirp as Local Image Inference does (the saved frame, "
+             "or the fused image / spectrogram written to a PNG first)",
+    )
     p.set_defaults(func=cmd_replay)
 
     p = sub.add_parser("export-onnx", help="export a .pth checkpoint to ONNX with a JSON sidecar")

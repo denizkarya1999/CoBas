@@ -95,6 +95,37 @@ def test_predict_image_runs_the_network_on_the_picture(fixtures_available):
     np.testing.assert_array_equal(seen[0], preprocess.image_model_input(THERMAL, specs.THERMAL_ONLY))
 
 
+def _recording_predictor(spec, name):
+    seen = []
+
+    def runner(x):
+        seen.append(x)
+        return np.zeros((1, len(CLASSES)), dtype=np.float32)
+
+    return Predictor(runner, spec, CLASSES, Path(name), {}), seen
+
+
+def test_replay_as_images_opens_the_frame_or_a_saved_fused_image(fixtures_available, tmp_path):
+    """``replay --as-images`` runs a dataset through the Local Image Inference recipe."""
+    from cobas_inference.cli import build_parser, image_classifier
+    from cobas_inference.session import ChirpTriplet
+
+    chirp = ChirpTriplet(position=1, index=1, global_index=1, mmwave=MMWAVE, thermal=THERMAL, voice=VOICE)
+    predictor, seen = _recording_predictor(specs.THERMAL_ONLY, "CoBas_thermal_model.pth")
+    image_classifier(predictor, tmp_path)(chirp)
+    np.testing.assert_array_equal(seen[0], preprocess.image_model_input(THERMAL, specs.THERMAL_ONLY))
+    assert not list(tmp_path.iterdir())  # the saved frame itself was opened
+
+    predictor, seen = _recording_predictor(specs.THERMAL_VOICE, "CoBas_thermal_and_voice_model.pth")
+    image_classifier(predictor, tmp_path)(chirp)
+    np.testing.assert_array_equal(seen[0], preprocess.model_input(chirp.paths(), specs.THERMAL_VOICE))
+    assert [p.name for p in tmp_path.iterdir()] == ["picture.png"]
+
+    args = build_parser().parse_args(["replay", "--model", "m.pth", "some/dir"])
+    assert args.as_images is False
+    assert build_parser().parse_args(["replay", "--model", "m.pth", "d", "--as-images"]).as_images is True
+
+
 # --------------------------------------------------------------------------- #
 # App screen logic
 # --------------------------------------------------------------------------- #
