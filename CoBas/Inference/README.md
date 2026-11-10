@@ -46,32 +46,33 @@ vote and per-chirp accuracy when the folder name carries the label, and can
 write every prediction to CSV.
 
 ```bash
-.venv/bin/python -m cobas_inference replay --as-images --model "models/Standalone/CoBas_thermal_model.pth" "/home/tailab/Datasets/CoBas/10 Battery 4 Positions Outside Dataset"
+.venv/bin/python -m cobas_inference replay --as-files --model "models/Standalone/CoBas_thermal_model.pth" "/home/tailab/Datasets/CoBas/10 Battery 4 Positions Outside Dataset"
 ```
 
-`--as-images` runs the same walk through the Local Image Inference recipe: one
-picture per chirp, opened as that screen opens it. The thermal and mmWave
-standalone models open the saved frame itself; a session holds no ready-made
-picture for the other models, so their fused image (or voice spectrogram) is
-written to a PNG first and that file is opened.
+`--as-files` runs the same walk through the Local File Inference recipe: one
+file per chirp, opened as that screen opens it. A standalone model opens the
+saved file itself (the thermal frame, the mmWave frame or the voice
+recording); a session holds no ready-made picture for a fusion model, so its
+fused image is written to a PNG first and that file is opened.
 
 ```bash
-.venv/bin/python -m cobas_inference build-test-dataset "/home/tailab/Datasets/CoBas/10 Battery 4 Positions Outside Dataset" "/home/tailab/Datasets/CoBas/CoBas Test Dataset"
+.venv/bin/python -m cobas_inference build-latest-dataset "/home/tailab/Datasets/CoBas/10 Battery 4 Positions Outside Dataset" "/home/tailab/Datasets/CoBas/CoBas Latest Dataset"
 ```
 
 ```bash
-.venv/bin/python -m cobas_inference check-test-dataset "/home/tailab/Datasets/CoBas/CoBas Test Dataset"
+.venv/bin/python -m cobas_inference check-latest-dataset "/home/tailab/Datasets/CoBas/CoBas Latest Dataset"
 ```
 
-`build-test-dataset` writes a small dataset of ready-to-open pictures: for
-every checkpoint under `models/`, ten pictures per battery level (110 per
+`build-latest-dataset` writes a small dataset of ready-to-open files: for
+every checkpoint under `models/`, ten files per battery level (110 per
 model), laid out as `<models sub-folder>/<model name>/<N>_Percent_Battery/`,
-for example `Standalone/CoBas Thermal Model/60_Percent_Battery/`. Each picture
-is what that model takes in Local Image Inference (the saved frame, the
-spectrogram, or the image fused with that checkpoint's own weights), every
-model gets the same chirps, spread evenly over each level's recordings, and
-`manifest.csv` lists the source files. `check-test-dataset` classifies every
-picture with its own model and reports the misses.
+for example `Standalone/CoBas Thermal Model/60_Percent_Battery/`. Each file
+is what that model takes in Local File Inference: an unchanged copy of the
+saved thermal frame, mmWave frame or voice recording for the standalone
+models, and the image fused with that checkpoint's own weights for a fusion
+model. Every model gets the same chirps, spread evenly over each level's
+recordings, and `manifest.csv` lists the source files. `check-latest-dataset`
+classifies every file with its own model and reports the misses.
 
 ## Python API
 
@@ -111,42 +112,101 @@ for example on a kiosk. In Inference Mode:
 The app side lives in `CoBas Battery Reader V1.0 App/InferenceMode.py`; the
 capture, pulse and sensor code is untouched.
 
-### Local Image Inference
+### Local File Inference
 
-Inference Mode also has a **Local Image Inference** tab that estimates the
-battery level of one picture already on disk. No chirp is played and no sensor
-is read.
+Inference Mode also has a **Local File Inference** tab that estimates the
+battery level of one file already on disk: a picture or a voice recording. No
+chirp is played and no sensor is read.
 
-- "Open Image" opens a touch file browser: folders first, then PNG, JPG and BMP
-  files; tap a folder to enter it and an image to open it, and tap
-  "Page N / M" for a keypad to jump in a long folder. It starts in the app's
-  `Captures` folder and reopens where the last image came from.
-- The picture is classified in the background and the result appears under it
-  as "Battery Level: N%". Nothing is written to disk.
+- "Open File" opens a touch file browser: folders first, then pictures (PNG,
+  JPG, BMP) and voice recordings (WAV, FLAC); tap a folder to enter it and a
+  file to open it, and tap "Page N / M" for a keypad to jump in a long folder.
+  It starts in `~/Datasets` (or `COBAS_DATASETS_DIR`) and reopens where the
+  last file came from.
+- The file is classified in the background and the result appears under the
+  picture as "Battery Level: N%". Nothing is written to disk.
+- A voice recording is converted to its spectrogram first, by the voice
+  standalone's own recipe, and the spectrogram is shown where a picture would
+  be. Only the voice standalone can read a recording; with any other model the
+  tab says so and gives no estimate.
 - The tab has its own model button (the thermal standalone model by default),
   independent of the model used for live estimates. Changing the model
-  re-runs the open image.
+  re-runs the open file.
 - The live-capture footer is hidden on this tab so the picture has the room;
-  it stays while a live estimate is running, and an image cannot be opened
+  it stays while a live estimate is running, and a file cannot be opened
   until that estimate has finished.
 
-The opened picture is taken as the selected model's own input image:
+What to open for each model:
 
 | Model | Open |
 |---|---|
 | Thermal standalone | a thermal camera image (`Thermal Frames/*.png`) |
 | mmWave standalone | a mmWave range-angle frame (`mmWave Frames/*.jpg`) |
-| Voice standalone | a magma spectrogram image, as its notebook saved it |
+| Voice standalone | a voice recording (`Voices/*.wav`), or a magma spectrogram image as its notebook saved it |
 | Fusion models | the already fused image (256×256; another size is resized to it) |
 
-The picture is not checked against the model: a thermal image given to the
+A picture is not checked against the model: a thermal image given to the
 mmWave model still produces a number, so the tab names what the selected model
-expects. The one refusal is an image far larger than a radar frame for the
-mmWave standalone, which runs at the picture's own size.
+expects. Two things are refused: a voice recording with a model other than the
+voice standalone, and a picture far larger than a radar frame for the mmWave
+standalone, which runs at the picture's own size. Only lossless recordings are
+listed; a lossy copy (OGG, MP3) loses the 17.5–20 kHz band the model reads.
 
-The screen lives in `CoBas Battery Reader V1.0 App/LocalImageInference.py`; the
-recipe is `preprocess.image_model_input`, also available as
-`Predictor.predict_image(path)`.
+The screen lives in `CoBas Battery Reader V1.0 App/LocalFileInference.py`; the
+recipe is `preprocess.file_model_input`, also available as
+`Predictor.predict_file(path)`.
+
+### Reliability fixes (2026-11-09)
+
+A review of the whole app found these defects. The first four, the frozen
+loop and the swallowed thermal error were reproduced against the old code and
+checked against the new code, using the app's real capture, abort and export
+routines with stand-in sensors. The thermal start retry was checked with a
+stand-in sensor and the real one, the settings carry-over and the folder
+clean-up on the real app, and the model-load message by reading only. Both
+modes were then run on the real sensors: live estimates, and a Data Collection
+capture of 4 chirps over 2 positions that saved 4 recordings, 4 thermal frames
+and 4 radar frames.
+
+- **Thermal files of a finished position were deleted.** Stopping or aborting
+  before the next position started recording removed the previous position's
+  thermal video and logs, and the export then failed. The same happened to
+  files kept after a failed export. Cleanup now touches only the position that
+  made the recording.
+- **A stopped chirp left a partial voice recording in the saved dataset.**
+  Recordings (and radar frames) that belong to no saved chirp are now removed
+  when the capture is saved.
+- **A sensor failure in a later position blocked saving the finished ones.**
+  The failed position's chirps were still counted, so the export stopped with
+  "Expected N mmWave frames". They are now dropped and the finished positions
+  are saved.
+- **A failed estimate looked like a successful one.** The reason was replaced
+  by "Ready" and the read-out stayed at "…". The reason now stays on screen
+  and the read-out returns to "—".
+- **A model that failed to load said "still loading" for ever.** It now says
+  the model could not be loaded.
+- **One error could freeze the app.** An exception in any handler stopped the
+  loop that delivers every sensor and worker result, leaving "Saving…" stuck
+  with Close refused. Both polling loops now keep running.
+- **The thermal sensor sometimes failed to start.** The driver allows the
+  first frame only 200 ms beyond the frame period; when it took longer the
+  capture stopped with "Thermal recording could not start" (seen on 3 of 7
+  starts in one test series). The start is now retried up to three times, and
+  if it still fails the message gives the camera's own reason. A thermal
+  error raised while a recording starts also stops the capture now instead of
+  leaving a frozen frame.
+- **Relaunching for the next battery reset every setting.** Chirp count,
+  positions, thermal range and colour mode, microphone and speaker now carry
+  over to the relaunch.
+- **Empty folders were left behind.** An attempt that saved nothing no longer
+  leaves an empty `Session_…` folder, and Inference Mode no longer leaves an
+  empty `Captures` folder. The launcher also stops Python writing
+  `__pycache__` folders.
+
+Known and left as it is: a radar whose serial ports are present but whose
+firmware does not answer takes about 70 seconds to report the failure; the
+`.onnx` and `.pth` copies of a model show the same short name on the model
+button; and thermal Minimum/Maximum take effect only after "Apply".
 
 ## Screenshots
 
@@ -157,15 +217,18 @@ Captured on the Pi's 800×480 touchscreen (`CoBas/Screenshots/`):
 | `1.png` startup mode chooser | `2.png` Data Collection: capture setup |
 | `3.png` Data Collection: live sensors (idle) | `4.png` Data Collection: system tab |
 | `5.png` Inference setup with the model loaded | `6.png` model picker (fusion ratios and standalone models) |
-| `7.png` live sensors during the chirp | `8.png` result after a real chirp: "Battery Level: N%" |
-| `9.png` Local Image Inference: result for an opened thermal image | `10.png` Local Image Inference: image browser |
-| `11.png` Local Image Inference: nothing opened yet | `12.png` Local Image Inference: model picker, standalone models first |
-| `13.png` image browser: the CoBas Test Dataset's sub-folders | `14.png` image browser: the standalone model folders |
-| `15.png` image browser: pictures of one battery level (page 1 of 3) | `16.png` a 40 % mmWave frame read by the mmWave model |
-| `17.png` a 30 % voice spectrogram read by the voice model | `18.png` a 60 % fused image read by the three-modal 1-1-1 model |
-| `19.png` a photo the mmWave model refuses as too large | |
+| `7.png` live sensors during a real chirp | `8.png` result after that chirp: "Battery Level: N%" |
+| `9.png` Local File Inference: a 60 % thermal image read by the thermal model | `10.png` file browser: thermal images of one battery level |
+| `11.png` Local File Inference: nothing opened yet | `12.png` Local File Inference: model picker, standalone models first |
+| `13.png` file browser: the CoBas Latest Dataset's sub-folders | `14.png` file browser: the standalone model folders |
+| `15.png` file browser: voice recordings of one battery level | `16.png` a 40 % mmWave frame read by the mmWave model |
+| `17.png` a 30 % voice recording converted to its spectrogram and read by the voice model | `18.png` a 60 % fused image read by the three-modal 1-1-1 model |
+| `19.png` a photo the mmWave model refuses as too large | `20.png` a voice recording with a model that cannot read it |
+| `21.png` a voice recording while it is being converted | |
 
-Screenshots 13 to 18 use pictures from the CoBas Test Dataset.
+Screenshots 5 to 21 were retaken on 2026-11-09 with the final code; 7 and 8
+are a real chirp through the radar, thermal camera, speaker and microphone,
+and 9 to 18 and 20 to 21 use files from the CoBas Latest Dataset.
 
 ## Model families and their recipes
 
@@ -184,19 +247,17 @@ Batteries Outside with Random Positions Model/Standalone", but their training
 run metadata shows they were trained on the same "4 Positions" dataset as the
 fusion models (the notebooks' output path was updated after that run).
 
-`cobas_inference/specs.py` is the single source of truth for these recipes;
-`tests/test_parity.py` proves them against images the training notebooks saved
-on Drive: every resize, the floor-quantized spectrogram and all fusion
-arithmetic match byte for byte, and the round-to-nearest spectrograms match to
-within one grey level on 8 of 65,536 pixels (a last-bit floating-point
-difference between the Colab and Raspberry Pi FFT stacks; see
-`tests/fixtures/README.md`).
+`cobas_inference/specs.py` is the single source of truth for these recipes.
+They were proved against images the training notebooks saved on Drive: every
+resize, the floor-quantized spectrogram and all fusion arithmetic match byte
+for byte, and the round-to-nearest spectrograms match to within one grey level
+on 8 of 65,536 pixels (a last-bit floating-point difference between the Colab
+and Raspberry Pi FFT stacks).
 
-## Tests
-
-```bash
-.venv/bin/python -m pytest "CoBas/Inference/tests" -q
-```
+The automated tests and their sample chirp were removed from the repository on
+2026-11-09 (they last passed, 53 of 53 for the recipes and the engine, against
+this code that day). They remain in the git history up to commit `eafcb25`
+under `CoBas/Inference/tests`.
 
 ## Phase 1 results (2026-11-07, Raspberry Pi 5)
 
@@ -208,7 +269,7 @@ below are a record of the 2026-11-07 runs and cannot be re-run here.
 **Parity.** Regenerating the training images from the raw chirp files matches
 the notebook output byte for byte for every resize, the floor-quantized
 spectrogram and all fusion arithmetic; the round-to-nearest spectrograms
-differ by one grey level on 8 of 65,536 pixels (see `tests/fixtures/README.md`).
+differ by one grey level on 8 of 65,536 pixels.
 The device therefore feeds the network what it was trained on.
 
 **Speed.** ResNet-18 forward pass, 4 threads: PyTorch ≈ 175 ms median, ONNX
@@ -269,40 +330,44 @@ per class (and validated leave-one-session-out) before Inference Mode can show
 a trustworthy number. The pipeline itself is ready; `replay` is the harness for
 that validation.
 
-## Local Image Inference check (2026-11-09, latest dataset only)
+## Local File Inference check (2026-11-09, latest dataset only)
 
-Eleven pictures per model: the first chirp of each battery level's session in
-the Oct 21 "4 Positions" dataset, opened through the Local Image Inference
-recipe with `replay --as-images --stride 200 --limit 1`.
+Eleven files per model: the first chirp of each battery level's session in
+the Oct 21 "4 Positions" dataset, opened through the Local File Inference
+recipe with `replay --as-files --stride 200 --limit 1`.
 
-| Model | Picture opened | Correct |
+| Model | File opened | Correct |
 |---|---|---|
 | Standalone thermal | thermal frame | 11/11 |
 | Standalone mmWave | mmWave frame | 10/11 (40 % read as 30 %) |
-| Standalone voice | spectrogram PNG | 11/11 |
+| Standalone voice | voice recording, converted to its spectrogram | 11/11 |
 | Three-modal 1-1-1 | fused PNG | 11/11 |
 | mmWave-Thermal 1-1 | fused PNG | 11/11 |
 | mmWave-Voice 1-1 | fused PNG | 10/11 (40 % read as 30 %) |
 | Thermal-Voice 1-1 | fused PNG | 10/11 (90 % read as 80 %) |
 
-On all 77 chirps the picture gives the same answer as the raw chirp through
-`replay`, so the three misses are the models' own, not the picture path.
+On all 77 chirps the file gives the same answer as the raw chirp through
+`replay`, so the three misses are the models' own, not the file path.
 
 The screen itself was also driven on the Pi: for each battery level one
 thermal frame and one mmWave frame (a different chirp per level) were opened
-by tapping through the image browser, and all 22 read-outs matched the
+by tapping through the file browser, and all 22 read-outs matched the
 recorded level.
 
 These are sessions the models were trained on, so this checks that the screen
 and its recipe work; it says nothing about a new recording day.
 
-### CoBas Test Dataset (2026-11-09)
+### CoBas Latest Dataset (2026-11-09)
 
-`/home/tailab/Datasets/CoBas/CoBas Test Dataset` was built from the same Oct 21
-dataset with `build-test-dataset`: 16 checkpoints × 11 battery levels × 10
-pictures = 110 pictures per model, 1,760 in total (129 MB). Each level's ten
-chirps are numbers 11, 31, … 191 of its session, so all four positions are
-covered. `check-test-dataset` reads 1,731 of 1,760 correctly:
+`/home/tailab/Datasets/CoBas/CoBas Latest Dataset` was built from the same Oct
+21 dataset with `build-latest-dataset`: 16 checkpoints × 11 battery levels × 10
+files = 110 files per model, 1,760 in total (140 MB). Each level's ten chirps
+are numbers 11, 31, … 191 of its session, so all four positions are covered.
+The standalone models' folders hold unchanged copies of the saved thermal
+frames, mmWave frames and voice recordings (the voice model's 110 files are
+the WAV recordings, which the app converts to spectrograms); the fusion
+models' folders hold fused images. `check-latest-dataset` reads 1,731 of
+1,760 correctly:
 
 | Models sub-folder | Model folder | Correct of 110 |
 |---|---|---|
@@ -321,9 +386,13 @@ covered. `check-test-dataset` reads 1,731 of 1,760 correctly:
 The misses are the models' own: the Thermal and Voice ratio folders give the
 same 102 and 100 from the raw chirps, and reading their folder ratio the other
 way round drops them to chance (10 and 12 of 110). The misses and the date are
-kept beside the pictures in `check_results_2026-11-09.txt`. One picture per
-model type was also opened on the Pi through the Local Image Inference screen
-(seven pictures, all read correctly).
+kept beside the files in `check_results_2026-11-09.txt`. The three standalone
+models were checked on the final build; the fusion models' images are
+byte-identical to the build that was checked earlier the same day.
+
+On the Pi, a thermal image, a mmWave frame, a voice recording and a fused
+image from this dataset were each opened through the Local File Inference
+screen with their own model, and all four were read correctly.
 
 The 1 - 2 and 2 - 1 mmWave Thermal checkpoints make the loader warn that their
 stored description (mmWave min-max, ImageNet normalization) differs from the

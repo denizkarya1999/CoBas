@@ -41,6 +41,11 @@ RECORD_FPS = int(os.environ.get("MLX90642_RECORD_FPS", "8"))
 # transport-level retries. Do not terminate acquisition on one transient miss.
 FRAME_FAILURE_RETRY_LIMIT = 3
 FRAME_FAILURE_RETRY_DELAY_SECONDS = 0.05
+# The driver gives the sensor only 200 ms beyond its nominal frame period to
+# deliver the first synchronized frame, and it sometimes needs longer. Starting
+# again succeeds, so do that here instead of failing the whole capture.
+INITIALIZE_ATTEMPTS = 3
+INITIALIZE_RETRY_DELAY_SECONDS = 0.1
 
 # Keep the public palette name for existing callers. It contains one unique RGB
 # value for every 0.05 °C interval on the fixed 0–60 °C color scale.
@@ -216,7 +221,8 @@ class CameraWorker(threading.Thread):
                 camera = MLX90642Camera(library_path)
 
             self.events.put(("status", "Initializing camera"))
-            camera.initialize()
+            if not self._initialize(camera):
+                return
             self.events.put(("status", "Live"))
 
             # Event tuples are intentionally data-only: consumers can render,
@@ -254,6 +260,22 @@ class CameraWorker(threading.Thread):
             # Marshal failures to the consumer instead of letting a daemon
             # thread terminate silently where the user cannot see the cause.
             self.events.put(("error", str(exc)))
+
+    def _initialize(self, camera):
+        """Start the sensor, retrying a transient failure. False means a stop was requested."""
+        for attempt in range(1, INITIALIZE_ATTEMPTS + 1):
+            try:
+                camera.initialize()
+                return True
+            except DriverError:
+                if attempt == INITIALIZE_ATTEMPTS:
+                    raise
+                self.events.put(
+                    ("status", f"Retrying thermal camera start ({attempt}/{INITIALIZE_ATTEMPTS - 1})")
+                )
+                if self.stop_event.wait(INITIALIZE_RETRY_DELAY_SECONDS):
+                    return False
+        return True
 
 
 class ThermalRenderer:

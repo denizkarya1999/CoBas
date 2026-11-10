@@ -1,13 +1,15 @@
-"""Local Image Inference: estimate the battery level of one picture from disk.
+"""Local File Inference: estimate the battery level of one file from disk.
 
-No chirp is played and no sensor is read. The user opens an image, the model
-chosen on this screen classifies it in the background, and the screen shows
-the same "Battery Level: N%" read-out as a live estimate.
+No chirp is played and no sensor is read. The user opens a picture or a voice
+recording, the model chosen on this screen classifies it in the background,
+and the screen shows the same "Battery Level: N%" read-out as a live estimate.
 
-The picture is taken as the image that model was trained on: a thermal camera
-image or a mmWave frame for those standalone models, the spectrogram for the
-voice standalone, and the already fused image for the fusion models (see
-``cobas_inference.preprocess.image_model_input``).
+A voice recording is converted to its spectrogram first (voice model only) and
+the spectrogram is shown where a picture would be. A picture is taken as the
+image the selected model was trained on: a thermal camera image or a mmWave
+frame for those standalone models, the spectrogram for the voice standalone,
+and the already fused image for the fusion models (see
+``cobas_inference.preprocess.file_model_input``).
 """
 
 from __future__ import annotations
@@ -33,39 +35,57 @@ from Style import COLORS, FONTS
 from TouchUI import TouchDialog, ask_number, dialogs
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp")
+DATASETS_ENVIRONMENT_VARIABLE = "COBAS_DATASETS_DIR"
 RESULT_FONT = ("Arial", -26, "bold")
 PREVIEW_BACKGROUND = (2, 6, 23)  # COLORS["preview_bg"] as RGB
+VOICE_ONLY = ("voice",)
 
-_EXPECTED_IMAGE = {
+_EXPECTED_FILE = {
     ("thermal",): "a thermal camera image",
     ("mmwave",): "a mmWave range-angle frame",
-    ("voice",): "a voice spectrogram image",
+    VOICE_ONLY: "a voice recording or its spectrogram image",
 }
 
 
 # --------------------------------------------------------------------------- #
-# Models for a single image
+# Models for a single file
 # --------------------------------------------------------------------------- #
 
-def expected_image(choice):
+def expected_file(choice):
     """What to open for this model, e.g. 'a thermal camera image'."""
-    known = _EXPECTED_IMAGE.get(tuple(choice.modalities))
+    known = _EXPECTED_FILE.get(tuple(choice.modalities))
     if known:
         return known
     return f"a fused {FAMILY_LABELS.get(choice.family, choice.family)} image"
 
 
-def image_models(choices):
-    """Standalone models first: a raw sensor frame is what is usually on disk."""
+def file_models(choices):
+    """Standalone models first: a saved frame or recording is what is usually on disk."""
     return sorted(choices, key=lambda c: (len(c.modalities), c.path.parent.name, c.family))
 
 
-def default_image_model(choices):
+def default_file_model(choices):
     """Prefer the thermal standalone model; otherwise the first choice."""
     for choice in choices:
         if choice.family == "thermal":
             return choice
     return choices[0] if choices else None
+
+
+def is_audio(path):
+    """True for a voice recording (the lossless formats the inference package accepts)."""
+    from cobas_inference.preprocess import is_audio as package_is_audio
+
+    return package_is_audio(path)
+
+
+def datasets_directory():
+    """Where the file browser starts: COBAS_DATASETS_DIR, else ~/Datasets, else the home folder."""
+    configured = os.environ.get(DATASETS_ENVIRONMENT_VARIABLE, "").strip()
+    for candidate in ((Path(configured),) if configured else ()) + (Path.home() / "Datasets",):
+        if candidate.is_dir():
+            return candidate
+    return Path.home()
 
 
 # --------------------------------------------------------------------------- #
@@ -78,8 +98,8 @@ def _natural_key(path):
 
 
 def list_directory(directory):
-    """Return (sub-folders, image files) of ``directory``; hidden entries are skipped."""
-    folders, images = [], []
+    """Return (sub-folders, pictures and voice recordings) of ``directory``; hidden entries are skipped."""
+    folders, files = [], []
     with os.scandir(directory) as entries:
         for entry in entries:
             if entry.name.startswith("."):
@@ -87,11 +107,13 @@ def list_directory(directory):
             try:
                 if entry.is_dir():
                     folders.append(Path(entry.path))
-                elif entry.is_file() and Path(entry.name).suffix.lower() in IMAGE_SUFFIXES:
-                    images.append(Path(entry.path))
+                elif entry.is_file() and (
+                    Path(entry.name).suffix.lower() in IMAGE_SUFFIXES or is_audio(entry.name)
+                ):
+                    files.append(Path(entry.path))
             except OSError:
                 continue  # A broken link or an unreadable entry is simply not listed.
-    return sorted(folders, key=_natural_key), sorted(images, key=_natural_key)
+    return sorted(folders, key=_natural_key), sorted(files, key=_natural_key)
 
 
 def shorten(text, limit, keep_end=False):
@@ -101,15 +123,23 @@ def shorten(text, limit, keep_end=False):
     return "…" + text[-(limit - 1):] if keep_end else text[: limit - 1] + "…"
 
 
-class ImageBrowserDialog(TouchDialog):
-    """Tap a folder to enter it, tap an image to open it. Returns the image path."""
+def shorten_middle(text, limit):
+    """Fit a file name on one line, keeping its start and its numbered end."""
+    if len(text) <= limit:
+        return text
+    tail = (limit - 1) // 2
+    return text[: limit - 1 - tail] + "…" + text[-tail:]
+
+
+class FileBrowserDialog(TouchDialog):
+    """Tap a folder to enter it, tap a picture or recording to open it. Returns its path."""
 
     PAGE_SIZE = 4
 
     def __init__(self, parent, start_directory):
-        super().__init__(parent, "Open an image", width=780, height=470)
+        super().__init__(parent, "Open a file", width=780, height=470)
         self.directory = Path(start_directory)
-        self.folders, self.images = [], []
+        self.folders, self.files = [], []
         self.problem = None
         self.page = 0
         self.path_label = ttk.Label(self.body, style="PanelText.TLabel")
@@ -138,17 +168,17 @@ class ImageBrowserDialog(TouchDialog):
 
     @property
     def page_count(self):
-        entries = len(self.folders) + len(self.images)
+        entries = len(self.folders) + len(self.files)
         return max(1, (entries + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
 
     def open_directory(self, directory):
         self.directory = Path(directory)
         self.page = 0
         try:
-            self.folders, self.images = list_directory(self.directory)
+            self.folders, self.files = list_directory(self.directory)
             self.problem = None
         except OSError as error:
-            self.folders, self.images = [], []
+            self.folders, self.files = [], []
             self.problem = f"This folder cannot be read: {error.strerror or error}"
         self.render()
 
@@ -168,11 +198,11 @@ class ImageBrowserDialog(TouchDialog):
         pages = self.page_count
         self.page = max(0, min(self.page, pages - 1))
         self.path_label.configure(text=shorten(str(self.directory), 84, keep_end=True))
-        entries = [(folder, True) for folder in self.folders] + [(image, False) for image in self.images]
+        entries = [(folder, True) for folder in self.folders] + [(file, False) for file in self.files]
         if not entries:
             ttk.Label(
                 self.list_frame,
-                text=self.problem or "No folders or images here (PNG, JPG or BMP).",
+                text=self.problem or "No folders, pictures or voice recordings here.",
                 style="PanelText.TLabel", wraplength=740,
             ).pack(anchor="w")
         for path, is_folder in entries[self.page * self.PAGE_SIZE:(self.page + 1) * self.PAGE_SIZE]:
@@ -199,8 +229,8 @@ def _load_predictor(choice):
     return Predictor.from_model(choice.path, threads=INFERENCE_THREADS)
 
 
-class LocalImageRunner:
-    """Keep the chosen model loaded and classify one image off the Tk thread."""
+class LocalFileRunner:
+    """Keep the chosen model loaded and classify one file off the Tk thread."""
 
     def __init__(self, post_ui, on_result, on_error, load_predictor=_load_predictor):
         self.post_ui = post_ui
@@ -212,68 +242,76 @@ class LocalImageRunner:
         self._predictor = None
         self._predictor_path = None
 
-    def estimate(self, request, choice, image_path):
-        """Classify ``image_path``; ``request`` comes back with the answer.
+    def estimate(self, request, choice, path):
+        """Classify ``path``; ``request`` comes back with the answer.
 
         A newer request supersedes an older one that has not started yet.
         """
         self.latest = request
         worker = threading.Thread(
-            target=self._run, args=(request, choice, Path(image_path)),
-            name="cobas-local-image", daemon=True,
+            target=self._run, args=(request, choice, Path(path)),
+            name="cobas-local-file", daemon=True,
         )
         worker.start()
         return worker
 
-    def _run(self, request, choice, image_path):
+    def _run(self, request, choice, path):
         with self._work:
             if request != self.latest:
                 return
             try:
+                audio = is_audio(path)
+                if audio and tuple(choice.modalities) != VOICE_ONLY:
+                    raise ValueError("a voice recording needs the Voice only model; choose it with the model button")
                 if self._predictor is None or self._predictor_path != choice.path:
                     self._predictor = None  # Free the previous model before loading the next.
                     self._predictor = self.load_predictor(choice)
                     self._predictor_path = choice.path
-                prediction = self._predictor.predict_image(image_path)
+                if audio:
+                    # Voice recording -> spectrogram -> network; the spectrogram is also what the screen shows.
+                    picture = self._predictor.voice_spectrogram(path)
+                    prediction = self._predictor.predict_picture(picture)
+                else:
+                    picture = None
+                    prediction = self._predictor.predict_file(path)
             except Exception as error:  # Worker boundary: report, never crash the UI.
                 self.post_ui(self.on_error, request, str(error))
                 return
-        self.post_ui(self.on_result, request, prediction.label)
+        self.post_ui(self.on_result, request, prediction.label, picture)
 
 
 # --------------------------------------------------------------------------- #
 # The screen
 # --------------------------------------------------------------------------- #
 
-class LocalImageInferencePanel:
-    """The 'Local Image Inference' tab: open a picture, show its battery level."""
+class LocalFileInferencePanel:
+    """The 'Local File Inference' tab: open a picture or voice recording, show its battery level."""
 
     def __init__(self, parent, app):
         self.app = app
         self.root = app.root
-        self.choices = image_models(discover_models())
-        self.choice = default_image_model(self.choices)
-        captures = Path(app.base_dir) / "Captures"
-        self.directory = captures if captures.is_dir() else Path.home()
-        self.image_path = None
-        self.picture = None
+        self.choices = file_models(discover_models())
+        self.choice = default_file_model(self.choices)
+        self.directory = datasets_directory()
+        self.file_path = None
+        self.picture = None  # What the preview shows: the opened picture or a recording's spectrogram.
         self.request = 0
         self.preview_photo = None
         self.preview_size = None
-        self.runner = LocalImageRunner(app.post_ui, self.show_result, self.show_error)
+        self.runner = LocalFileRunner(app.post_ui, self.show_result, self.show_error)
         self.build(parent)
         self.refresh_model()
 
     def build(self, parent):
-        parent.columnconfigure(0, weight=1, uniform="local-image")
-        parent.columnconfigure(1, weight=1, uniform="local-image")
+        parent.columnconfigure(0, weight=1, uniform="local-file")
+        parent.columnconfigure(1, weight=1, uniform="local-file")
         parent.rowconfigure(0, weight=1)
         picture = ttk.Frame(parent, style="Panel.TFrame")
         picture.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
         self.result_label = tk.Label(picture, text=format_battery_level("—"), bg=COLORS["panel_bg"],
                                      fg=COLORS["accent"], font=RESULT_FONT)
         self.result_label.pack(side="bottom", fill="x", pady=(6, 0))
-        self.preview = tk.Label(picture, text="No image opened.\n\nTap Open Image to choose one.",
+        self.preview = tk.Label(picture, text="No file opened.\n\nTap Open File to choose one.",
                                 bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
                                 font=FONTS["preview_text"], width=1, height=1, bd=0)
         self.preview.pack(fill="both", expand=True)
@@ -281,11 +319,11 @@ class LocalImageInferencePanel:
 
         controls = ttk.Frame(parent, style="Panel.TFrame", padding=10)
         controls.grid(row=0, column=1, sticky="nsew")
-        ttk.Label(controls, text="Local Image Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
+        ttk.Label(controls, text="Local File Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
         ttk.Label(controls, text="Model", style="PanelText.TLabel").pack(anchor="w")
         self.model_button = ttk.Button(controls, style="Tool.TButton", command=self.choose_model)
         self.model_button.pack(fill="x", pady=(0, 6))
-        self.open_button = ttk.Button(controls, text="Open Image", style="Primary.TButton", command=self.open_image)
+        self.open_button = ttk.Button(controls, text="Open File", style="Primary.TButton", command=self.open_file)
         self.open_button.pack(fill="x")
         self.status_label = ttk.Label(controls, style="PanelText.TLabel", wraplength=350)
         self.status_label.pack(anchor="w", pady=(6, 0))
@@ -299,42 +337,44 @@ class LocalImageInferencePanel:
             self.set_status("No models found. Tap the model button once checkpoints are installed.")
             return
         self.model_button.configure(text=shorten(self.choice.short_label, 36))
-        if self.image_path is None:
-            self.set_status(f"Open {expected_image(self.choice)} to estimate its battery level.")
+        if self.file_path is None:
+            self.set_status(f"Open {expected_file(self.choice)} to estimate its battery level.")
 
     def choose_model(self):
         if self.capture_is_running("changing the model"):
             return
-        self.choices = image_models(discover_models())
+        self.choices = file_models(discover_models())
         choice = ModelPickerDialog(self.root, self.choices, self.choice).show()
         if choice is None:
             return
         self.choice = choice
         self.refresh_model()
-        if self.image_path is not None:
+        if self.file_path is not None:
             self.estimate()
 
-    # -- image ---------------------------------------------------------------
+    # -- file ----------------------------------------------------------------
 
-    def open_image(self):
-        if self.capture_is_running("opening an image"):
+    def open_file(self):
+        if self.capture_is_running("opening a file"):
             return
         if self.choice is None:
             dialogs.showwarning("No model", f"No models found. Copy checkpoints into:\n{DEFAULT_MODELS_DIRECTORY}",
                                 parent=self.root)
             return
-        path = ImageBrowserDialog(self.root, self.directory).show()
+        path = FileBrowserDialog(self.root, self.directory).show()
         if path is None:
             return
         self.directory = path.parent
-        try:
-            with Image.open(path) as image:
-                self.picture = image.convert("RGB")
-        except (OSError, ValueError) as error:
-            dialogs.showerror("Image", f"{path.name} could not be opened as an image:\n{error}", parent=self.root)
-            return
-        self.image_path = path
-        self.render_preview()
+        picture = None
+        if not is_audio(path):
+            try:
+                with Image.open(path) as image:
+                    picture = image.convert("RGB")
+            except (OSError, ValueError) as error:
+                dialogs.showerror("File", f"{path.name} could not be opened as a picture:\n{error}", parent=self.root)
+                return
+        self.file_path = path
+        self.picture = picture
         self.estimate()
 
     def capture_is_running(self, action):
@@ -345,43 +385,64 @@ class LocalImageInferencePanel:
             return True
         return False
 
+    # -- preview -------------------------------------------------------------
+
     def handle_preview_resized(self, event):
-        if self.image_path is not None and (event.width, event.height) != self.preview_size:
+        if self.picture is not None and (event.width, event.height) != self.preview_size:
             self.render_preview()
 
     def render_preview(self):
         width, height = max(1, self.preview.winfo_width()), max(1, self.preview.winfo_height())
         self.preview_size = (width, height)
-        image = self.picture.copy()
         # Small frames (a 32x24 thermal image) are enlarged so they are visible.
-        scale = min(width / image.width, height / image.height)
-        size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
-        image = image.resize(size, Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.NEAREST)
+        scale = min(width / self.picture.width, height / self.picture.height)
+        size = (max(1, int(self.picture.width * scale)), max(1, int(self.picture.height * scale)))
+        image = self.picture.resize(size, Image.Resampling.LANCZOS if scale < 1 else Image.Resampling.NEAREST)
         canvas = Image.new("RGB", (width, height), PREVIEW_BACKGROUND)
         canvas.paste(image, ((width - image.width) // 2, (height - image.height) // 2))
         self.preview_photo = ImageTk.PhotoImage(canvas)
         self.preview.configure(image=self.preview_photo, text="")
+
+    def show_preview_text(self, text):
+        self.preview_photo = None
+        self.preview.configure(image="", text=text)
 
     # -- estimate ------------------------------------------------------------
 
     def estimate(self):
         self.request += 1
         self.result_label.configure(text=format_battery_level("…"))
-        self.set_status(f"{self.image_path.name}\nEstimating with {self.choice.short_label}…")
-        self.runner.estimate(self.request, self.choice, self.image_path)
+        if is_audio(self.file_path):
+            # The spectrogram is made by the selected model's recipe, so it is redone for each estimate.
+            self.picture = None
+            self.show_preview_text("Voice recording\n\nConverting to a spectrogram…")
+        else:
+            self.render_preview()
+        self.set_status(f"{self.shown_name()}\nEstimating with {self.choice.short_label}…")
+        self.runner.estimate(self.request, self.choice, self.file_path)
 
-    def show_result(self, request, label):
+    def show_result(self, request, label, picture=None):
         if request != self.request:
             return
         self.result_label.configure(text=format_battery_level(label))
-        self.set_status(f"{self.image_path.name}\nModel expects {expected_image(self.choice)}.")
+        if picture is not None:
+            self.picture = Image.fromarray(picture)
+            self.render_preview()
+            self.set_status(f"{self.shown_name()}\nConverted to a spectrogram and read by the voice model.")
+        else:
+            self.set_status(f"{self.shown_name()}\nModel expects {expected_file(self.choice)}.")
 
     def show_error(self, request, message):
         if request != self.request:
             return
-        print(f"[WARNING] Local image inference: {message}")
+        print(f"[WARNING] Local file inference: {message}")
         self.result_label.configure(text=format_battery_level("—"))
-        self.set_status(f"{self.image_path.name}\nNo estimate: {message}", error=True)
+        if is_audio(self.file_path):
+            self.show_preview_text("Voice recording\n\nNo spectrogram.")
+        self.set_status(f"{self.shown_name()}\nNo estimate: {message}", error=True)
+
+    def shown_name(self):
+        return shorten_middle(self.file_path.name, 42)
 
     def set_status(self, message, error=False):
         self.status_label.configure(text=message, foreground=COLORS["error" if error else "panel_text"])

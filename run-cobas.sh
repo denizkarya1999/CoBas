@@ -2,6 +2,8 @@
 set -euo pipefail
 COBAS_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 export MLX90642_SHARED_LIB="$COBAS_ROOT/.venv/lib/cobas/libmlx90642.so"
+# Keep the app folder free of __pycache__ folders.
+export PYTHONDONTWRITEBYTECODE=1
 # Resolve speaker and microphone independently by their stable identities.
 # Retain the optional explicit ALSA override for installations that use it.
 if [[ -n "${COBAS_ALSA_CARD:-}" ]]; then

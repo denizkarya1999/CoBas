@@ -18,7 +18,7 @@ from .model import (
     softmax,
 )
 from .session import ChirpTriplet
-from .specs import FusionSpec, resolve_spec
+from .specs import VOICE, FusionSpec, resolve_spec
 
 
 @dataclass(frozen=True)
@@ -105,13 +105,24 @@ class Predictor:
         probabilities = softmax(logits)[0]
         return Prediction(probabilities, self.class_names, (time.perf_counter() - started) * 1000.0)
 
-    def predict_image(self, path: str | Path) -> Prediction:
-        """Classify one picture from disk (see ``preprocess.image_model_input``)."""
+    def predict_file(self, path: str | Path) -> Prediction:
+        """Classify one picture or voice recording from disk (see ``preprocess.file_model_input``)."""
         started = time.perf_counter()
-        x = preprocess.image_model_input(path, self.spec)
+        x = preprocess.file_model_input(path, self.spec)
         logits = self.runner(x)
         probabilities = softmax(logits)[0]
         return Prediction(probabilities, self.class_names, (time.perf_counter() - started) * 1000.0)
+
+    def voice_spectrogram(self, path: str | Path) -> np.ndarray:
+        """Voice recording -> the spectrogram picture this model reads (voice standalone only)."""
+        preprocess.require_voice_model(self.spec)
+        return self.fused_image({VOICE: path})
+
+    def predict_picture(self, picture: np.ndarray) -> Prediction:
+        """Classify a picture already in memory, e.g. the result of ``voice_spectrogram``."""
+        return self.predict_input(
+            preprocess.to_model_input(picture, self.spec.tensor_norm, self.spec.tensor_pipeline)
+        )
 
     def predict_triplet(self, triplet: ChirpTriplet) -> Prediction:
         paths = triplet.paths()

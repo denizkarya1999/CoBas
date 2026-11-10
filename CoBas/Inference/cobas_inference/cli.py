@@ -2,11 +2,11 @@
 
     python -m cobas_inference inspect   MODEL.pth
     python -m cobas_inference predict   --model MODEL.pth --mmwave f.jpg --thermal f.png --voice f.wav
-    python -m cobas_inference replay    --model MODEL.pth SESSION_OR_DATASET_DIR [--csv out.csv] [--as-images]
+    python -m cobas_inference replay    --model MODEL.pth SESSION_OR_DATASET_DIR [--csv out.csv] [--as-files]
     python -m cobas_inference export-onnx --model MODEL.pth --out MODEL.onnx
     python -m cobas_inference bench     --model MODEL.pth|MODEL.onnx
-    python -m cobas_inference build-test-dataset SOURCE_DATASET_DIR OUT_DIR [--per-class 10]
-    python -m cobas_inference check-test-dataset TEST_DATASET_DIR
+    python -m cobas_inference build-latest-dataset SOURCE_DATASET_DIR OUT_DIR [--per-class 10]
+    python -m cobas_inference check-latest-dataset LATEST_DATASET_DIR
 """
 
 from __future__ import annotations
@@ -93,10 +93,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
         return 2
     print(f"model: {predictor.spec.family} ({predictor.runner.name}); weights {predictor.spec.weights_source}")
     print(f"sessions: {len(sessions)}")
-    scratch = tempfile.TemporaryDirectory(prefix="cobas-replay-") if args.as_images else None
+    scratch = tempfile.TemporaryDirectory(prefix="cobas-replay-") if args.as_files else None
     if scratch:
-        classify = image_classifier(predictor, Path(scratch.name))
-        print("input: one picture per chirp, opened as Local Image Inference opens it")
+        classify = file_classifier(predictor, Path(scratch.name))
+        print("input: one file per chirp, opened as Local File Inference opens it")
     else:
         classify = predictor.predict_triplet
 
@@ -194,48 +194,49 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
-def image_classifier(predictor: Predictor, scratch: Path):
-    """Classify a chirp the way Local Image Inference does: from one picture on disk.
+def file_classifier(predictor: Predictor, scratch: Path):
+    """Classify a chirp the way Local File Inference does: from one file on disk.
 
-    A thermal or mmWave standalone model opens the saved frame itself. A capture
-    session holds no ready-made picture for the other models, so their fused
-    image (or voice spectrogram) is written to a PNG first and that file is opened.
+    A standalone model opens the saved file itself: the thermal frame, the
+    mmWave frame or the voice recording. A capture session holds no ready-made
+    picture for a fusion model, so its fused image is written to a PNG first
+    and that file is opened.
     """
-    raw_frame = preprocess.is_raw_frame_model(predictor.spec)
+    modalities = predictor.spec.modalities
     picture = scratch / "picture.png"
 
     def classify(triplet):
         paths = triplet.paths()
-        if raw_frame:
-            return predictor.predict_image(paths[predictor.spec.modalities[0]])
+        if len(modalities) == 1:
+            return predictor.predict_file(paths[modalities[0]])
         Image.fromarray(predictor.fused_image(paths)).save(picture)
-        return predictor.predict_image(picture)
+        return predictor.predict_file(picture)
 
     return classify
 
 
-def cmd_build_test_dataset(args: argparse.Namespace) -> int:
-    from . import testset
+def cmd_build_latest_dataset(args: argparse.Namespace) -> int:
+    from . import latest_dataset
 
     try:
-        rows = testset.build(args.source, args.models, args.out, per_class=args.per_class)
+        rows = latest_dataset.build(args.source, args.models, args.out, per_class=args.per_class)
     except (FileExistsError, FileNotFoundError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
-    print(f"{len(rows)} pictures written to {args.out}")
+    print(f"{len(rows)} files written to {args.out}")
     return 0
 
 
-def cmd_check_test_dataset(args: argparse.Namespace) -> int:
-    from . import testset
+def cmd_check_latest_dataset(args: argparse.Namespace) -> int:
+    from . import latest_dataset
 
-    results = testset.check(args.path, args.models, lambda path: Predictor.from_model(path, threads=args.threads))
+    results = latest_dataset.check(args.path, args.models, lambda path: Predictor.from_model(path, threads=args.threads))
     if not results:
         print(f"error: no model folders found under {args.path}", file=sys.stderr)
         return 2
-    pictures = sum(r["pictures"] for r in results)
+    files = sum(r["files"] for r in results)
     correct = sum(r["correct"] for r in results)
-    print(f"overall: {correct}/{pictures} correct over {len(results)} models")
+    print(f"overall: {correct}/{files} correct over {len(results)} models")
     return 0
 
 
@@ -289,9 +290,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=None, help="max chirps per session (applied after --stride)")
     p.add_argument("--csv", help="write per-chirp predictions to this CSV")
     p.add_argument(
-        "--as-images", action="store_true",
-        help="classify one picture per chirp as Local Image Inference does (the saved frame, "
-             "or the fused image / spectrogram written to a PNG first)",
+        "--as-files", action="store_true",
+        help="classify one file per chirp as Local File Inference does (the saved frame or voice "
+             "recording, or the fused image written to a PNG first)",
     )
     p.set_defaults(func=cmd_replay)
 
@@ -308,18 +309,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_bench)
 
     default_models = str(Path(__file__).resolve().parents[1] / "models")
-    p = sub.add_parser("build-test-dataset", help="write a few pictures per battery level for every model")
+    p = sub.add_parser("build-latest-dataset", help="write a few ready-to-open files per battery level for every model")
     p.add_argument("source", help="dataset root containing <N>_Percent_Battery/Session_...")
-    p.add_argument("out", help="folder to create, e.g. '.../CoBas Test Dataset'")
+    p.add_argument("out", help="folder to create, e.g. '.../CoBas Latest Dataset'")
     p.add_argument("--models", default=default_models, help="folder holding the checkpoints")
-    p.add_argument("--per-class", type=int, default=10, help="pictures per battery level for each model")
-    p.set_defaults(func=cmd_build_test_dataset)
+    p.add_argument("--per-class", type=int, default=10, help="files per battery level for each model")
+    p.set_defaults(func=cmd_build_latest_dataset)
 
-    p = sub.add_parser("check-test-dataset", help="classify every picture of a test dataset with its own model")
-    p.add_argument("path", help="folder written by build-test-dataset")
+    p = sub.add_parser("check-latest-dataset", help="classify every file of the dataset with its own model")
+    p.add_argument("path", help="folder written by build-latest-dataset")
     p.add_argument("--models", default=default_models, help="folder holding the checkpoints")
     p.add_argument("--threads", type=int, default=None, help="CPU threads for inference")
-    p.set_defaults(func=cmd_check_test_dataset)
+    p.set_defaults(func=cmd_check_latest_dataset)
     return parser
 
 

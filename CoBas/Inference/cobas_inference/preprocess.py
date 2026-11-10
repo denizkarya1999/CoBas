@@ -42,6 +42,10 @@ _PIL_FILTERS = {
 # activations on the Pi, so anything far beyond a radar frame is refused.
 NATIVE_MAX_PIXELS = 1_000_000
 
+# Voice recordings Local File Inference accepts. Lossless only: a lossy codec
+# (OGG, MP3) throws away the 17.5-20 kHz band the voice model reads.
+AUDIO_SUFFIXES = (".wav", ".flac")
+
 
 # --------------------------------------------------------------------------- #
 # Raster modalities (mmWave JPG, thermal PNG)
@@ -308,14 +312,34 @@ def is_raw_frame_model(spec: FusionSpec) -> bool:
     return len(spec.modalities) == 1 and spec.modalities[0] in spec.images
 
 
-def image_model_input(path: str | Path, spec: FusionSpec) -> np.ndarray:
-    """One picture from disk -> network input, with no chirp capture behind it.
+def is_audio(path: str | Path) -> bool:
+    """True for a voice recording (by file extension)."""
+    return Path(path).suffix.lower() in AUDIO_SUFFIXES
 
-    The thermal and mmWave standalone models take the raw sensor frame through
-    their usual recipe. Every other model takes the picture its notebook fed
-    the network: the fused image for the fusion families (256x256; any other
-    size is resized to it) and the magma spectrogram for the voice standalone.
+
+def reads_voice_recordings(spec: FusionSpec) -> bool:
+    """Only the voice standalone can work from a voice recording alone."""
+    return spec.modalities == (VOICE,)
+
+
+def require_voice_model(spec: FusionSpec) -> None:
+    if not reads_voice_recordings(spec):
+        raise ValueError("a voice recording can only be read by the voice standalone model")
+
+
+def file_model_input(path: str | Path, spec: FusionSpec) -> np.ndarray:
+    """One file from disk -> network input, with no chirp capture behind it.
+
+    A voice recording is converted to the voice standalone's spectrogram. The
+    thermal and mmWave standalone models take the raw sensor frame through
+    their usual recipe. Every other picture is taken as the image the notebook
+    fed the network: the fused image for the fusion families (256x256; any
+    other size is resized to it) and the magma spectrogram for the voice
+    standalone.
     """
+    if is_audio(path):
+        require_voice_model(spec)
+        return model_input({VOICE: path}, spec)
     if is_raw_frame_model(spec):
         with Image.open(path) as image:
             width, height = image.size

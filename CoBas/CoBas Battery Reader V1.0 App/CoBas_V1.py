@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import shutil
@@ -30,7 +31,7 @@ from InferenceMode import (
     format_battery_level,
     format_estimate,
 )
-from LocalImageInference import LocalImageInferencePanel
+from LocalFileInference import LocalFileInferencePanel
 from MMWave import MMWaveCaptureService
 from PIL import Image, ImageTk
 from Settings import SettingsWindow
@@ -42,6 +43,8 @@ ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
 PULSE_DURATION_SECONDS = 2.0
 DATASET_FRAMES_PER_PULSE = 1
 SENSOR_FRAME_CAPTURE_TIMEOUT_SECONDS = 3.0
+# Carries the operator's capture settings across the relaunch for the next battery.
+RESTART_SETTINGS_VARIABLE = "COBAS_RESTART_SETTINGS"
 
 
 def parse_battery_percentage(value):
@@ -178,14 +181,19 @@ class CoBasV1App:
         self.thermal_frames_staging_directory = None
         self.pulse_sequence_started_at = None
         self.thermal_segment_started_at = None
+        # The position whose thermal recording the camera's file paths belong to.
+        self.thermal_recording_position = None
         self.current_recording_timestamp = None
         self.export_started = False
+        self.inference_notice = None
+        self.inference_result_shown = False
 
         self.mmwave_preview_photo = None
         self.thermal_preview_photo = None
         self.thermal_preview_after_id = None
         self.mmwave_poll_after_id = None
 
+        self.restore_settings_after_restart()
         self.thermal_scale_mode = tk.StringVar(
             master=self.root,
             value=self.thermal_camera.display_mode,
@@ -217,8 +225,62 @@ class CoBasV1App:
     def start_button_text(self):
         return "Start Estimate" if self.inference_mode else "Start Tracking"
 
+    def capture_settings(self):
+        """The settings an operator chooses once and expects to keep for every battery."""
+        return {
+            "pulse_count": self.pulse_count_text.get(),
+            "position_mode": self.position_mode_text.get(),
+            "position_count": self.position_count_text.get(),
+            "thermal_range": list(self.thermal_camera.get_temperature_range()),
+            "thermal_display": self.thermal_camera.display_mode,
+            "microphone": [self.audio.microphone_device_id, self.audio.microphone_device_name],
+            "speaker": [self.audio.speaker_device_id, self.audio.speaker_device_name],
+        }
+
+    def restore_settings_after_restart(self):
+        """Keep the capture settings when the app relaunches for the next battery.
+
+        Without this every relaunch fell back to 20 chirps, one position, the
+        default thermal range and automatic audio, so two batteries of one
+        dataset could be recorded differently without anyone noticing.
+        """
+        raw = os.environ.pop(RESTART_SETTINGS_VARIABLE, None)
+        if not raw or self.inference_mode:
+            return
+        try:
+            saved = json.loads(raw)
+            self.thermal_camera.set_temperature_range(*saved["thermal_range"])
+            self.thermal_camera.set_display_mode(saved["thermal_display"])
+            self.audio.set_microphone_device(*saved["microphone"])
+            self.audio.set_speaker_device(*saved["speaker"])
+            if saved["position_mode"] not in ("no-change", "position-based"):
+                raise ValueError(f"unknown position mode {saved['position_mode']!r}")
+            self.pulse_count_text.set(str(int(saved["pulse_count"])))
+            self.position_count_text.set(str(int(saved["position_count"])))
+            self.position_mode_text.set(saved["position_mode"])
+        except (KeyError, TypeError, ValueError) as error:
+            print(f"[WARNING] Earlier capture settings could not be restored: {error}")
+
+    def remove_empty_capture_session(self):
+        """An attempt that saved nothing leaves only empty folders; do not keep them."""
+        session = getattr(self, "captures_dir", None)
+        if not session or not os.path.isdir(session):
+            return
+        if any(files for _, _, files in os.walk(session)):
+            return
+        try:
+            for directory, _, _ in os.walk(session, topdown=False):
+                os.rmdir(directory)
+            # The battery folder and Captures go too, but only when nothing else is in them.
+            battery_directory = os.path.dirname(session)
+            os.rmdir(battery_directory)
+            os.rmdir(os.path.dirname(battery_directory))
+        except OSError:
+            pass
+
     def prepare_capture_session(self):
         """Reserve a fresh output folder without modifying earlier captures."""
+        self.remove_empty_capture_session()
         battery_directory = Path(os.path.join(self.base_dir, "Captures", self.battery_output_name))
         battery_directory.mkdir(parents=True, exist_ok=True)
         prefix = datetime.now().astimezone().strftime("Session_%Y%m%d_%H%M%S_")
@@ -313,9 +375,9 @@ class CoBasV1App:
         self.notebook.add(setup, text="Inference setup" if self.inference_mode else "Capture setup")
         if self.inference_mode:
             self.footer = footer
-            self.local_image_tab = ttk.Frame(self.notebook, style="Panel.TFrame")
-            self.notebook.add(self.local_image_tab, text="Local Image Inference")
-            self.local_image_panel = LocalImageInferencePanel(self.local_image_tab, self)
+            self.local_file_tab = ttk.Frame(self.notebook, style="Panel.TFrame")
+            self.notebook.add(self.local_file_tab, text="Local File Inference")
+            self.local_file_panel = LocalFileInferencePanel(self.local_file_tab, self)
             self.notebook.bind("<<NotebookTabChanged>>", self.handle_tab_changed)
         self.notebook.add(system, text="System")
         self.build_preview_panel(preview)
@@ -324,10 +386,10 @@ class CoBasV1App:
         self.notebook.select(setup)
 
     def handle_tab_changed(self, event=None):
-        """Local Image Inference has its own read-out, so the live-capture footer
+        """Local File Inference has its own read-out, so the live-capture footer
         makes way for the picture there unless a capture is running."""
-        on_local_image = self.notebook.select() == str(self.local_image_tab)
-        if on_local_image and not (self.pulse_sequence_active or self.export_in_progress):
+        on_local_file = self.notebook.select() == str(self.local_file_tab)
+        if on_local_file and not (self.pulse_sequence_active or self.export_in_progress):
             self.footer.pack_forget()
         elif not self.footer.winfo_manager():
             self.footer.pack(side="bottom", fill="x", before=self.notebook)
@@ -468,10 +530,12 @@ class CoBasV1App:
 
     def handle_inference_error(self, message):
         print(f"[WARNING] Inference: {message}")
-        self.update_status(f"Status: Inference problem: {message}", "● WARNING")
+        self.inference_notice = f"Inference problem: {message}"
+        self.update_status(f"Status: {self.inference_notice}", "● WARNING")
 
     def handle_inference_result(self, result):
         """Show only 'Battery Level: N%' in the footer; no confidence or breakdown."""
+        self.inference_result_shown = True
         self.record_timer_label.configure(text=format_estimate(result))
 
     def remove_capture_directory(self, keep_current=False):
@@ -491,6 +555,9 @@ class CoBasV1App:
             try:
                 if not os.listdir(parent):
                     os.rmdir(parent)
+                    # Leave no empty Captures folder behind either; rmdir refuses
+                    # when Data Collection sessions are stored there.
+                    os.rmdir(os.path.dirname(parent))
             except OSError:
                 pass
         return removed
@@ -510,12 +577,17 @@ class CoBasV1App:
         for label, sensor in ((self.mmwave_label, "Radar"), (self.thermal_video_label, "Thermal")):
             label.config(image="", text=f"{sensor} input discarded.\n\nTap 'Estimate Again' for another chirp.")
             label.image = None
-        if removed:
-            self.update_status("Status: Ready. Tap Estimate Again for another chirp.", "● IDLE")
-        else:
+        if not self.inference_result_shown:
+            self.record_timer_label.configure(text=format_battery_level("—"))
+        if not removed:
             self.update_status(
                 f"Status: Some inputs could not be deleted from {self.captures_dir}", "● WARNING"
             )
+        elif self.inference_notice:
+            # Say why there is no (or only a partial) estimate instead of a bare "Ready".
+            self.update_status(f"Status: {self.inference_notice}. Tap Estimate Again to retry.", "● WARNING")
+        else:
+            self.update_status("Status: Ready. Tap Estimate Again for another chirp.", "● IDLE")
 
     def set_position_mode(self, mode):
         """Update the capture mode and keep its options clear on the touch UI."""
@@ -692,6 +764,18 @@ class CoBasV1App:
 
     def update_thermal_feed(self):
         self.thermal_preview_after_id = None
+        try:
+            self.refresh_thermal_feed()
+        finally:
+            # Reschedule even if this refresh raised, or the preview (and the
+            # thermal error check with it) would stop for the rest of the capture.
+            if self.thermal_camera.is_tracking and self.thermal_preview_after_id is None:
+                self.thermal_preview_after_id = self.root.after(
+                    150,
+                    self.update_thermal_feed,
+                )
+
+    def refresh_thermal_feed(self):
         capture_error = None
         for event in self.thermal_camera.poll_events():
             if event[0] == "error":
@@ -702,6 +786,10 @@ class CoBasV1App:
                     fg=COLORS["warning"],
                 )
                 self.thermal_video_label.image = None
+        if capture_error is None and self.thermal_camera.error is not None:
+            # The camera can consume its own error event while it waits for a
+            # frame; without this the capture would go on saving a frozen frame.
+            capture_error = str(self.thermal_camera.error)
 
         if capture_error and self.pulse_sequence_active and not self.is_closing:
             self.abort_capture(capture_error)
@@ -717,11 +805,6 @@ class CoBasV1App:
             )
             self.thermal_video_label.image = self.thermal_preview_photo
         self.refresh_info_panel()
-        if self.thermal_camera.is_tracking:
-            self.thermal_preview_after_id = self.root.after(
-                150,
-                self.update_thermal_feed,
-            )
 
     def cancel_thermal_preview_loop(self):
         if self.thermal_preview_after_id is not None:
@@ -733,9 +816,20 @@ class CoBasV1App:
 
     def poll_mmwave_events(self):
         self.mmwave_poll_after_id = None
-        self.drain_ui_callbacks()
-        if self.is_closing:
-            return
+        try:
+            self.drain_ui_callbacks()
+            if not self.is_closing:
+                self.handle_mmwave_events()
+        finally:
+            # Every worker result arrives through this loop. If one handler
+            # raised and the loop stopped, a capture could never finish saving.
+            if not self.is_closing:
+                self.mmwave_poll_after_id = self.root.after(
+                    50,
+                    self.poll_mmwave_events,
+                )
+
+    def handle_mmwave_events(self):
         try:
             while True:
                 event = self.mmwave_capture.events.get_nowait()
@@ -767,12 +861,6 @@ class CoBasV1App:
                     self.radar_info_label.config(text="mmWave: saved")
         except queue.Empty:
             pass
-
-        if not self.is_closing:
-            self.mmwave_poll_after_id = self.root.after(
-                50,
-                self.poll_mmwave_events,
-            )
 
     def display_mmwave_frame(self, frame):
         try:
@@ -850,8 +938,11 @@ class CoBasV1App:
             if self.selected_model is None:
                 messagebox.showwarning("No model", "Choose a model before starting an estimate.", parent=self.root)
                 return
-            if not self.inference.is_ready:
+            if self.inference.is_loading:
                 messagebox.showinfo("Model loading", "The model is still loading. Try again in a moment.", parent=self.root)
+                return
+            if not self.inference.is_ready:
+                messagebox.showwarning("Model not loaded", "The selected model could not be loaded. Choose another model.", parent=self.root)
                 return
 
         if self.capture_attempted:
@@ -888,7 +979,10 @@ class CoBasV1App:
         )
         self.pulse_sequence_started_at = None
         self.thermal_segment_started_at = None
+        self.thermal_recording_position = None
         self.export_started = False
+        self.inference_notice = None
+        self.inference_result_shown = False
         self.pulse_sequence_active = True
         self.is_preparing_tracking = True
         self.awaiting_radar_ready = True
@@ -1074,8 +1168,13 @@ class CoBasV1App:
         timestamp = self.current_recording_timestamp
         thermal_path = self.thermal_camera.start_recording(timestamp=timestamp)
         if not thermal_path:
-            self.abort_capture("Thermal recording could not start")
+            # Say why when the camera knows (for example "MLX90642_Init failed: -3").
+            reason = self.thermal_camera.error
+            self.abort_capture(
+                f"Thermal recording could not start: {reason}" if reason else "Thermal recording could not start"
+            )
             return False
+        self.thermal_recording_position = position_number
         self.thermal_segment_started_at = self.thermal_camera.record_start_time
         try:
             self.mmwave_capture.resume(position_number)
@@ -1232,6 +1331,11 @@ class CoBasV1App:
         thermal_path = None
         if self.thermal_camera.is_recording:
             thermal_path = self.thermal_camera.stop_recording()
+        # The camera keeps the paths of its last recording. They are this
+        # position's only if this position started that recording; otherwise
+        # they belong to a finished position or an earlier capture.
+        owns_thermal_outputs = self.thermal_recording_position == position_number
+        self.thermal_recording_position = None
 
         if (
             not position_recordings
@@ -1239,7 +1343,10 @@ class CoBasV1App:
             or not mmwave_frames_complete
             or thermal_pulse_numbers != expected_pulse_numbers
         ):
-            self.remove_thermal_temporary_outputs()
+            if owns_thermal_outputs:
+                self.remove_thermal_temporary_outputs()
+            if not self.inference_mode:
+                self.forget_rejected_position(position_number)
             return None
 
         start_offset = 0.0
@@ -1269,6 +1376,24 @@ class CoBasV1App:
         }
         self.position_segments.append(segment)
         return segment
+
+    def forget_rejected_position(self, position_number):
+        """Drop a failed position's chirps so the finished positions can still be saved.
+
+        Its staged thermal frames go now (the export insists the staging folder
+        matches the kept chirps); its voice recordings and radar frames are
+        removed by the export, which is the only place they would be unpaired.
+        """
+        self.pulse_recordings = [
+            item for item in self.pulse_recordings if item.get("position") != position_number
+        ]
+        kept_records = []
+        for item in self.thermal_frame_records:
+            if item.get("position") == position_number:
+                Path(item["path"]).unlink(missing_ok=True)
+            else:
+                kept_records.append(item)
+        self.thermal_frame_records = kept_records
 
     def handle_position_finished(self, start_token, position_number):
         if start_token != self.tracking_start_token:
@@ -1340,6 +1465,8 @@ class CoBasV1App:
         self.set_capture_options_state(True)
         self.set_thermal_controls_state("normal")
         if self.inference_mode:
+            if warning and self.inference_notice is None:
+                self.inference_notice = message
             self.update_status(
                 f"Status: {message}; finishing the estimate",
                 "● WARNING" if warning else "● IDLE",
@@ -1351,7 +1478,8 @@ class CoBasV1App:
                 threading.Thread(target=self.discard_inference_capture, daemon=True).start()
             return
         self.update_status(
-            f"Status: {message}; generating battery outputs",
+            f"Status: {message}; generating battery outputs"
+            if self.position_segments else f"Status: {message}; nothing was saved",
             "● WARNING" if warning else "● IDLE",
         )
         if self.position_segments and not self.export_started:
@@ -1447,11 +1575,12 @@ class CoBasV1App:
             self.voice_recording_count = len(
                 self.validate_chirp_voice_recordings()
             )
-            if self.mmwave_capture.frame_count != self.voice_recording_count:
+            if self.mmwave_capture.frame_count < self.voice_recording_count:
                 raise RuntimeError(
                     f"Expected {self.voice_recording_count} mmWave frames, "
                     f"but saved {self.mmwave_capture.frame_count}"
                 )
+            self.remove_unpaired_chirp_files(self.voice_recording_count)
             self.finalize_thermal_frames(self.voice_recording_count)
 
             thermal_video = os.path.join(
@@ -1478,6 +1607,22 @@ class CoBasV1App:
         except Exception as error:  # Worker boundary: always unlock and report failed exports.
             print(f"[ERROR] Battery output generation failed: {error}")
             self.post_ui(self.handle_export_failed, str(error))
+
+    def remove_unpaired_chirp_files(self, kept_chirp_count):
+        """Keep only files that belong to a saved chirp.
+
+        A stopped chirp leaves a partial voice recording, and a position that
+        failed leaves recordings and radar frames numbered after the last saved
+        chirp. Neither has matching files in the other two folders.
+        """
+        kept_recordings = {os.path.abspath(item["path"]) for item in self.pulse_recordings}
+        for path in Path(self.voices_dir).glob("*.wav"):
+            if os.path.abspath(path) not in kept_recordings:
+                path.unlink(missing_ok=True)
+        for path in Path(self.mmwave_frames_dir).glob("frame_*.jpg"):
+            number = path.stem.rpartition("_")[2]
+            if number.isdigit() and int(number) > kept_chirp_count:
+                path.unlink(missing_ok=True)
 
     def handle_export_failed(self, error):
         self.export_in_progress = False
@@ -1723,6 +1868,7 @@ class CoBasV1App:
             script_path,
             *sys.argv[1:],
         ]
+        os.environ[RESTART_SETTINGS_VARIABLE] = json.dumps(self.capture_settings())
         self.on_close()
         os.execv(sys.executable, command_arguments)
 
@@ -1748,6 +1894,8 @@ class CoBasV1App:
         self.thermal_camera.stop_camera()
         if self.inference_mode:
             self.remove_capture_directory()
+        else:
+            self.remove_empty_capture_session()
         self.root.destroy()
 
 
