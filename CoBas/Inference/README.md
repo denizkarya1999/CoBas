@@ -261,7 +261,8 @@ under `CoBas/Inference/tests`.
 
 [INFERENCE_REPORT.md](INFERENCE_REPORT.md) is the latest full test of the app's
 inference (2026-11-09): 1,731 of the 1,760 files of the CoBas Latest Dataset
-read correctly across the 16 `.pth` models, one file per model opened on the
+read correctly (98.4 %) across the 16 `.pth` models, with accuracy by model,
+model type and battery level, one file per model opened on the
 real screen (16 of 16), and a live estimate on the real sensors.
 
 ## Phase 1 results (2026-11-07, Raspberry Pi 5)

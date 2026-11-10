@@ -7,8 +7,10 @@ after every model was made a PyTorch checkpoint.
 ## Result
 
 - **1,731 of 1,760 files read correctly (98.4 %)**, with 0 errors, across 16 models.
-- On the real app screen, one file per model: **16 of 16** read-outs matched.
-- All 110 voice recordings were converted to spectrograms by the app and all were read correctly.
+  The 29 misses are 1.6 % of the files.
+- 10 of the 16 models read every one of their files (100.0 %); the lowest is 90.9 %.
+- On the real app screen, one file per model: **16 of 16 (100.0 %)** read-outs matched.
+- All 110 voice recordings (100.0 %) were converted to spectrograms by the app and read correctly.
 - A live estimate on the real sensors ran end to end with the default model and showed "Battery Level: 50%".
 
 The models were trained on the same Oct 21 recordings this dataset is made from,
@@ -47,44 +49,62 @@ folder name.
 
 ## Results by model
 
-| Models sub-folder | Model | Checkpoint | Correct of 110 | Time per file |
-|---|---|---|---|---|
-| Standalone | CoBas mmWave Model | `CoBas_mmWave_model.pth` | 110 | 433 ms |
-| Standalone | CoBas Thermal Model | `CoBas_thermal_model.pth` | 107 | 161 ms |
-| Standalone | CoBas Voice Reflection Recognition Model | `CoBas_voice_reflection_recognition_model.pth` | 110 | 241 ms |
-| 1 - 1 Fusions | CoBas mmWave Thermal Fusion Model | `CoBas_mmwave_thermal_fusion_model.pth` | 110 | 145 ms |
-| 1 - 1 Fusions | CoBas mmWave and Voice Fusion Model | `CoBas_mmwave_and_voice_fusion_model.pth` | 109 | 149 ms |
-| 1 - 1 Fusions | CoBas Thermal and Voice Model | `CoBas_thermal_and_voice_model.pth` | 106 | 153 ms |
-| 1 - 2 Fusions | CoBas mmWave Thermal Fusion Model | `CoBas_mmwave_thermal_fusion_model.pth` | 110 | 150 ms |
-| 1 - 2 Fusions | CoBas mmWave and Voice Fusion Model | `CoBas_mmwave_and_voice_fusion_model.pth` | 110 | 149 ms |
-| 1 - 2 Fusions | CoBas Thermal and Voice Model | `CoBas_thermal_and_voice_model.pth` | 102 | 152 ms |
-| 2 - 1 Fusions | CoBas mmWave Thermal Fusion Model | `CoBas_mmwave_thermal_fusion_model.pth` | 110 | 155 ms |
-| 2 - 1 Fusions | CoBas mmWave and Voice Fusion Model | `CoBas_mmwave_and_voice_fusion_model.pth` | 107 | 154 ms |
-| 2 - 1 Fusions | CoBas Thermal and Voice Model | `CoBas_thermal_and_voice_model.pth` | 100 | 154 ms |
-| 1 - 1 - 1 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 154 ms |
-| 1 - 1 - 2 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 154 ms |
-| 1 - 2 - 1 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 164 ms |
-| 2 - 1 - 1 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 155 ms |
-| | **All 16 models** | | **1,731 of 1,760** | |
+| Models sub-folder | Model | Checkpoint | Correct of 110 | Accuracy | Time per file |
+|---|---|---|---|---|---|
+| Standalone | CoBas mmWave Model | `CoBas_mmWave_model.pth` | 110 | 100.0 % | 433 ms |
+| Standalone | CoBas Thermal Model | `CoBas_thermal_model.pth` | 107 | 97.3 % | 161 ms |
+| Standalone | CoBas Voice Reflection Recognition Model | `CoBas_voice_reflection_recognition_model.pth` | 110 | 100.0 % | 241 ms |
+| 1 - 1 Fusions | CoBas mmWave Thermal Fusion Model | `CoBas_mmwave_thermal_fusion_model.pth` | 110 | 100.0 % | 145 ms |
+| 1 - 1 Fusions | CoBas mmWave and Voice Fusion Model | `CoBas_mmwave_and_voice_fusion_model.pth` | 109 | 99.1 % | 149 ms |
+| 1 - 1 Fusions | CoBas Thermal and Voice Model | `CoBas_thermal_and_voice_model.pth` | 106 | 96.4 % | 153 ms |
+| 1 - 2 Fusions | CoBas mmWave Thermal Fusion Model | `CoBas_mmwave_thermal_fusion_model.pth` | 110 | 100.0 % | 150 ms |
+| 1 - 2 Fusions | CoBas mmWave and Voice Fusion Model | `CoBas_mmwave_and_voice_fusion_model.pth` | 110 | 100.0 % | 149 ms |
+| 1 - 2 Fusions | CoBas Thermal and Voice Model | `CoBas_thermal_and_voice_model.pth` | 102 | 92.7 % | 152 ms |
+| 2 - 1 Fusions | CoBas mmWave Thermal Fusion Model | `CoBas_mmwave_thermal_fusion_model.pth` | 110 | 100.0 % | 155 ms |
+| 2 - 1 Fusions | CoBas mmWave and Voice Fusion Model | `CoBas_mmwave_and_voice_fusion_model.pth` | 107 | 97.3 % | 154 ms |
+| 2 - 1 Fusions | CoBas Thermal and Voice Model | `CoBas_thermal_and_voice_model.pth` | 100 | 90.9 % | 154 ms |
+| 1 - 1 - 1 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 100.0 % | 154 ms |
+| 1 - 1 - 2 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 100.0 % | 154 ms |
+| 1 - 2 - 1 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 100.0 % | 164 ms |
+| 2 - 1 - 1 Fusions | CoBas mmWave Thermal Voice Fusion Model | `CoBas_mmwave_thermal_voice_fusion_model.pth` | 110 | 100.0 % | 155 ms |
+| | **All 16 models** | | **1,731 of 1,760** | **98.4 %** | |
 
 Time per file is the whole step on the Pi: reading the file, preparing it
 (for a voice recording, computing the spectrogram) and running the network.
 
+## Results by model type
+
+The same results with the fusion ratios of each model type added together.
+
+| Model type | Models | Correct | Accuracy |
+|---|---|---|---|
+| CoBas Thermal Model | 1 | 107 of 110 | 97.3 % |
+| CoBas mmWave Model | 1 | 110 of 110 | 100.0 % |
+| CoBas Voice Reflection Recognition Model | 1 | 110 of 110 | 100.0 % |
+| CoBas mmWave Thermal Fusion Model | 3 | 330 of 330 | 100.0 % |
+| CoBas mmWave and Voice Fusion Model | 3 | 326 of 330 | 98.8 % |
+| CoBas Thermal and Voice Model | 3 | 308 of 330 | 93.3 % |
+| CoBas mmWave Thermal Voice Fusion Model | 4 | 440 of 440 | 100.0 % |
+| **All** | **16** | **1,731 of 1,760** | **98.4 %** |
+
 ## Results by battery level
 
-| Battery level | Correct of 160 |
-|---|---|
-| 0 % | 160 |
-| 10 % | 160 |
-| 20 % | 149 |
-| 30 % | 159 |
-| 40 % | 160 |
-| 50 % | 160 |
-| 60 % | 149 |
-| 70 % | 159 |
-| 80 % | 157 |
-| 90 % | 158 |
-| 100 % | 160 |
+| Battery level | Correct of 160 | Accuracy |
+|---|---|---|
+| 0 % | 160 | 100.0 % |
+| 10 % | 160 | 100.0 % |
+| 20 % | 149 | 93.1 % |
+| 30 % | 159 | 99.4 % |
+| 40 % | 160 | 100.0 % |
+| 50 % | 160 | 100.0 % |
+| 60 % | 149 | 93.1 % |
+| 70 % | 159 | 99.4 % |
+| 80 % | 157 | 98.1 % |
+| 90 % | 158 | 98.8 % |
+| 100 % | 160 | 100.0 % |
+| **All levels** | **1,731 of 1,760** | **98.4 %** |
+
+Each level has 160 files: 10 for each of the 16 models.
 
 ## The 29 misses
 
@@ -120,8 +140,9 @@ Time per file is the whole step on the Pi: reading the file, preparing it
 | 2 - 1 Fusions / CoBas Thermal and Voice Model | `Fused_Image_60_Percent_Position_4_021.png` | 60 % | 100 % |
 | 2 - 1 Fusions / CoBas Thermal and Voice Model | `Fused_Image_60_Percent_Position_4_041.png` | 60 % | 100 % |
 
-The Thermal and Voice models account for 22 of them, the mmWave and Voice models
-for 4 and the Thermal model for 3. These are the models' own errors: the two
+The Thermal and Voice models account for 22 of them (75.9 %), the mmWave and
+Voice models for 4 (13.8 %) and the Thermal model for 3 (10.3 %). By battery
+level, 11 are at 20 % and 11 at 60 % (75.9 % between them). These are the models' own errors: the two
 weakest models give the same counts (102 and 100) when the raw chirps are
 classified directly, and a fused image opened from disk reaches the network
 exactly as the chirp would.
@@ -147,8 +168,10 @@ exactly as the chirp would.
 | 1 - 2 - 1 Fusions · mmWave + Thermal + Voice (pth) | `Fused_Image_40_Percent_Position_2_001.png` | 40 % | 40 % | 0.2 |
 | 2 - 1 - 1 Fusions · mmWave + Thermal + Voice (pth) | `Fused_Image_80_Percent_Position_3_011.png` | 80 % | 80 % | 0.2 |
 
-Seconds run from tapping the file to the read-out and include loading the model.
-No pointer or keyboard input reached the app during the run.
+All 16 read-outs matched (100.0 %). Seconds run from the file being tapped to
+the read-out. In most rows the model was already in memory, because choosing a
+model re-reads the file that is open, so these times are mostly the reading
+itself. No pointer or keyboard input reached the app during the run.
 
 ## The live estimate
 
