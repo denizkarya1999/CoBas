@@ -159,6 +159,13 @@ Captured on the Pi's 800×480 touchscreen (`CoBas/Screenshots/`):
 | `5.png` Inference setup with the model loaded | `6.png` model picker (fusion ratios and standalone models) |
 | `7.png` live sensors during the chirp | `8.png` result after a real chirp: "Battery Level: N%" |
 | `9.png` Local Image Inference: result for an opened thermal image | `10.png` Local Image Inference: image browser |
+| `11.png` Local Image Inference: nothing opened yet | `12.png` Local Image Inference: model picker, standalone models first |
+| `13.png` image browser: the CoBas Test Dataset's sub-folders | `14.png` image browser: the standalone model folders |
+| `15.png` image browser: pictures of one battery level (page 1 of 3) | `16.png` a 40 % mmWave frame read by the mmWave model |
+| `17.png` a 30 % voice spectrogram read by the voice model | `18.png` a 60 % fused image read by the three-modal 1-1-1 model |
+| `19.png` a photo the mmWave model refuses as too large | |
+
+Screenshots 13 to 18 use pictures from the CoBas Test Dataset.
 
 ## Model families and their recipes
 
