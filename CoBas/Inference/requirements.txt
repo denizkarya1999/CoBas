@@ -6,7 +6,5 @@ numpy
 Pillow
 librosa        # mel spectrogram parity with the Colab training notebooks
 soundfile
-onnxruntime    # preferred runtime on the Pi once a checkpoint is exported
-torch          # loading .pth checkpoints and ONNX export (CPU wheel from the index above)
+torch          # the models are PyTorch checkpoints, .pth or .pt (CPU wheel from the index above)
 torchvision
-pytest         # tests only

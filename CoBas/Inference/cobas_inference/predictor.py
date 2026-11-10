@@ -10,15 +10,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from . import preprocess
-from .model import (
-    OnnxRunner,
-    TorchRunner,
-    load_model,
-    load_sidecar,
-    softmax,
-)
+from .model import TorchRunner, load_model, softmax
 from .session import ChirpTriplet
-from .specs import VOICE, FusionSpec, resolve_spec
+from .specs import VOICE, FusionSpec, is_model_file, resolve_spec
 
 
 @dataclass(frozen=True)
@@ -73,12 +67,10 @@ class Predictor:
         threads: int | None = None,
     ) -> "Predictor":
         model_path = Path(model_path)
-        if model_path.suffix.lower() == ".onnx":
-            class_names, metadata = load_sidecar(model_path)
-            runner = OnnxRunner(model_path, threads=threads)
-        else:
-            model, class_names, metadata = load_model(model_path)
-            runner = TorchRunner(model, threads=threads)
+        if not is_model_file(model_path):
+            raise ValueError(f"{model_path.name} is not a PyTorch checkpoint (.pth or .pt)")
+        model, class_names, metadata = load_model(model_path)
+        runner = TorchRunner(model, threads=threads)
         spec = resolve_spec(model_path, metadata, weights_override=weights_override)
         return cls(runner, spec, class_names, model_path, metadata)
 

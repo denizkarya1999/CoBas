@@ -17,7 +17,9 @@ Place checkpoints under `CoBas/Inference/models/<ratio folder>/<name>.pth`,
 mirroring the Drive layout (for example
 `models/1 - 1 - 1 Fusions/CoBas_mmwave_thermal_voice_fusion_model.pth`). The
 ratio folder is what tells the Thermal-Voice family its fusion weights; the
-other families carry their weights inside the checkpoint.
+other families carry their weights inside the checkpoint. Every model is a
+PyTorch checkpoint: `.pth`, or `.pt` under the same name. No other format is
+loaded.
 
 ## Command line
 
@@ -33,10 +35,6 @@ Run from `CoBas/Inference`:
 
 ```bash
 .venv/bin/python -m cobas_inference replay --model MODEL.pth "/home/tailab/Datasets/CoBas/10 Battery 4 Positions Outside Dataset" --csv replay.csv
-```
-
-```bash
-.venv/bin/python -m cobas_inference export-onnx --model MODEL.pth --out MODEL.onnx
 ```
 
 `replay` walks `<N>_Percent_Battery/Session_*/` folders, pairs the k-th thermal
@@ -204,9 +202,8 @@ and 4 radar frames.
   `__pycache__` folders.
 
 Known and left as it is: a radar whose serial ports are present but whose
-firmware does not answer takes about 70 seconds to report the failure; the
-`.onnx` and `.pth` copies of a model show the same short name on the model
-button; and thermal Minimum/Maximum take effect only after "Apply".
+firmware does not answer takes about 70 seconds to report the failure, and
+thermal Minimum/Maximum take effect only after "Apply".
 
 ## Screenshots
 
@@ -216,7 +213,7 @@ Captured on the Pi's 800×480 touchscreen (`CoBas/Screenshots/`):
 |---|---|
 | `1.png` startup mode chooser | `2.png` Data Collection: capture setup |
 | `3.png` Data Collection: live sensors (idle) | `4.png` Data Collection: system tab |
-| `5.png` Inference setup with the model loaded | `6.png` model picker (fusion ratios and standalone models) |
+| `5.png` Inference setup with the model loaded | `6.png` model picker for live estimates (all models are `.pth` checkpoints) |
 | `7.png` live sensors during a real chirp | `8.png` result after that chirp: "Battery Level: N%" |
 | `9.png` Local File Inference: a 60 % thermal image read by the thermal model | `10.png` file browser: thermal images of one battery level |
 | `11.png` Local File Inference: nothing opened yet | `12.png` Local File Inference: model picker, standalone models first |
@@ -228,7 +225,8 @@ Captured on the Pi's 800×480 touchscreen (`CoBas/Screenshots/`):
 
 Screenshots 5 to 21 were retaken on 2026-11-09 with the final code; 7 and 8
 are a real chirp through the radar, thermal camera, speaker and microphone,
-and 9 to 18 and 20 to 21 use files from the CoBas Latest Dataset.
+and 9 to 18 and 20 to 21 use files from the CoBas Latest Dataset. Screenshots
+5 to 8 were taken again after the models became `.pth` only.
 
 ## Model families and their recipes
 
@@ -259,7 +257,19 @@ The automated tests and their sample chirp were removed from the repository on
 this code that day). They remain in the git history up to commit `eafcb25`
 under `CoBas/Inference/tests`.
 
+## Inference report
+
+[INFERENCE_REPORT.md](INFERENCE_REPORT.md) is the latest full test of the app's
+inference (2026-11-09): 1,731 of the 1,760 files of the CoBas Latest Dataset
+read correctly across the 16 `.pth` models, one file per model opened on the
+real screen (16 of 16), and a live estimate on the real sensors.
+
 ## Phase 1 results (2026-11-07, Raspberry Pi 5)
+
+The ONNX figures below are a record of the 2026-11-07 runs. ONNX loading and
+export were removed on 2026-11-09, when every model became a PyTorch
+checkpoint; the one ONNX copy in use gave the same answers as its `.pth`
+(largest probability difference 5.75e-08 over 110 files).
 
 Since 2026-11-09 the device holds only the latest dataset, Oct 21 "10 Battery
 4 Positions Outside Dataset", and all testing uses it. The Oct 16 "ELB

@@ -30,7 +30,7 @@ from PIL import Image
 
 from . import preprocess
 from .session import ChirpTriplet, discover_session, find_sessions, label_from_path
-from .specs import MMWAVE, MODALITIES, THERMAL, VOICE, FusionSpec, resolve_spec
+from .specs import MMWAVE, MODALITIES, THERMAL, VOICE, FusionSpec, is_model_file, resolve_spec
 
 # Folder names spell out the checkpoint file names.
 MODEL_NAMES = {
@@ -74,9 +74,9 @@ def _checkpoint_metadata(path: Path) -> Mapping:
 
 
 def find_models(models_directory: str | Path, read_metadata: Callable[[Path], Mapping] = _checkpoint_metadata) -> list[DatasetModel]:
-    """Every checkpoint (.pth) with a known recipe; standalone models first, then by ratio folder."""
+    """Every checkpoint (.pth or .pt) with a known recipe; standalone models first, then by ratio folder."""
     models = []
-    for path in sorted(Path(models_directory).rglob("*.pth")):
+    for path in sorted(p for p in Path(models_directory).rglob("*") if p.is_file() and is_model_file(p)):
         try:
             spec = resolve_spec(path, read_metadata(path))
         except KeyError:

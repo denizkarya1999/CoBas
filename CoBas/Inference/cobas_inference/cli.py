@@ -3,8 +3,7 @@
     python -m cobas_inference inspect   MODEL.pth
     python -m cobas_inference predict   --model MODEL.pth --mmwave f.jpg --thermal f.png --voice f.wav
     python -m cobas_inference replay    --model MODEL.pth SESSION_OR_DATASET_DIR [--csv out.csv] [--as-files]
-    python -m cobas_inference export-onnx --model MODEL.pth --out MODEL.onnx
-    python -m cobas_inference bench     --model MODEL.pth|MODEL.onnx
+    python -m cobas_inference bench     --model MODEL.pth
     python -m cobas_inference build-latest-dataset SOURCE_DATASET_DIR OUT_DIR [--per-class 10]
     python -m cobas_inference check-latest-dataset LATEST_DATASET_DIR
 """
@@ -24,14 +23,14 @@ import numpy as np
 from PIL import Image
 
 from . import preprocess
-from .model import checkpoint_metadata, load_checkpoint, load_model, parameter_count, export_onnx
+from .model import checkpoint_metadata, load_checkpoint, load_model, parameter_count
 from .predictor import Predictor, VoteAggregator
 from .session import discover_session, find_sessions, label_from_path
 from .specs import MMWAVE, THERMAL, VOICE, resolve_spec
 
 
 def _add_model_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--model", required=True, help="checkpoint (.pth) or exported graph (.onnx)")
+    parser.add_argument("--model", required=True, help="PyTorch checkpoint (.pth or .pt)")
     parser.add_argument(
         "--weights", type=float, nargs="+", default=None,
         help="override fusion weights, in the model's modality order (e.g. --weights 1 1 2)",
@@ -41,12 +40,6 @@ def _add_model_args(parser: argparse.ArgumentParser) -> None:
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     path = Path(args.model)
-    if path.suffix.lower() == ".onnx":
-        predictor = Predictor.from_model(path, weights_override=args.weights, threads=args.threads)
-        print(f"ONNX model: {path}")
-        print(f"classes: {', '.join(predictor.class_names)}")
-        print(predictor.spec.describe())
-        return 0
     checkpoint = load_checkpoint(path)
     metadata = checkpoint_metadata(checkpoint)
     state = checkpoint["model_state_dict"]
@@ -169,14 +162,6 @@ def cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_export_onnx(args: argparse.Namespace) -> int:
-    model, class_names, metadata = load_model(args.model)
-    out = Path(args.out) if args.out else Path(args.model).with_suffix(".onnx")
-    export_onnx(model, out, class_names, metadata, opset=args.opset)
-    print(f"exported {out} ({out.stat().st_size / 1e6:.1f} MB) with sidecar {out.with_suffix('.json').name}")
-    return 0
-
-
 def cmd_bench(args: argparse.Namespace) -> int:
     predictor = Predictor.from_model(args.model, threads=args.threads)
     x = np.random.default_rng(0).standard_normal((1, 3, 224, 224)).astype(np.float32)
@@ -188,9 +173,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
         predictor.predict_input(x)
         times.append((time.perf_counter() - started) * 1000.0)
     print(f"{predictor.runner.name}: median {np.median(times):.1f} ms, min {min(times):.1f} ms, max {max(times):.1f} ms over {args.runs} runs")
-    if args.model.lower().endswith(".pth"):
-        model, _, _ = load_model(args.model)
-        print(f"parameters: {parameter_count(model):,}")
+    model, _, _ = load_model(args.model)
+    print(f"parameters: {parameter_count(model):,}")
     return 0
 
 
@@ -295,12 +279,6 @@ def build_parser() -> argparse.ArgumentParser:
              "recording, or the fused image written to a PNG first)",
     )
     p.set_defaults(func=cmd_replay)
-
-    p = sub.add_parser("export-onnx", help="export a .pth checkpoint to ONNX with a JSON sidecar")
-    p.add_argument("--model", required=True)
-    p.add_argument("--out", default=None)
-    p.add_argument("--opset", type=int, default=17)
-    p.set_defaults(func=cmd_export_onnx)
 
     p = sub.add_parser("bench", help="time the network forward pass")
     p.add_argument("--model", required=True)

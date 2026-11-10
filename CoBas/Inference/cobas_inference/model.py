@@ -1,14 +1,13 @@
-"""Load CoBas checkpoints and run ResNet-18 with PyTorch or ONNX Runtime."""
+"""Load CoBas checkpoints (.pth or .pt) and run ResNet-18 with PyTorch."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import numpy as np
 
-from .specs import CLASS_NAMES, MODEL_INPUT_SIZE
+from .specs import CLASS_NAMES
 
 STATE_KEY = "model_state_dict"
 
@@ -106,92 +105,8 @@ class TorchRunner:
             return self.model(tensor).cpu().numpy()
 
 
-class OnnxRunner:
-    """Run an exported ONNX graph with ONNX Runtime on the CPU."""
-
-    name = "onnx"
-
-    def __init__(self, path: str | Path, threads: int | None = None):
-        import onnxruntime as ort
-
-        options = ort.SessionOptions()
-        if threads:
-            options.intra_op_num_threads = int(threads)
-        self.session = ort.InferenceSession(
-            str(path), sess_options=options, providers=["CPUExecutionProvider"]
-        )
-        self.input_name = self.session.get_inputs()[0].name
-        self.output_name = self.session.get_outputs()[0].name
-
-    def __call__(self, x: np.ndarray) -> np.ndarray:
-        x = np.ascontiguousarray(x, dtype=np.float32)
-        return self.session.run([self.output_name], {self.input_name: x})[0]
-
-
 def softmax(logits: np.ndarray) -> np.ndarray:
     logits = np.asarray(logits, dtype=np.float64)
     shifted = logits - logits.max(axis=-1, keepdims=True)
     exp = np.exp(shifted)
     return exp / exp.sum(axis=-1, keepdims=True)
-
-
-# --------------------------------------------------------------------------- #
-# ONNX export with a JSON sidecar carrying the checkpoint metadata
-# --------------------------------------------------------------------------- #
-
-def sidecar_path(onnx_path: str | Path) -> Path:
-    return Path(onnx_path).with_suffix(".json")
-
-
-def export_onnx(
-    model,
-    onnx_path: str | Path,
-    class_names: Sequence[str],
-    metadata: Mapping[str, Any],
-    opset: int = 17,
-) -> Path:
-    import torch
-
-    onnx_path = Path(onnx_path)
-    onnx_path.parent.mkdir(parents=True, exist_ok=True)
-    dummy = torch.zeros(1, 3, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE, dtype=torch.float32)
-    kwargs: dict[str, Any] = dict(
-        input_names=["input"],
-        output_names=["logits"],
-        # Height/width stay dynamic: the mmWave standalone feeds 256x724 frames.
-        dynamic_axes={"input": {0: "batch", 2: "height", 3: "width"}, "logits": {0: "batch"}},
-        opset_version=opset,
-    )
-    model.eval()
-    try:
-        torch.onnx.export(model, dummy, str(onnx_path), dynamo=False, **kwargs)
-    except TypeError:
-        torch.onnx.export(model, dummy, str(onnx_path), **kwargs)
-
-    sidecar = {
-        "class_names": list(class_names),
-        "metadata": _json_safe(metadata),
-        "input": {"name": "input", "shape": [1, 3, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE]},
-    }
-    sidecar_path(onnx_path).write_text(json.dumps(sidecar, indent=2) + "\n", encoding="utf-8")
-    return onnx_path
-
-
-def load_sidecar(onnx_path: str | Path) -> tuple[list[str], dict[str, Any]]:
-    path = sidecar_path(onnx_path)
-    if not path.is_file():
-        return list(CLASS_NAMES), {}
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return [str(name) for name in data.get("class_names", CLASS_NAMES)], dict(data.get("metadata", {}))
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if hasattr(value, "tolist"):
-        return _json_safe(value.tolist())
-    return str(value)

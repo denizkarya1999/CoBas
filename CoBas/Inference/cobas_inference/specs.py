@@ -22,6 +22,9 @@ MODALITIES = (MMWAVE, THERMAL, VOICE)
 
 CLASS_NAMES: tuple[str, ...] = tuple(f"{value}%" for value in range(0, 101, 10))
 
+# Models are PyTorch checkpoints; either extension is accepted.
+MODEL_SUFFIXES = (".pth", ".pt")
+
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -221,11 +224,16 @@ _RATIO_PATTERN = re.compile(r"^\s*(\d+)(?:\s*-\s*(\d+))+")
 _META_KEY_TO_MODALITY = {"mmwave": MMWAVE, "thermal": THERMAL, "voice": VOICE}
 
 
+def is_model_file(path: str | Path) -> bool:
+    """True for a PyTorch checkpoint: the only model format CoBas uses."""
+    return Path(path).suffix.lower() in MODEL_SUFFIXES
+
+
 def spec_for_model_file(path: str | Path) -> FusionSpec:
-    """Return the registry spec for a checkpoint (or exported ONNX) filename."""
+    """Return the registry spec for a checkpoint filename (.pth or .pt)."""
     name = Path(path).name.lower()
-    if name.endswith(".onnx"):
-        name = name[: -len(".onnx")] + ".pth"
+    if name.endswith(".pt"):
+        name = name[: -len(".pt")] + ".pth"  # the registry is keyed by the .pth names
     try:
         return REGISTRY[name]
     except KeyError:

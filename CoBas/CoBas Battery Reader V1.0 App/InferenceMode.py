@@ -114,15 +114,15 @@ class ModelChoice:
 
 
 def discover_models(models_directory=DEFAULT_MODELS_DIRECTORY):
-    """List checkpoints (.pth) and exported graphs (.onnx) with a known recipe."""
-    from cobas_inference.specs import spec_for_model_file
+    """List PyTorch checkpoints (.pth or .pt) with a known recipe."""
+    from cobas_inference.specs import is_model_file, spec_for_model_file
 
     models_directory = Path(models_directory)
     if not models_directory.is_dir():
         return []
     choices = []
     for path in sorted(models_directory.rglob("*")):
-        if path.suffix.lower() not in (".pth", ".onnx") or not path.is_file():
+        if not is_model_file(path) or not path.is_file():
             continue
         try:
             spec = spec_for_model_file(path)
