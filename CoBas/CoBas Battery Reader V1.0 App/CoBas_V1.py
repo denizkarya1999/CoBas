@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,7 @@ from Style import COLORS, FONTS, PREVIEW, SPACING, WINDOW, apply_styles, configu
 APP_TITLE = "CoBas Battery Reader V1.0"
 APP_WM_CLASS = "cobas_battery_reader_v1"
 ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+DISPLAY_CHECK_INTERVAL_MS = 2000
 PULSE_DURATION_SECONDS = 2.0
 DATASET_FRAMES_PER_PULSE = 1
 SENSOR_FRAME_CAPTURE_TIMEOUT_SECONDS = 3.0
@@ -125,6 +127,10 @@ class CoBasV1App:
         self.apply_touch_geometry()
         self.root.overrideredirect(True)
         apply_styles(self.root)
+        # The panel can move in the screen layout after the app has started: at
+        # boot an HDMI monitor is often detected later and takes the origin.
+        self.display_updates = queue.Queue()
+        self.display_check_after_id = self.root.after(DISPLAY_CHECK_INTERVAL_MS, self.check_touch_display)
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
         self.app_mode = self.request_app_mode()
@@ -415,6 +421,38 @@ class CoBasV1App:
     def apply_touch_geometry(self):
         """Cover the touch display exactly; without one the window keeps its 800 x 480 design at the origin."""
         self.root.geometry(f"{WINDOW['width']}x{WINDOW['height']}+{WINDOW['x']}+{WINDOW['y']}")
+
+    def check_touch_display(self):
+        """Every few seconds look the touch display up, off the UI thread, and follow it if it moved."""
+        try:
+            while True:
+                self.follow_touch_display(self.display_updates.get_nowait())
+        except queue.Empty:
+            pass
+        threading.Thread(target=lambda: self.display_updates.put(find_touch_display()), daemon=True).start()
+        self.display_check_after_id = self.root.after(DISPLAY_CHECK_INTERVAL_MS, self.check_touch_display)
+
+    def follow_touch_display(self, display):
+        """Move the window and its open dialogs with the touch display when the screen layout changes."""
+        if not display or (display["width"], display["height"]) != (WINDOW["width"], WINDOW["height"]):
+            return  # no panel, or not the one the layout was sized for
+        dx, dy = display["x"] - WINDOW["x"], display["y"] - WINDOW["y"]
+        if not (dx or dy):
+            return
+        WINDOW.update(x=display["x"], y=display["y"])
+        if not self.touch_mode:
+            return  # an ordinary window stays where the user put it
+        self.apply_touch_geometry()
+
+        def move_dialogs(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, tk.Toplevel):
+                    position = re.match(r"\d+x\d+\+(-?\d+)\+(-?\d+)$", child.geometry())
+                    if position:
+                        child.geometry(f"+{int(position[1]) + dx}+{int(position[2]) + dy}")
+                move_dialogs(child)
+
+        move_dialogs(self.root)
 
     def toggle_touch_mode(self):
         self.touch_mode = not self.touch_mode
@@ -1893,11 +1931,12 @@ class CoBasV1App:
         if self.is_closing or self.export_in_progress:
             return
         self.is_closing = True
-        if self.mmwave_poll_after_id is not None:
-            try:
-                self.root.after_cancel(self.mmwave_poll_after_id)
-            except tk.TclError:
-                pass
+        for after_id in (self.mmwave_poll_after_id, self.display_check_after_id):
+            if after_id is not None:
+                try:
+                    self.root.after_cancel(after_id)
+                except tk.TclError:
+                    pass
         self.cancel_thermal_preview_loop()
         self.tracking_start_token += 1
         self.stop_pulse_process()

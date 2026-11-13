@@ -66,6 +66,20 @@ The models are not in the repository (about 45 MB each). Copy them to
 (`Standalone`, `1 - 1 Fusions`, `1 - 1 - 1 Fusions`, and so on): the folder name
 is the fusion ratio. Every model is a PyTorch checkpoint, `.pth` or `.pt`.
 
+## Starting at boot
+
+To have the app start whenever the Pi boots to its desktop, run this once from
+the repository root:
+
+```bash
+./install-autostart.sh
+```
+
+It writes `~/.config/autostart/cobas.desktop`, which the desktop session runs
+at login; `./install-autostart.sh --remove` undoes it. The app keeps covering
+the touch panel if the screen layout changes after it has started, for example
+when an HDMI monitor is detected a little later than the panel at boot.
+
 ## Models
 
 There are 16 ResNet-18 checkpoints. Each reads the battery level as one of 11
