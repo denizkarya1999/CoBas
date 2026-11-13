@@ -31,7 +31,7 @@ from InferenceMode import (
     discover_models,
     format_battery_level,
 )
-from Style import COLORS, FONTS
+from Style import COLORS, FONTS, px
 from TouchUI import TouchDialog, ask_number, dialogs
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp")
@@ -203,7 +203,7 @@ class FileBrowserDialog(TouchDialog):
             ttk.Label(
                 self.list_frame,
                 text=self.problem or "No folders, pictures or voice recordings here.",
-                style="PanelText.TLabel", wraplength=740,
+                style="PanelText.TLabel", wraplength=px(740),
             ).pack(anchor="w")
         for path, is_folder in entries[self.page * self.PAGE_SIZE:(self.page + 1) * self.PAGE_SIZE]:
             if is_folder:
@@ -325,9 +325,9 @@ class LocalFileInferencePanel:
         self.model_button.pack(fill="x", pady=(0, 6))
         self.open_button = ttk.Button(controls, text="Open File", style="Primary.TButton", command=self.open_file)
         self.open_button.pack(fill="x")
-        self.status_label = ttk.Label(controls, style="PanelText.TLabel", wraplength=350)
+        self.status_label = ttk.Label(controls, style="PanelText.TLabel", wraplength=px(350))
         self.status_label.pack(anchor="w", pady=(6, 0))
-        controls.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(200, e.width - 24)))
+        controls.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(px(200), e.width - 24)))
 
     # -- model ---------------------------------------------------------------
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from tkinter import ttk
 
-from Style import COLORS
+from Style import COLORS, px
 from TouchUI import TouchDialog
 
 APP_DIRECTORY = Path(__file__).resolve().parent
@@ -64,7 +64,7 @@ class ModeDialog(TouchDialog):
                 "mmWave and voice captures, and shows the estimated battery level."
             ),
             style="PanelText.TLabel",
-            wraplength=600,
+            wraplength=px(600),
         ).pack(anchor="w", pady=(0, 12))
         choices = ttk.Frame(self.body, style="Panel.TFrame")
         choices.pack(fill="both", expand=True)
@@ -157,7 +157,7 @@ class ModelPickerDialog(TouchDialog):
         ttk.Label(
             self.body,
             text="Models are read from the Inference models folder. The folder name is the fusion ratio.",
-            style="PanelText.TLabel", wraplength=700,
+            style="PanelText.TLabel", wraplength=px(700),
         ).pack(anchor="w", pady=(0, 6))
         self.list_frame = ttk.Frame(self.body, style="Panel.TFrame")
         self.list_frame.pack(fill="both", expand=True)
@@ -188,7 +188,7 @@ class ModelPickerDialog(TouchDialog):
             ttk.Label(
                 self.list_frame,
                 text=f"No models found. Copy checkpoints into:\n{DEFAULT_MODELS_DIRECTORY}",
-                style="PanelText.TLabel", wraplength=700,
+                style="PanelText.TLabel", wraplength=px(700),
             ).pack(anchor="w")
         for choice in self.choices[self.page * self.PAGE_SIZE:(self.page + 1) * self.PAGE_SIZE]:
             selected = choice == self.selected

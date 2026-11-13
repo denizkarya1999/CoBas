@@ -13,7 +13,7 @@ correctly (98.4 %) across the 16 models.
 
 ## The Battery Reader app
 
-The app runs on a Raspberry Pi 5 with an 800×480 touchscreen, a TI IWR6843AOP
+The app runs on a Raspberry Pi 5 with a touchscreen (today a 3.5-inch 480×320 SPI panel next to an HDMI monitor; the app finds the panel and scales its 800×480 layout to it), a TI IWR6843AOP
 mmWave radar, a Melexis MLX90642 thermal camera, a USB speaker and a USB
 microphone. Start it from the repository root:
 

@@ -20,6 +20,7 @@ from TouchUI import NumberControl, ask_number, dialogs as messagebox
 from AudioDevices import list_audio_choices
 from About import show_about_window
 from Camera.thermal_camera import ThermalCamera
+from Display import find_touch_display
 from InferenceMode import (
     MODE_INFER,
     ChirpJob,
@@ -35,7 +36,7 @@ from LocalFileInference import LocalFileInferencePanel
 from MMWave import MMWaveCaptureService
 from PIL import Image, ImageTk
 from Settings import SettingsWindow
-from Style import COLORS, FONTS, PREVIEW, SPACING, WINDOW, apply_styles
+from Style import COLORS, FONTS, PREVIEW, SPACING, WINDOW, apply_styles, configure_for_display, is_compact, px
 
 APP_TITLE = "CoBas Battery Reader V1.0"
 APP_WM_CLASS = "cobas_battery_reader_v1"
@@ -114,9 +115,15 @@ class CoBasV1App:
         self.root.title(APP_TITLE)
         self.root.iconname(APP_TITLE)
         self.root.withdraw()
-        self.root.geometry("800x480+0+0")
-        self.root.overrideredirect(True)
+        # Fill the touch panel (an SPI or DSI output) when one is attached. The
+        # layout was designed at 800 x 480; every size scales from the panel's size.
+        self.touch_display = find_touch_display()
+        if self.touch_display:
+            configure_for_display(self.touch_display["width"], self.touch_display["height"],
+                                  self.touch_display["x"], self.touch_display["y"])
         self.touch_mode = True
+        self.apply_touch_geometry()
+        self.root.overrideredirect(True)
         apply_styles(self.root)
 
         self.base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -205,7 +212,7 @@ class CoBasV1App:
 
         self.set_app_icon()
         self.root.resizable(True, True)
-        self.root.minsize(760, 440)
+        self.root.minsize(px(760), px(440))
         self.build_gui()
         self.refresh_info_panel()
         self.mmwave_poll_after_id = self.root.after(50, self.poll_mmwave_events)
@@ -348,7 +355,7 @@ class CoBasV1App:
         self.build_toolbar(outer)
 
         # Reserve the capture action and status before allocating preview space.
-        footer = ttk.Frame(outer, style="Panel.TFrame", padding=(10, 6), height=76)
+        footer = ttk.Frame(outer, style="Panel.TFrame", padding=(px(10), px(6)), height=px(84))
         footer.pack(side="bottom", fill="x")
         footer.pack_propagate(False)
         self.track_button = ttk.Button(footer, text=self.start_button_text(), style="Start.TButton",
@@ -361,13 +368,13 @@ class CoBasV1App:
         )
         self.record_timer_label.pack(anchor="w")
         self.status_label = ttk.Label(footer, text=f"Ready. Tap {self.start_button_text()} to begin.",
-                                      style="Info.TLabel", wraplength=500)
+                                      style="Info.TLabel", wraplength=px(500))
         self.status_label.pack(fill="x", expand=True, anchor="w")
         self.status_label.bind("<Button-1>", lambda e: messagebox.showinfo("Capture status", self.status_label.cget("text"), parent=self.root))
-        footer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(220, e.width - 270)))
+        footer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(px(220), e.width - px(270))))
 
         self.notebook = ttk.Notebook(outer, style="Touch.TNotebook")
-        self.notebook.pack(fill="both", expand=True, padx=8, pady=6)
+        self.notebook.pack(fill="both", expand=True, padx=px(8), pady=px(4 if is_compact() else 6))
         preview = ttk.Frame(self.notebook, style="Panel.TFrame")
         setup = ttk.Frame(self.notebook, style="Panel.TFrame")
         system = ttk.Frame(self.notebook, style="Panel.TFrame")
@@ -395,7 +402,7 @@ class CoBasV1App:
             self.footer.pack(side="bottom", fill="x", before=self.notebook)
 
     def build_toolbar(self, parent):
-        toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(8, 4))
+        toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(px(8), px(4)))
         toolbar.pack(fill="x")
         title = "CoBas  ·  Inference" if self.inference_mode else f"CoBas  ·  {self.battery_percentage}%"
         ttk.Label(toolbar, text=title, style="ToolbarTitle.TLabel").pack(side="left", padx=(0, 10))
@@ -405,11 +412,15 @@ class CoBasV1App:
         ttk.Button(toolbar, text="About", width=5, style="Tool.TButton", command=lambda: show_about_window(self.root)).pack(side="right", padx=3)
         ttk.Button(toolbar, text="Settings", width=7, style="Settings.TButton", command=lambda: SettingsWindow(self.root, self)).pack(side="right", padx=3)
 
+    def apply_touch_geometry(self):
+        """Cover the touch display exactly; without one the window keeps its 800 x 480 design at the origin."""
+        self.root.geometry(f"{WINDOW['width']}x{WINDOW['height']}+{WINDOW['x']}+{WINDOW['y']}")
+
     def toggle_touch_mode(self):
         self.touch_mode = not self.touch_mode
         self.root.overrideredirect(self.touch_mode)
         if self.touch_mode:
-            self.root.geometry("800x480+0+0")
+            self.apply_touch_geometry()
         else:
             width = min(980, self.root.winfo_screenwidth())
             height = min(620, self.root.winfo_screenheight() - 40)
@@ -434,35 +445,38 @@ class CoBasV1App:
                                             fg=COLORS["accent"], font=FONTS["status"])
         self.live_indicator_label.pack(side="right")
         area = ttk.Frame(parent, style="Panel.TFrame")
-        area.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        area.pack(fill="both", expand=True, padx=px(8), pady=(0, px(8)))
         area.rowconfigure(1, weight=1)
         for col, title in enumerate(("mmWave radar", "Thermal camera")):
             area.columnconfigure(col, weight=1, uniform="sensor")
             ttk.Label(area, text=title, style="PanelText.TLabel").grid(row=0, column=col, sticky="w", padx=4, pady=(0,4))
         self.mmwave_label = tk.Label(area, text="Radar ready.\n\nTap Start Tracking to connect.",
                                      bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
-                                     font=FONTS["preview_text"], width=1, height=1, wraplength=330, bd=0)
+                                     font=FONTS["preview_text"], width=1, height=1, wraplength=px(330), bd=0)
         self.thermal_video_label = tk.Label(area, text="Thermal camera ready.\n\nTap Start Tracking to begin.",
                                             bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
-                                            font=FONTS["preview_text"], width=1, height=1, wraplength=330, bd=0)
+                                            font=FONTS["preview_text"], width=1, height=1, wraplength=px(330), bd=0)
         for col, label in enumerate((self.mmwave_label, self.thermal_video_label)):
             label.grid(row=1, column=col, sticky="nsew", padx=4)
             label.bind("<Configure>", lambda e, widget=label: widget.configure(wraplength=max(100, e.width - 12)))
 
     def build_control_panel(self, parent):
-        parent.columnconfigure(0, weight=1, uniform="setup")
-        parent.columnconfigure(1, weight=1, uniform="setup")
-        controls = ttk.Frame(parent, style="Panel.TFrame", padding=10)
+        # The capture controls need the wider column: two position-mode buttons share one row.
+        parent.columnconfigure(0, weight=11, uniform="setup")
+        parent.columnconfigure(1, weight=9, uniform="setup")
+        padding = px(8 if is_compact() else 10)
+        controls = ttk.Frame(parent, style="Panel.TFrame", padding=padding)
         controls.grid(row=0, column=0, sticky="nsew")
-        thermal = ttk.Frame(parent, style="Panel.TFrame", padding=10)
+        thermal = ttk.Frame(parent, style="Panel.TFrame", padding=padding)
         thermal.grid(row=0, column=1, sticky="nsew")
         if self.inference_mode:
             self.build_inference_controls(controls)
             self.build_thermal_controls(thermal)
             return
-        ttk.Label(controls, text="Capture", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
+        if not is_compact():  # the tab already says "Capture setup"; small panels need the height
+            ttk.Label(controls, text="Capture", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, px(5)))
         self.pulse_count_spinbox = self.build_spinbox_row(controls, "Chirp count", self.pulse_count_text, None)
-        ttk.Label(controls, text="Position handling", style="PanelText.TLabel").pack(anchor="w", pady=(5,2))
+        ttk.Label(controls, text="Position handling", style="PanelText.TLabel").pack(anchor="w", pady=(px(5), px(2)))
         mode_row = ttk.Frame(controls, style="Panel.TFrame")
         mode_row.pack(fill="x")
         self.position_mode_buttons = {}
@@ -479,10 +493,12 @@ class CoBasV1App:
         self.position_count_spinbox = self.build_spinbox_row(
             controls, "Battery positions", self.position_count_text, 99
         )
-        self.position_mode_hint = ttk.Label(controls, style="PanelText.TLabel", wraplength=350)
-        self.position_mode_hint.pack(anchor="w", pady=(3,0))
+        self.position_mode_hint = ttk.Label(controls, style="PanelText.TLabel", wraplength=px(350))
+        self.position_mode_hint.pack(anchor="w", pady=(px(3), 0))
+        controls.bind("<Configure>", lambda e: self.position_mode_hint.configure(wraplength=max(px(200), e.width - 2 * padding)))
         self.set_position_mode(self.position_mode_text.get())
-        ttk.Label(controls, text="Tap a number to open the keypad.", style="PanelText.TLabel").pack(anchor="w", pady=(5,0))
+        if not is_compact():  # no room for the tip on a small panel; the hint above stays
+            ttk.Label(controls, text="Tap a number to open the keypad.", style="PanelText.TLabel").pack(anchor="w", pady=(px(5), 0))
         self.build_thermal_controls(thermal)
 
     def build_inference_controls(self, parent):
@@ -490,15 +506,16 @@ class CoBasV1App:
         self.position_mode_buttons = {}
         self.position_count_spinbox = None
         self.pulse_count_text.set("1")
-        ttk.Label(parent, text="Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
+        if not is_compact():  # the tab already says "Inference setup"; small panels need the height
+            ttk.Label(parent, text="Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, px(5)))
         ttk.Label(parent, text="Model", style="PanelText.TLabel").pack(anchor="w")
         self.model_button = ttk.Button(parent, style="Tool.TButton", command=self.choose_model)
-        self.model_button.pack(fill="x", pady=(0, 6))
+        self.model_button.pack(fill="x", pady=(0, px(6)))
         self.pulse_count_spinbox = self.build_spinbox_row(parent, "Chirps per estimate", self.pulse_count_text, 50)
         ttk.Label(
             parent,
             text="More chirps are averaged for a steadier answer.",
-            style="PanelText.TLabel", wraplength=350,
+            style="PanelText.TLabel", wraplength=px(350),
         ).pack(anchor="w", pady=(2, 0))
         self.refresh_model_button()
 
@@ -624,20 +641,20 @@ class CoBasV1App:
             self.model_button.configure(state=state)
 
     def build_thermal_controls(self, parent):
-        ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0,5))
+        ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, px(5)))
         row = ttk.Frame(parent, style="Panel.TFrame")
         row.pack(fill="x")
         for title, variable, attr in (("Minimum", self.thermal_min_text, "thermal_min_entry"),
                                       ("Maximum", self.thermal_max_text, "thermal_max_entry")):
             ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
             control = NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
-            control.pack(fill="x", pady=(0,4))
+            control.pack(fill="x", pady=(0, px(4)))
             setattr(self, attr, control)
         modes = ttk.Frame(parent, style="Panel.TFrame")
-        modes.pack(fill="x", pady=(2,0))
+        modes.pack(fill="x", pady=(px(2), 0))
         self.thermal_range_button = ttk.Button(modes, text="Apply", style="Primary.TButton", width=5,
                                                command=self.configure_thermal_temperature_range)
-        self.thermal_range_button.pack(side="left", padx=(0,6))
+        self.thermal_range_button.pack(side="left", padx=(0, px(6)))
         for label, value in (("Color", "rgb"), ("Grey", "grayscale")):
             button = ttk.Radiobutton(modes, text=label, value=value, variable=self.thermal_scale_mode,
                                       command=self.change_thermal_scale_mode, style="ThermalScale.TRadiobutton")
@@ -645,18 +662,18 @@ class CoBasV1App:
             self.thermal_scale_buttons.append(button)
 
     def build_system_panel(self, parent):
-        info = ttk.Frame(parent, style="Panel.TFrame", padding=12)
+        info = ttk.Frame(parent, style="Panel.TFrame", padding=px(12))
         info.pack(fill="both", expand=True)
         for attr in ("radar_info_label", "thermal_info_label", "microphone_info_label", "speaker_info_label", "output_info_label", "rate_info_label"):
-            label = ttk.Label(info, style="PanelText.TLabel", wraplength=720)
-            label.pack(anchor="w", pady=(0,6))
+            label = ttk.Label(info, style="PanelText.TLabel", wraplength=px(720))
+            label.pack(anchor="w", pady=(0, px(6)))
             setattr(self, attr, label)
 
     @staticmethod
     def build_spinbox_row(parent, label, variable, maximum):
         ttk.Label(parent, text=label, style="PanelText.TLabel").pack(anchor="w")
         control = NumberControl(parent, variable, label, maximum=maximum)
-        control.pack(fill="x", pady=(0,4))
+        control.pack(fill="x", pady=(0, px(4)))
         return control
 
     def get_preview_dimensions(self, label):

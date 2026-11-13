@@ -1,8 +1,8 @@
-"""Touch-sized controls and dialogs for the 800 x 480 CoBas display."""
+"""Touch-sized controls and dialogs for the CoBas touch display (designed at 800 x 480, scaled by Style.px)."""
 import math
 import tkinter as tk
 from tkinter import ttk
-from Style import COLORS, FONTS
+from Style import COLORS, FONTS, WINDOW, px
 
 
 class TouchDialog(tk.Toplevel):
@@ -17,15 +17,17 @@ class TouchDialog(tk.Toplevel):
         self.result = None
         if parent.winfo_viewable():
             self.transient(parent)
-        pw = parent.winfo_width() if parent.winfo_viewable() else 800
-        ph = parent.winfo_height() if parent.winfo_viewable() else 480
-        width, height = min(width, pw), min(height, ph)
-        x = parent.winfo_x() + max(0, (pw - width) // 2)
-        y = parent.winfo_y() + max(0, (ph - height) // 2)
+        if parent.winfo_viewable():
+            pw, ph, left, top = parent.winfo_width(), parent.winfo_height(), parent.winfo_x(), parent.winfo_y()
+        else:
+            pw, ph, left, top = WINDOW['width'], WINDOW['height'], WINDOW['x'], WINDOW['y']
+        width, height = min(px(width), pw), min(px(height), ph)
+        x = left + max(0, (pw - width) // 2)
+        y = top + max(0, (ph - height) // 2)
         self.geometry(f'{width}x{height}+{x}+{y}')
         self.protocol('WM_DELETE_WINDOW', self.cancel)
         self.bind('<Escape>', lambda event: self.cancel())
-        self.body = ttk.Frame(self, style='Panel.TFrame', padding=12)
+        self.body = ttk.Frame(self, style='Panel.TFrame', padding=px(12))
         self.body.pack(fill='both', expand=True)
         ttk.Label(self.body, text=title, style='PanelTitle.TLabel').pack(anchor='w', pady=(0, 8))
 
