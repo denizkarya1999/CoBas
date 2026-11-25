@@ -96,6 +96,11 @@ install_driver_library() {
 
     run_as_target_user env MLX90642_SHARED_LIB="$build_output" python3 "$APP_FILE" --build-only
     install -m 0755 "$build_output" "$DRIVER_LIB"
+    # --build-only also compiles the MCP2221A USB bridge transport beside it.
+    if [[ -f "${build_output%.so}-mcp2221.so" ]]; then
+        install -m 0755 "${build_output%.so}-mcp2221.so" "${DRIVER_LIB%.so}-mcp2221.so"
+        log "Installed ${DRIVER_LIB%.so}-mcp2221.so"
+    fi
     rm -rf "$build_dir"
     ldconfig
 
@@ -203,6 +208,29 @@ configure_i2c_permissions() {
     fi
 }
 
+install_mcp2221_udev_rule() {
+    log "Granting access to an MCP2221A USB-to-I2C bridge, if one carries the camera"
+
+    local rule="${SCRIPT_DIR}/99-mcp2221a.rules"
+    if [[ ! -f "$rule" ]]; then
+        warn "Could not find ${rule}; skipping the bridge udev rule."
+        return
+    fi
+
+    # The app reaches the bridge through its HID node, which is root-only
+    # until this rule hands it to plugdev. A bridge already plugged in has to
+    # be replugged for the rule to apply.
+    install -m 0644 "$rule" /etc/udev/rules.d/99-mcp2221a.rules
+    udevadm control --reload-rules || true
+    udevadm trigger || true
+
+    if [[ "${REAL_USER}" != "root" ]]; then
+        getent group plugdev >/dev/null || groupadd --system plugdev
+        usermod -aG plugdev "$REAL_USER"
+        log "Added ${REAL_USER} to the plugdev group"
+    fi
+}
+
 run_as_target_user() {
     if [[ "${REAL_USER}" != "root" ]]; then
         sudo -u "$REAL_USER" env PYTHONDONTWRITEBYTECODE=1 "$@"
@@ -256,6 +284,8 @@ print_next_steps() {
     printf '  python3 thermal_camera_app.py\n'
     printf '\nIf the sensor is on a different bus:\n'
     printf '  MLX90642_I2C_BUS=/dev/i2c-0 cobas-thermal-camera\n'
+    printf '\nIf the camera hangs off an MCP2221A USB bridge, plug the bridge in (replug it if it already was) and run:\n'
+    printf '  cobas-thermal-camera --transport mcp2221\n'
 }
 
 main() {
@@ -266,6 +296,7 @@ main() {
     enable_i2c_boot_overlay
     enable_i2c_kernel_modules
     configure_i2c_permissions
+    install_mcp2221_udev_rule
     install_driver_library
     install_launcher
     verify_tools

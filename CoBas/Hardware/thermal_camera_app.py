@@ -3,6 +3,7 @@
 
 import argparse
 import math
+import os
 import queue
 import sys
 import threading
@@ -30,8 +31,11 @@ try:
         SENSOR_PIXELS,
         SENSOR_WIDTH,
         SHARED_LIB,
+        TRANSPORT_I2C,
+        TRANSPORT_MCP2221,
         ThermalRenderer,
         build_shared_library,
+        build_transport,
         frame_statistics,
         raw_to_celsius,
         signed_word,
@@ -53,8 +57,11 @@ except ImportError:
         SENSOR_PIXELS,
         SENSOR_WIDTH,
         SHARED_LIB,
+        TRANSPORT_I2C,
+        TRANSPORT_MCP2221,
         ThermalRenderer,
         build_shared_library,
+        build_transport,
         frame_statistics,
         raw_to_celsius,
         signed_word,
@@ -866,13 +873,26 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--mock", action="store_true")
+    parser.add_argument(
+        "--transport",
+        choices=("auto", "i2c", "mcp2221", "serial"),
+        help="read the sensor on the I2C header, through an MCP2221A USB bridge, or from an Arduino Nano ESP32 over serial "
+        "(default: the MLX90642_TRANSPORT variable, else auto)",
+    )
     args = parser.parse_args()
+    if args.transport:
+        os.environ["MLX90642_TRANSPORT"] = args.transport
 
     if args.build_only:
         # Installation uses this path to compile the driver without creating a
-        # Tk root window or requiring camera hardware to be connected.
-        output = build_shared_library()
-        print(output)
+        # Tk root window or requiring camera hardware to be connected. Without
+        # a choice it compiles both transports, so either can be used later.
+        if args.transport and args.transport != "auto":
+            kinds = (args.transport,)
+        else:
+            kinds = (TRANSPORT_I2C, TRANSPORT_MCP2221)
+        for kind in kinds:
+            print(build_shared_library(transport=build_transport(kind)))
         return 0
 
     # Camera construction and I2C access happen only after the user confirms a

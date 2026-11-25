@@ -14,7 +14,9 @@ correctly (98.4 %) across the 16 models.
 ## The Battery Reader app
 
 The app runs on a Raspberry Pi 5 with a touchscreen (today a 3.5-inch 480×320 SPI panel next to an HDMI monitor; the app finds the panel and scales its 800×480 layout to it), a TI IWR6843AOP
-mmWave radar, a Melexis MLX90642 thermal camera, a USB speaker and a USB
+mmWave radar, a Melexis MLX90642 thermal camera (on the Pi's I2C header,
+through an MCP2221A USB-to-I2C bridge, or on an Arduino Nano ESP32 over USB,
+see [below](#the-thermal-camera-over-usb)), a USB speaker and a USB
 microphone. Start it from the repository root:
 
 ```bash
@@ -60,6 +62,76 @@ requirements files:
 
 `ffmpeg` and `gcc` must be on the system: the app uses `ffmpeg` for the thermal
 video and compiles the thermal camera driver with `gcc`.
+
+### The thermal camera over USB
+
+The camera is an I2C sensor. It can sit on the Pi's I2C header (`/dev/i2c-1`,
+the default) or hang off an **MCP2221A** USB-to-I2C bridge, which frees the
+header and lets the camera be placed on a longer USB lead. Wire the camera's
+SDA, SCL, VDD and GND to the bridge's SDA, SCL, 3.3 V and GND. The camera is a
+3.3 V part, so the bridge's I/O must run at 3.3 V. SDA and SCL need pull-up
+resistors to 3.3 V somewhere on the bus; if neither board carries them, 4.7 kΩ
+resistors do.
+
+The app talks to the bridge directly through its USB HID node, so no kernel
+module is needed, but that node is root-only by default. Install the udev rule
+once, then unplug and replug the bridge:
+
+```bash
+sudo install -m 0644 CoBas/Hardware/99-mcp2221a.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+The user running the app must be in the `plugdev` group (the default user on
+Raspberry Pi OS and Ubuntu is). With the rule in place the app finds the bridge
+by itself: `lsusb` lists it as `04d8:00dd`, and the info panel reads
+"Thermal live (MCP2221A)" once frames arrive. Without a bridge the app uses the
+I2C header as before.
+
+| Variable | Effect |
+|---|---|
+| `MLX90642_TRANSPORT` | `auto` (default: an Arduino if plugged in, else a bridge, else the header), `serial`, `mcp2221` or `i2c` |
+| `MLX90642_SERIAL_PORT` | the Arduino's port, for example `/dev/ttyACM1`, when there are several |
+| `MLX90642_MCP2221_HIDRAW` | the bridge's node, for example `/dev/hidraw3`, when there are several bridges |
+| `MLX90642_I2C_BUS` | the header bus, for example `/dev/i2c-0`, when the camera is not on `/dev/i2c-1` |
+
+The standalone camera viewer in `CoBas/Hardware` takes the same choice as
+`--transport auto|serial|mcp2221|i2c`. On a kernel that ships the `hid_mcp2221`
+driver the bridge appears as an ordinary I2C adapter instead; the app notices
+that too and reads it through the I2C transport.
+
+### The thermal camera on an Arduino
+
+The third way to attach the camera is an **Arduino Nano ESP32** (ABX00083)
+running the sketch in [`CoBas/Hardware/arduino-mlx90642`](CoBas/Hardware/arduino-mlx90642).
+The board reads the sensor itself with the same Melexis driver and streams
+every frame to the Pi over its USB-C port, where it appears as a serial port.
+Wire the camera to the board with four jumpers: SDA to **A4**, SCL to **A5**,
+GND to **GND**, and the camera board's VCC to **VBUS** (the 5 V from USB; the
+sensor itself is a 3.3 V part and the Nano ESP32 speaks 3.3 V on A4/A5).
+
+Flashing needs [`arduino-cli`](https://arduino.github.io/arduino-cli/) with the
+`arduino:esp32` core, and the board's DFU interface made accessible once:
+
+```bash
+sudo install -m 0644 CoBas/Hardware/99-arduino-nano-esp32.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+```bash
+arduino-cli core update-index && arduino-cli core install arduino:esp32
+```
+
+```bash
+CoBas/Hardware/arduino-mlx90642/build.sh
+```
+
+The build script compiles the sketch against the driver in
+`CoBas/Hardware/mlx90642-library` and flashes the board it finds by Arduino's
+USB vendor ID. With the board plugged in the app picks it before the bridge
+and the header (`MLX90642_TRANSPORT=serial` forces it, `MLX90642_SERIAL_PORT`
+names the port), and the info panel reads "Thermal live (Arduino)". The
+board prints its own state as `#` lines on the same port, for example when
+the sensor does not acknowledge, and the app shows the last of them in its
+error message.
 
 The models are not in the repository (about 45 MB each). Copy them to
 `CoBas/Inference/models/<folder>/<name>.pth`, keeping the folder names
@@ -309,7 +381,7 @@ The same report is kept on its own in
 | `CoBas/Screenshots` | screenshots of the app taken on the Pi |
 | `CoBas/Machine Learning` | the training notebooks |
 | `CoBas/mmWave` | radar configuration, raw I/Q logging and range-angle processing |
-| `CoBas/Hardware` | the standalone thermal camera scripts and the MLX90642 driver |
+| `CoBas/Hardware` | the standalone thermal camera scripts, the MLX90642 driver with its I2C-header and MCP2221A transports, the Arduino Nano ESP32 sketch, and the udev rules for both USB paths |
 | `CoBas/Pulse Generation` | the chirp generators |
 | `CoBas/Voice Processing`, `CoBas/Video Processing`, `CoBas/Dataset Tools` | preprocessing pipelines |
 | `Old Code` | code from the earlier papers |

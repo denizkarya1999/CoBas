@@ -488,10 +488,10 @@ class CoBasV1App:
         for col, title in enumerate(("mmWave radar", "Thermal camera")):
             area.columnconfigure(col, weight=1, uniform="sensor")
             ttk.Label(area, text=title, style="PanelText.TLabel").grid(row=0, column=col, sticky="w", padx=4, pady=(0,4))
-        self.mmwave_label = tk.Label(area, text="Radar ready.\n\nTap Start Tracking to connect.",
+        self.mmwave_label = tk.Label(area, text=f"Radar ready.\n\nTap {self.start_button_text()} to connect.",
                                      bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
                                      font=FONTS["preview_text"], width=1, height=1, wraplength=px(330), bd=0)
-        self.thermal_video_label = tk.Label(area, text="Thermal camera ready.\n\nTap Start Tracking to begin.",
+        self.thermal_video_label = tk.Label(area, text=f"Thermal camera ready.\n\nTap {self.start_button_text()} to begin.",
                                             bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
                                             font=FONTS["preview_text"], width=1, height=1, wraplength=px(330), bd=0)
         for col, label in enumerate((self.mmwave_label, self.thermal_video_label)):

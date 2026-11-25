@@ -1,0 +1,11 @@
+# The MLX90642 thermal camera can hang off an MCP2221A USB-to-I2C bridge
+# instead of the Pi's I2C header. The app talks to the bridge through its
+# HID node, which is root-only by default; this grants Ubuntu's and
+# Raspberry Pi OS's plugdev group access. The bridge also exposes a serial
+# port that ModemManager would otherwise probe.
+# Install with:
+#   sudo install -m 0644 99-mcp2221a.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# then unplug and replug the bridge.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="04d8", ATTRS{idProduct}=="00dd", GROUP="plugdev", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="04d8", ATTRS{idProduct}=="00dd", ENV{ID_MM_DEVICE_IGNORE}="1"

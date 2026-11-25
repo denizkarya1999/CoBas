@@ -5,6 +5,7 @@ import math
 import os
 import queue
 import shutil
+import struct
 import subprocess
 import threading
 import time
@@ -23,6 +24,188 @@ LIB = ROOT / "mlx90642-library"
 # The path is configurable so an installer or developer can choose where the
 # ctypes-compatible shared-library build is written.
 SHARED_LIB = Path(os.environ.get("MLX90642_SHARED_LIB", "/tmp/libmlx90642.so"))
+
+# The sensor is read either on the Pi's own I2C header or through an MCP2221A
+# USB-to-I2C bridge. Each path has its own small C transport file; the rest of
+# the vendor driver is shared. MLX90642_TRANSPORT picks one explicitly
+# ("i2c" or "mcp2221"); the default, "auto", uses a bridge when one is plugged in.
+TRANSPORT_I2C = "i2c"
+TRANSPORT_MCP2221 = "mcp2221"
+# An Arduino Nano ESP32 running CoBas/Hardware/arduino-mlx90642 reads the sensor
+# itself and streams frames over USB serial; no C library is built for it.
+TRANSPORT_SERIAL = "serial"
+TRANSPORT_SOURCES = {
+    TRANSPORT_I2C: "MLX90642_linux_i2c.c",
+    TRANSPORT_MCP2221: "MLX90642_mcp2221_hidraw.c",
+}
+ARDUINO_VENDOR_ID = 0x2341
+SERIAL_BAUD = 115200
+# Packet layout shared with the sketch: magic, sequence, pixel count, flags,
+# board millis, 768 little-endian words, CRC-16/CCITT-FALSE of all before it.
+SERIAL_MAGIC = b"CBT\x01"
+SERIAL_HEADER = struct.Struct("<4sHHHI")
+SERIAL_PIXELS = struct.Struct("<768h")
+SERIAL_PACKET_SIZE = SERIAL_HEADER.size + SERIAL_PIXELS.size + 2
+SERIAL_FIRST_FRAME_TIMEOUT_SECONDS = 20.0
+SERIAL_FRAME_TIMEOUT_SECONDS = 5.0
+MCP2221_VENDOR_ID = 0x04D8
+MCP2221_PRODUCT_ID = 0x00DD
+# Repository file that grants users access to the bridge's HID node.
+MCP2221_UDEV_RULES = "CoBas/Hardware/99-mcp2221a.rules"
+HIDRAW_CLASS = Path("/sys/class/hidraw")
+I2C_ADAPTER_CLASS = Path("/sys/class/i2c-adapter")
+DEFAULT_I2C_BUS = "/dev/i2c-1"
+
+
+class Transport:
+    """How the driver reaches the sensor: the Pi's I2C header or an MCP2221A bridge."""
+
+    def __init__(self, kind, device, via_bridge):
+        # kind selects the C transport source; device is the node it opens.
+        self.kind = kind
+        self.device = device
+        self.via_bridge = via_bridge
+
+    @property
+    def label(self):
+        if self.kind == TRANSPORT_SERIAL:
+            return "Arduino Nano ESP32"
+        return "MCP2221A USB bridge" if self.via_bridge else "I2C header"
+
+    @property
+    def status_suffix(self):
+        """Short tag for status lines on the small touch display."""
+        if self.kind == TRANSPORT_SERIAL:
+            return " (Arduino)"
+        return " (MCP2221A)" if self.via_bridge else ""
+
+    def describe(self):
+        if self.device is None:
+            return self.label
+        return f"{self.label} at {self.device}"
+
+    def explain_failure(self, error):
+        """The error text shown to the operator, with the path the sensor was reached on."""
+        message = f"{error} [{self.describe()}]"
+        if self.via_bridge and "acknowledge" in str(error):
+            message += (
+                "; check the camera's SDA, SCL, 3.3 V and GND wires to the bridge"
+            )
+        return message
+
+
+def find_mcp2221_hidraw():
+    """Return the /dev/hidraw node of an attached MCP2221A, or None."""
+    for uevent in sorted(HIDRAW_CLASS.glob("hidraw*/device/uevent")):
+        try:
+            text = uevent.read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.startswith("HID_ID="):
+                continue
+            # HID_ID=0003:000004D8:000000DD is bus:vendor:product in hex.
+            parts = line[len("HID_ID="):].split(":")
+            try:
+                vendor, product = int(parts[1], 16), int(parts[2], 16)
+            except (IndexError, ValueError):
+                continue
+            if (vendor, product) == (MCP2221_VENDOR_ID, MCP2221_PRODUCT_ID):
+                return str(Path("/dev") / uevent.parents[1].name)
+    return None
+
+
+def find_mcp2221_i2c_bus():
+    """Return /dev/i2c-N of a bridge the kernel's own hid_mcp2221 driver claimed, or None."""
+    for name_file in sorted(I2C_ADAPTER_CLASS.glob("i2c-*/name")):
+        try:
+            name = name_file.read_text()
+        except OSError:
+            continue
+        if "mcp2221" in name.lower():
+            return str(Path("/dev") / name_file.parent.name)
+    return None
+
+
+def find_arduino_serial_port():
+    """Return the serial port of an attached Arduino (the Nano ESP32 camera), or None."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        return None
+    for port in sorted(list_ports.comports(), key=lambda entry: entry.device):
+        if port.vid == ARDUINO_VENDOR_ID:
+            return port.device
+    return None
+
+
+def select_transport():
+    """Decide how to reach the sensor and hand the chosen device to the transport."""
+    requested = os.environ.get("MLX90642_TRANSPORT", "auto").strip().lower() or "auto"
+    choices = ("auto", TRANSPORT_I2C, TRANSPORT_MCP2221, TRANSPORT_SERIAL)
+    if requested not in choices:
+        raise DriverError(
+            f"MLX90642_TRANSPORT must be one of {', '.join(choices)}, not {requested!r}"
+        )
+
+    if requested in ("auto", TRANSPORT_SERIAL):
+        port = os.environ.get("MLX90642_SERIAL_PORT") or find_arduino_serial_port()
+        if port:
+            if not os.path.exists(port):
+                raise DriverError(f"no Arduino at {port}")
+            if not os.access(port, os.R_OK | os.W_OK):
+                raise DriverError(
+                    f"the Arduino at {port} is not accessible to this user; "
+                    "add the user to the dialout group and log in again"
+                )
+            return Transport(TRANSPORT_SERIAL, port, via_bridge=False)
+        if requested == TRANSPORT_SERIAL:
+            raise DriverError("no Arduino is attached (nothing with USB vendor ID 2341)")
+
+    if requested != TRANSPORT_I2C:
+        hidraw = os.environ.get("MLX90642_MCP2221_HIDRAW") or find_mcp2221_hidraw()
+        if hidraw:
+            if not os.path.exists(hidraw):
+                raise DriverError(f"no MCP2221A USB bridge at {hidraw}")
+            if not os.access(hidraw, os.R_OK | os.W_OK):
+                raise DriverError(
+                    f"the MCP2221A bridge at {hidraw} is not accessible to this user; "
+                    f"install {MCP2221_UDEV_RULES} (see the README), then unplug and "
+                    "replug the bridge"
+                )
+            # The C transport reads this variable, so it opens the node checked here.
+            os.environ["MLX90642_MCP2221_HIDRAW"] = hidraw
+            return Transport(TRANSPORT_MCP2221, hidraw, via_bridge=True)
+
+        bus = find_mcp2221_i2c_bus()
+        if bus:
+            # A kernel with hid_mcp2221 presents the bridge as an ordinary I2C
+            # adapter; the plain I2C transport then works unchanged on it.
+            os.environ.setdefault("MLX90642_I2C_BUS", bus)
+            return Transport(TRANSPORT_I2C, os.environ["MLX90642_I2C_BUS"], via_bridge=True)
+
+        if requested == TRANSPORT_MCP2221:
+            raise DriverError(
+                "no MCP2221A USB bridge is attached (nothing with USB ID 04d8:00dd)"
+            )
+
+    bus = os.environ.get("MLX90642_I2C_BUS") or DEFAULT_I2C_BUS
+    return Transport(TRANSPORT_I2C, bus, via_bridge=False)
+
+
+def build_transport(kind):
+    """A transport for compiling only: no device has to be attached."""
+    if kind not in TRANSPORT_SOURCES:
+        raise DriverError(f"unknown transport {kind!r}")
+    return Transport(kind, None, via_bridge=kind == TRANSPORT_MCP2221)
+
+
+def transport_library_path(output, transport):
+    """Each transport gets its own build, so switching never overwrites a loaded library."""
+    output = Path(output)
+    if transport.kind == TRANSPORT_I2C:
+        return output
+    return output.with_name(f"{output.stem}-{transport.kind}{output.suffix}")
 
 # These dimensions are part of the sensor/driver ABI: every frame passed across
 # the C boundary contains exactly this many 16-bit pixel values.
@@ -49,13 +232,16 @@ class DriverError(RuntimeError):
     pass
 
 
-def build_shared_library(output=SHARED_LIB):
+def build_shared_library(output=SHARED_LIB, transport=None):
     # The vendor driver is plain C, so build its platform layer and the narrow
     # Python bridge into one shared object that ctypes can load directly.
+    if transport is None:
+        transport = select_transport()
+    output = transport_library_path(output, transport)
     sources = [
         LIB / "MLX90642_python.c",
         LIB / "src" / "MLX90642.c",
-        LIB / "src" / "MLX90642_linux_i2c.c",
+        LIB / "src" / TRANSPORT_SOURCES[transport.kind],
     ]
     command = [
         "gcc",
@@ -133,13 +319,29 @@ class MLX90642Camera:
             ctypes.c_uint16
         ]
         self._library.MLX90642_PythonWaitForNextFrame.restype = ctypes.c_int
+        # The MCP2221A transport can say why a call failed (no acknowledge from
+        # the sensor, bridge unplugged, bus line levels); the header transport
+        # has no such hook, so the detail is optional.
+        try:
+            self._library.MLX90642_TransportLastError.argtypes = []
+            self._library.MLX90642_TransportLastError.restype = ctypes.c_char_p
+            self._last_error = self._library.MLX90642_TransportLastError
+        except AttributeError:
+            self._last_error = None
+
+    def _failure(self, call, status):
+        message = f"{call} failed: {status}"
+        detail = self._last_error() if self._last_error is not None else None
+        if detail:
+            message += ": " + detail.decode("utf-8", "replace")
+        return DriverError(message)
 
     def initialize(self):
         # The C initializer synchronizes a measurement and waits until the
         # first frame is ready, so a successful return makes read_frame usable.
         status = self._library.MLX90642_PythonInit()
         if status < 0:
-            raise DriverError(f"MLX90642_Init failed: {status}")
+            raise self._failure("MLX90642_Init", status)
 
     def read_frame(self):
         # Keep the ctypes array alive for the entire C call; the driver fills it
@@ -147,7 +349,7 @@ class MLX90642Camera:
         frame = self._frame_type()
         status = self._library.MLX90642_PythonReadFrame(frame)
         if status < 0:
-            raise DriverError(f"MLX90642_GetImage failed: {status}")
+            raise self._failure("MLX90642_GetImage", status)
 
         return [signed_word(frame[index]) for index in range(SENSOR_PIXELS)]
 
@@ -156,7 +358,107 @@ class MLX90642Camera:
         # from publishing the same sensor frame repeatedly.
         status = self._library.MLX90642_PythonWaitForNextFrame(1000)
         if status < 0:
-            raise DriverError(f"MLX90642_IsReadWindowOpen failed: {status}")
+            raise self._failure("MLX90642_IsReadWindowOpen", status)
+
+
+class SerialCamera:
+    """Frames from the Arduino Nano ESP32 over USB serial; same interface as MLX90642Camera."""
+
+    def __init__(self, device):
+        try:
+            import serial
+        except ImportError as error:
+            raise DriverError("pyserial is not installed in the app's environment") from error
+        # The baud rate is nominal: the board's USB serial ignores it.
+        self._serial = serial.Serial(device, SERIAL_BAUD, timeout=0.2)
+        self._buffer = bytearray()
+        self._pending = None
+        self.last_status_line = None
+        self.sequence = None
+        self.dropped = 0
+
+    def close(self):
+        try:
+            self._serial.close()
+        except Exception:
+            pass
+
+    def initialize(self):
+        # The board initialises the sensor by itself and reports in '#' lines;
+        # asking it to stream and waiting for the first frame covers both.
+        self._buffer.clear()
+        self._serial.reset_input_buffer()
+        self._serial.write(b"S")
+        self._pending = self._read_packet(SERIAL_FIRST_FRAME_TIMEOUT_SECONDS)
+
+    def read_frame(self):
+        if self._pending is not None:
+            frame, self._pending = self._pending, None
+            return frame
+        return self._read_packet(SERIAL_FRAME_TIMEOUT_SECONDS)
+
+    def wait_for_next_frame(self):
+        # The board paces the stream at the sensor's rate; nothing to wait for.
+        return None
+
+    def _read_packet(self, timeout_seconds):
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            packet = self._extract_packet()
+            if packet is not None:
+                return packet
+            if time.monotonic() >= deadline:
+                detail = f": board says {self.last_status_line!r}" if self.last_status_line else ""
+                raise DriverError(
+                    f"no frame from the Arduino within {timeout_seconds:g} s{detail}"
+                )
+            chunk = self._serial.read(4096)
+            if chunk:
+                self._buffer.extend(chunk)
+
+    def _extract_packet(self):
+        """Pop one valid frame from the buffer; keep '#' status lines; skip noise."""
+        while True:
+            start = self._buffer.find(SERIAL_MAGIC)
+            if start < 0:
+                self._note_status_lines(self._buffer)
+                # Keep a partial magic at the tail.
+                del self._buffer[:max(0, len(self._buffer) - len(SERIAL_MAGIC) + 1)]
+                return None
+            if start > 0:
+                self._note_status_lines(self._buffer[:start])
+                del self._buffer[:start]
+            if len(self._buffer) < SERIAL_PACKET_SIZE:
+                return None
+            packet = bytes(self._buffer[:SERIAL_PACKET_SIZE])
+            body, crc = packet[:-2], int.from_bytes(packet[-2:], "little")
+            if crc16_ccitt(body) != crc:
+                # Corrupt or misaligned: drop the magic and search again.
+                self.dropped += 1
+                del self._buffer[:len(SERIAL_MAGIC)]
+                continue
+            del self._buffer[:SERIAL_PACKET_SIZE]
+            _, sequence, pixels, _flags, _millis = SERIAL_HEADER.unpack_from(body)
+            if pixels != SENSOR_PIXELS:
+                self.dropped += 1
+                continue
+            self.sequence = sequence
+            return list(SERIAL_PIXELS.unpack_from(body, SERIAL_HEADER.size))
+
+    def _note_status_lines(self, data):
+        for line in bytes(data).split(b"\n"):
+            if line.startswith(b"#"):
+                self.last_status_line = line[1:].strip().decode("utf-8", "replace")
+
+
+def crc16_ccitt(data):
+    """CRC-16/CCITT-FALSE, as computed by the sketch."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
 
 
 class MockCamera:
@@ -198,18 +500,28 @@ class CameraWorker(threading.Thread):
         self.events = events
         self.stop_event = stop_event
         self.mock = mock
+        # Set once the sensor path is known; consumers show it in status lines.
+        self.transport = None
 
     def run(self):
+        transport = None
         try:
             # Driver compilation and blocking I2C calls stay off the caller's
             # event thread; results cross back through the thread-safe queue.
             if self.mock:
                 camera = MockCamera()
             else:
-                library_path = build_shared_library()
-                camera = MLX90642Camera(library_path)
+                transport = select_transport()
+                self.transport = transport
+                if transport.kind == TRANSPORT_SERIAL:
+                    self.events.put(("status", f"Opening {transport.device} ({transport.label})"))
+                    camera = SerialCamera(transport.device)
+                else:
+                    self.events.put(("status", f"Building driver ({transport.label})"))
+                    library_path = build_shared_library(transport=transport)
+                    camera = MLX90642Camera(library_path)
 
-            self.events.put(("status", "Initializing camera"))
+            self.events.put(("status", "Initializing camera" + (f" ({transport.label})" if transport else "")))
             camera.initialize()
             self.events.put(("status", "Live"))
 
@@ -247,7 +559,8 @@ class CameraWorker(threading.Thread):
         except Exception as exc:
             # Marshal failures to the consumer instead of letting a daemon
             # thread terminate silently where the user cannot see the cause.
-            self.events.put(("error", str(exc)))
+            message = transport.explain_failure(exc) if transport else str(exc)
+            self.events.put(("error", message))
 
 
 class ThermalRenderer:

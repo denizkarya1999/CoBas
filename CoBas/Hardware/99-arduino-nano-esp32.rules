@@ -1,0 +1,9 @@
+# The thermal camera can also hang off an Arduino Nano ESP32 that streams
+# frames over USB. Flashing the board uses its DFU interface, which is root-only
+# by default; this hands it to plugdev. ModemManager is kept off its serial port.
+# Install with:
+#   sudo install -m 0644 99-arduino-nano-esp32.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# then unplug and replug the board.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2341", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ENV{ID_MM_DEVICE_IGNORE}="1"

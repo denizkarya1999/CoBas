@@ -589,7 +589,8 @@ class ThermalCamera:
                 with self.frame_lock:
                     self.latest_frame = event[1]
                     self.latest_frame_time = event[2]
-                self.status = "Thermal live"
+                transport = getattr(self.worker, "transport", None)
+                self.status = "Thermal live" + (transport.status_suffix if transport else "")
 
         return events
 
