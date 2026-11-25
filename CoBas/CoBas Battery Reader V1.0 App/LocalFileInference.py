@@ -31,8 +31,8 @@ from InferenceMode import (
     discover_models,
     format_battery_level,
 )
-from Style import COLORS, FONTS, px
-from TouchUI import TouchDialog, ask_number, dialogs
+from Style import COLORS, FONTS, is_portrait, px
+from TouchUI import TouchDialog, ask_number, chars_for, dialogs
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp")
 DATASETS_ENVIRONMENT_VARIABLE = "COBAS_DATASETS_DIR"
@@ -197,20 +197,20 @@ class FileBrowserDialog(TouchDialog):
             child.destroy()
         pages = self.page_count
         self.page = max(0, min(self.page, pages - 1))
-        self.path_label.configure(text=shorten(str(self.directory), 84, keep_end=True))
+        self.path_label.configure(text=shorten(str(self.directory), chars_for(self.text_width, "panel_text"), keep_end=True))
         entries = [(folder, True) for folder in self.folders] + [(file, False) for file in self.files]
         if not entries:
             ttk.Label(
                 self.list_frame,
                 text=self.problem or "No folders, pictures or voice recordings here.",
-                style="PanelText.TLabel", wraplength=px(740),
+                style="PanelText.TLabel", wraplength=self.text_width,
             ).pack(anchor="w")
         for path, is_folder in entries[self.page * self.PAGE_SIZE:(self.page + 1) * self.PAGE_SIZE]:
             if is_folder:
-                button = ttk.Button(self.list_frame, text=shorten(path.name, 58) + "  ›", style="Tool.TButton",
+                button = ttk.Button(self.list_frame, text=shorten(path.name, self.button_chars - 3) + "  ›", style="Tool.TButton",
                                     command=lambda p=path: self.open_directory(p))
             else:
-                button = ttk.Button(self.list_frame, text=shorten(path.name, 60), style="Primary.TButton",
+                button = ttk.Button(self.list_frame, text=shorten(path.name, self.button_chars), style="Primary.TButton",
                                     command=lambda p=path: self.finish(p))
             button.pack(fill="x", pady=3)
         self.page_button.configure(text=f"Page {self.page + 1} / {pages}", state="normal" if pages > 1 else "disabled")
@@ -303,11 +303,18 @@ class LocalFileInferencePanel:
         self.refresh_model()
 
     def build(self, parent):
-        parent.columnconfigure(0, weight=1, uniform="local-file")
-        parent.columnconfigure(1, weight=1, uniform="local-file")
-        parent.rowconfigure(0, weight=1)
+        # Picture beside the controls on a landscape panel; controls above the picture on a portrait one.
+        portrait = is_portrait()
         picture = ttk.Frame(parent, style="Panel.TFrame")
-        picture.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
+        if portrait:
+            parent.columnconfigure(0, weight=1)
+            parent.rowconfigure(1, weight=1)
+            picture.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        else:
+            parent.columnconfigure(0, weight=1, uniform="local-file")
+            parent.columnconfigure(1, weight=1, uniform="local-file")
+            parent.rowconfigure(0, weight=1)
+            picture.grid(row=0, column=0, sticky="nsew", padx=(8, 0), pady=8)
         self.result_label = tk.Label(picture, text=format_battery_level("—"), bg=COLORS["panel_bg"],
                                      fg=COLORS["accent"], font=RESULT_FONT)
         self.result_label.pack(side="bottom", fill="x", pady=(6, 0))
@@ -318,7 +325,10 @@ class LocalFileInferencePanel:
         self.preview.bind("<Configure>", self.handle_preview_resized)
 
         controls = ttk.Frame(parent, style="Panel.TFrame", padding=10)
-        controls.grid(row=0, column=1, sticky="nsew")
+        if portrait:
+            controls.grid(row=0, column=0, sticky="new")
+        else:
+            controls.grid(row=0, column=1, sticky="nsew")
         ttk.Label(controls, text="Local File Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, 5))
         ttk.Label(controls, text="Model", style="PanelText.TLabel").pack(anchor="w")
         self.model_button = ttk.Button(controls, style="Tool.TButton", command=self.choose_model)

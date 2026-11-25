@@ -12,6 +12,7 @@ import sys
 import threading
 import tempfile
 import tkinter as tk
+import tkinter.font as tkfont
 import wave
 from datetime import datetime
 from pathlib import Path
@@ -21,8 +22,9 @@ from TouchUI import NumberControl, ask_number, dialogs as messagebox
 from AudioDevices import list_audio_choices
 from About import show_about_window
 from Camera.thermal_camera import ThermalCamera
-from Display import find_touch_display
+from Display import can_rotate, find_touch_display, load_rotation, prepare_touch_display, rotate_touch_display, save_rotation
 from InferenceMode import (
+    MODE_COLLECT,
     MODE_INFER,
     ChirpJob,
     InferenceEngine,
@@ -37,7 +39,8 @@ from LocalFileInference import LocalFileInferencePanel
 from MMWave import MMWaveCaptureService
 from PIL import Image, ImageTk
 from Settings import SettingsWindow
-from Style import COLORS, FONTS, PREVIEW, SPACING, WINDOW, apply_styles, configure_for_display, is_compact, px
+from Style import (BASE_WINDOW, COLORS, FONTS, PREVIEW, SPACING, WINDOW, apply_styles, configure_for_display,
+                   is_compact, is_portrait, px)
 
 APP_TITLE = "CoBas Battery Reader V1.0"
 APP_WM_CLASS = "cobas_battery_reader_v1"
@@ -117,9 +120,13 @@ class CoBasV1App:
         self.root.title(APP_TITLE)
         self.root.iconname(APP_TITLE)
         self.root.withdraw()
-        # Fill the touch panel (an SPI or DSI output) when one is attached. The
+        # A relaunch (for the next battery, or after turning the panel) hands its settings over in the environment.
+        self.restart_state = self.read_restart_state()
+        # Fill the touch panel (an SPI or DSI output) when one is attached, turned
+        # the way the operator chose (portrait unless changed in Settings). The
         # layout was designed at 800 x 480; every size scales from the panel's size.
-        self.touch_display = find_touch_display()
+        self.touch_display = prepare_touch_display()
+        self.display_rotation = load_rotation() if self.touch_display and can_rotate() else None
         if self.touch_display:
             configure_for_display(self.touch_display["width"], self.touch_display["height"],
                                   self.touch_display["x"], self.touch_display["y"])
@@ -170,6 +177,9 @@ class CoBasV1App:
             )
             self.model_choices = discover_models()
             self.selected_model = default_model(self.model_choices)
+            saved_model = (self.restart_state or {}).get("model")  # the model in use before the panel was turned
+            if saved_model:
+                self.selected_model = next((c for c in self.model_choices if str(c.path) == saved_model), self.selected_model)
 
         self.is_closing = False
         self.is_preparing_tracking = False
@@ -218,7 +228,7 @@ class CoBasV1App:
 
         self.set_app_icon()
         self.root.resizable(True, True)
-        self.root.minsize(px(760), px(440))
+        self.root.minsize(px(BASE_WINDOW["width"] - 40), px(BASE_WINDOW["height"] - 40))
         self.build_gui()
         self.refresh_info_panel()
         self.mmwave_poll_after_id = self.root.after(50, self.poll_mmwave_events)
@@ -229,7 +239,8 @@ class CoBasV1App:
             self.update_status("Status: No models found. Tap Model to choose one once checkpoints are installed.", "● WARNING")
 
     def request_app_mode(self):
-        mode = choose_app_mode(self.root)
+        saved = (self.restart_state or {}).get("app_mode")
+        mode = saved if saved in (MODE_COLLECT, MODE_INFER) else choose_app_mode(self.root)
         if mode is None:
             self.root.destroy()
             raise SystemExit(0)
@@ -250,25 +261,39 @@ class CoBasV1App:
             "speaker": [self.audio.speaker_device_id, self.audio.speaker_device_name],
         }
 
+    @staticmethod
+    def read_restart_state():
+        """The settings a relaunch was given (see restart_application), taken out of the environment."""
+        raw = os.environ.pop(RESTART_SETTINGS_VARIABLE, None)
+        if not raw:
+            return None
+        try:
+            state = json.loads(raw)
+        except ValueError as error:
+            print(f"[WARNING] Earlier settings could not be read: {error}")
+            return None
+        return state if isinstance(state, dict) else None
+
     def restore_settings_after_restart(self):
-        """Keep the capture settings when the app relaunches for the next battery.
+        """Keep the settings when the app relaunches for the next battery or after turning the panel.
 
         Without this every relaunch fell back to 20 chirps, one position, the
         default thermal range and automatic audio, so two batteries of one
         dataset could be recorded differently without anyone noticing.
         """
-        raw = os.environ.pop(RESTART_SETTINGS_VARIABLE, None)
-        if not raw or self.inference_mode:
+        saved = self.restart_state
+        if not saved:
             return
         try:
-            saved = json.loads(raw)
             self.thermal_camera.set_temperature_range(*saved["thermal_range"])
             self.thermal_camera.set_display_mode(saved["thermal_display"])
             self.audio.set_microphone_device(*saved["microphone"])
             self.audio.set_speaker_device(*saved["speaker"])
+            self.pulse_count_text.set(str(int(saved["pulse_count"])))
+            if self.inference_mode:
+                return  # position handling belongs to Data Collection
             if saved["position_mode"] not in ("no-change", "position-based"):
                 raise ValueError(f"unknown position mode {saved['position_mode']!r}")
-            self.pulse_count_text.set(str(int(saved["pulse_count"])))
             self.position_count_text.set(str(int(saved["position_count"])))
             self.position_mode_text.set(saved["position_mode"])
         except (KeyError, TypeError, ValueError) as error:
@@ -336,6 +361,12 @@ class CoBasV1App:
         )
 
     def request_battery_percentage(self):
+        saved = (self.restart_state or {}).get("battery_percentage")
+        if saved is not None:
+            try:
+                return parse_battery_percentage(saved)  # the panel was turned mid-session: same battery
+            except ValueError:
+                pass
         value = ask_number(self.root, "Battery percentage (%)", minimum=0, maximum=100)
         if value is None:
             self.root.destroy()
@@ -359,16 +390,59 @@ class CoBasV1App:
         outer = ttk.Frame(self.root, style="Main.TFrame")
         outer.pack(fill="both", expand=True)
         self.build_toolbar(outer)
+        self.build_footer(outer)
 
-        # Reserve the capture action and status before allocating preview space.
-        footer = ttk.Frame(outer, style="Panel.TFrame", padding=(px(10), px(6)), height=px(84))
+        self.notebook = ttk.Notebook(outer, style="Touch.TNotebook")
+        self.notebook.pack(fill="both", expand=True, padx=px(8), pady=px(4 if is_compact() else 6))
+        preview = ttk.Frame(self.notebook, style="Panel.TFrame")
+        setup = ttk.Frame(self.notebook, style="Panel.TFrame")
+        system = ttk.Frame(self.notebook, style="Panel.TFrame")
+        names = self.tab_names(
+            {"preview": "Live sensors", "setup": "Inference setup" if self.inference_mode else "Capture setup",
+             "local": "Local File Inference", "system": "System"},
+            {"preview": "Live", "setup": "Setup", "local": "Local file", "system": "System"},
+        )
+        self.notebook.add(preview, text=names["preview"])
+        self.notebook.add(setup, text=names["setup"])
+        if self.inference_mode:
+            self.local_file_tab = ttk.Frame(self.notebook, style="Panel.TFrame")
+            self.notebook.add(self.local_file_tab, text=names["local"])
+            self.local_file_panel = LocalFileInferencePanel(self.local_file_tab, self)
+            self.notebook.bind("<<NotebookTabChanged>>", self.handle_tab_changed)
+        self.notebook.add(system, text=names["system"])
+        self.build_preview_panel(preview)
+        self.build_control_panel(setup)
+        self.build_system_panel(system)
+        self.notebook.select(setup)
+
+    def tab_names(self, full, short):
+        """The full tab names when the tab bar is wide enough for all of them, else the short ones.
+
+        ttk hides the tabs that do not fit instead of wrapping them, and the
+        four Inference Mode names do not fit a 320-pixel-wide portrait panel.
+        """
+        keys = [key for key in full if key != "local" or self.inference_mode]
+        font = tkfont.Font(font=FONTS["button_bold"])
+        needed = sum(font.measure(full[key]) + 2 * px(22) + 4 for key in keys)
+        return full if needed <= WINDOW["width"] - 2 * px(8) - 4 else short
+
+    def build_footer(self, parent):
+        """Reserve the capture action and status before the tabs take the rest of the height."""
+        portrait = is_portrait()
+        footer = ttk.Frame(parent, style="Panel.TFrame", padding=(px(10), px(6)), height=px(100 if portrait else 84))
         footer.pack(side="bottom", fill="x")
         footer.pack_propagate(False)
-        self.track_button = ttk.Button(footer, text=self.start_button_text(), style="Start.TButton",
-                                       command=self.toggle_tracking, width=17)
+        self.footer = footer
+        # On a portrait panel the counter and the button share the top row and the status gets the full width below.
+        top = footer
+        if portrait:
+            top = ttk.Frame(footer, style="Panel.TFrame")
+            top.pack(fill="x")
+        self.track_button = ttk.Button(top, text=self.start_button_text(), style="Start.TButton",
+                                       command=self.toggle_tracking, width=15 if portrait else 17)
         self.track_button.pack(side="right", padx=(10, 0))
         self.record_timer_label = ttk.Label(
-            footer,
+            top,
             text=format_battery_level("—") if self.inference_mode else "Pulses: 0/20",
             style="PanelTitle.TLabel",
         )
@@ -377,26 +451,8 @@ class CoBasV1App:
                                       style="Info.TLabel", wraplength=px(500))
         self.status_label.pack(fill="x", expand=True, anchor="w")
         self.status_label.bind("<Button-1>", lambda e: messagebox.showinfo("Capture status", self.status_label.cget("text"), parent=self.root))
-        footer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(px(220), e.width - px(270))))
-
-        self.notebook = ttk.Notebook(outer, style="Touch.TNotebook")
-        self.notebook.pack(fill="both", expand=True, padx=px(8), pady=px(4 if is_compact() else 6))
-        preview = ttk.Frame(self.notebook, style="Panel.TFrame")
-        setup = ttk.Frame(self.notebook, style="Panel.TFrame")
-        system = ttk.Frame(self.notebook, style="Panel.TFrame")
-        self.notebook.add(preview, text="Live sensors")
-        self.notebook.add(setup, text="Inference setup" if self.inference_mode else "Capture setup")
-        if self.inference_mode:
-            self.footer = footer
-            self.local_file_tab = ttk.Frame(self.notebook, style="Panel.TFrame")
-            self.notebook.add(self.local_file_tab, text="Local File Inference")
-            self.local_file_panel = LocalFileInferencePanel(self.local_file_tab, self)
-            self.notebook.bind("<<NotebookTabChanged>>", self.handle_tab_changed)
-        self.notebook.add(system, text="System")
-        self.build_preview_panel(preview)
-        self.build_control_panel(setup)
-        self.build_system_panel(system)
-        self.notebook.select(setup)
+        taken, least = (2 * px(10), px(160)) if portrait else (px(270), px(220))
+        footer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(least, e.width - taken)))
 
     def handle_tab_changed(self, event=None):
         """Local File Inference has its own read-out, so the live-capture footer
@@ -410,6 +466,13 @@ class CoBasV1App:
     def build_toolbar(self, parent):
         toolbar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(px(8), px(4)))
         toolbar.pack(fill="x")
+        if is_portrait():
+            # A 320-pixel row holds a short title, Settings and Close; About and Window are on the System tab.
+            title = "Inference" if self.inference_mode else f"Battery {self.battery_percentage}%"
+            ttk.Label(toolbar, text=title, style="ToolbarTitle.TLabel").pack(side="left", padx=(0, 10))
+            ttk.Button(toolbar, text="Close", style="Danger.TButton", command=self.request_close).pack(side="right", padx=(6, 0))
+            ttk.Button(toolbar, text="Settings", style="Settings.TButton", command=lambda: SettingsWindow(self.root, self)).pack(side="right", padx=3)
+            return
         title = "CoBas  ·  Inference" if self.inference_mode else f"CoBas  ·  {self.battery_percentage}%"
         ttk.Label(toolbar, text=title, style="ToolbarTitle.TLabel").pack(side="left", padx=(0, 10))
         ttk.Button(toolbar, text="Close", width=5, style="Danger.TButton", command=self.request_close).pack(side="right", padx=(6,0))
@@ -484,29 +547,42 @@ class CoBasV1App:
         self.live_indicator_label.pack(side="right")
         area = ttk.Frame(parent, style="Panel.TFrame")
         area.pack(fill="both", expand=True, padx=px(8), pady=(0, px(8)))
-        area.rowconfigure(1, weight=1)
-        for col, title in enumerate(("mmWave radar", "Thermal camera")):
-            area.columnconfigure(col, weight=1, uniform="sensor")
-            ttk.Label(area, text=title, style="PanelText.TLabel").grid(row=0, column=col, sticky="w", padx=4, pady=(0,4))
         self.mmwave_label = tk.Label(area, text=f"Radar ready.\n\nTap {self.start_button_text()} to connect.",
                                      bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
                                      font=FONTS["preview_text"], width=1, height=1, wraplength=px(330), bd=0)
         self.thermal_video_label = tk.Label(area, text=f"Thermal camera ready.\n\nTap {self.start_button_text()} to begin.",
                                             bg=COLORS["preview_bg"], fg=COLORS["muted_text"],
                                             font=FONTS["preview_text"], width=1, height=1, wraplength=px(330), bd=0)
-        for col, label in enumerate((self.mmwave_label, self.thermal_video_label)):
-            label.grid(row=1, column=col, sticky="nsew", padx=4)
+        # The two sensors sit side by side on a landscape panel and one above the other on a portrait one.
+        portrait = is_portrait()
+        for index, (title, label) in enumerate((("mmWave radar", self.mmwave_label), ("Thermal camera", self.thermal_video_label))):
+            title_row, title_column = (2 * index, 0) if portrait else (0, index)
+            if portrait:
+                area.rowconfigure(title_row + 1, weight=1, uniform="sensor")
+            else:
+                area.columnconfigure(title_column, weight=1, uniform="sensor")
+            ttk.Label(area, text=title, style="PanelText.TLabel").grid(row=title_row, column=title_column, sticky="w", padx=4, pady=(0, 4))
+            label.grid(row=title_row + 1, column=title_column, sticky="nsew", padx=4, pady=(0, px(6)) if portrait else 0)
             label.bind("<Configure>", lambda e, widget=label: widget.configure(wraplength=max(100, e.width - 12)))
+        if portrait:
+            area.columnconfigure(0, weight=1)
+        else:
+            area.rowconfigure(1, weight=1)
 
     def build_control_panel(self, parent):
-        # The capture controls need the wider column: two position-mode buttons share one row.
-        parent.columnconfigure(0, weight=11, uniform="setup")
-        parent.columnconfigure(1, weight=9, uniform="setup")
         padding = px(8 if is_compact() else 10)
         controls = ttk.Frame(parent, style="Panel.TFrame", padding=padding)
-        controls.grid(row=0, column=0, sticky="nsew")
         thermal = ttk.Frame(parent, style="Panel.TFrame", padding=padding)
-        thermal.grid(row=0, column=1, sticky="nsew")
+        if is_portrait():  # the thermal controls go below the capture controls
+            parent.columnconfigure(0, weight=1)
+            controls.grid(row=0, column=0, sticky="new")
+            thermal.grid(row=1, column=0, sticky="new")
+        else:
+            # The capture controls need the wider column: two position-mode buttons share one row.
+            parent.columnconfigure(0, weight=11, uniform="setup")
+            parent.columnconfigure(1, weight=9, uniform="setup")
+            controls.grid(row=0, column=0, sticky="nsew")
+            thermal.grid(row=0, column=1, sticky="nsew")
         if self.inference_mode:
             self.build_inference_controls(controls)
             self.build_thermal_controls(thermal)
@@ -543,7 +619,8 @@ class CoBasV1App:
         """Left column of the Inference setup tab: model and chirps per estimate."""
         self.position_mode_buttons = {}
         self.position_count_spinbox = None
-        self.pulse_count_text.set("1")
+        if not self.restart_state:  # a relaunch after turning the panel keeps the chosen count
+            self.pulse_count_text.set("1")
         if not is_compact():  # the tab already says "Inference setup"; small panels need the height
             ttk.Label(parent, text="Inference", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, px(5)))
         ttk.Label(parent, text="Model", style="PanelText.TLabel").pack(anchor="w")
@@ -682,10 +759,17 @@ class CoBasV1App:
         ttk.Label(parent, text="Thermal display (°C)", style="PanelTitle.TLabel").pack(anchor="w", pady=(0, px(5)))
         row = ttk.Frame(parent, style="Panel.TFrame")
         row.pack(fill="x")
-        for title, variable, attr in (("Minimum", self.thermal_min_text, "thermal_min_entry"),
-                                      ("Maximum", self.thermal_max_text, "thermal_max_entry")):
-            ttk.Label(row, text=title, style="PanelText.TLabel").pack(anchor="w")
-            control = NumberControl(row, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
+        portrait = is_portrait()  # minimum and maximum share a row on a portrait panel, where height is short
+        for column, (title, variable, attr) in enumerate((("Minimum", self.thermal_min_text, "thermal_min_entry"),
+                                                          ("Maximum", self.thermal_max_text, "thermal_max_entry"))):
+            cell = ttk.Frame(row, style="Panel.TFrame")
+            if portrait:
+                row.columnconfigure(column, weight=1, uniform="thermal")
+                cell.grid(row=0, column=column, sticky="ew", padx=(0, px(6)) if column == 0 else (px(6), 0))
+            else:
+                cell.pack(fill="x")
+            ttk.Label(cell, text=title, style="PanelText.TLabel").pack(anchor="w")
+            control = NumberControl(cell, variable, title + " temperature", minimum=0, maximum=60, decimal=True)
             control.pack(fill="x", pady=(0, px(4)))
             setattr(self, attr, control)
         modes = ttk.Frame(parent, style="Panel.TFrame")
@@ -700,12 +784,21 @@ class CoBasV1App:
             self.thermal_scale_buttons.append(button)
 
     def build_system_panel(self, parent):
+        if is_portrait():  # the toolbar has no room for these two on a portrait panel
+            actions = ttk.Frame(parent, style="Panel.TFrame", padding=(px(12), 0, px(12), px(12)))
+            actions.pack(side="bottom", fill="x")
+            ttk.Button(actions, text="About", style="Tool.TButton", command=lambda: show_about_window(self.root)).pack(side="left", fill="x", expand=True, padx=(0, px(6)))
+            self.window_button = ttk.Button(actions, text="Window", style="Tool.TButton", command=self.toggle_touch_mode)
+            self.window_button.pack(side="left", fill="x", expand=True, padx=(px(6), 0))
         info = ttk.Frame(parent, style="Panel.TFrame", padding=px(12))
         info.pack(fill="both", expand=True)
+        labels = []
         for attr in ("radar_info_label", "thermal_info_label", "microphone_info_label", "speaker_info_label", "output_info_label", "rate_info_label"):
-            label = ttk.Label(info, style="PanelText.TLabel", wraplength=px(720))
+            label = ttk.Label(info, style="PanelText.TLabel", wraplength=WINDOW["width"] - 6 * px(12))
             label.pack(anchor="w", pady=(0, px(6)))
             setattr(self, attr, label)
+            labels.append(label)
+        info.bind("<Configure>", lambda e: [label.configure(wraplength=max(px(200), e.width - 2 * px(12))) for label in labels])
 
     @staticmethod
     def build_spinbox_row(parent, label, variable, maximum):
@@ -1915,15 +2008,44 @@ class CoBasV1App:
         else:
             self.on_close()
 
-    def restart_application(self):
-        """Close all current resources and replace this process with a fresh app."""
+    def change_display_rotation(self, rotation):
+        """Turn the touch panel, then relaunch so the layout fits the new shape (touch follows the output)."""
+        if self.pulse_sequence_active or self.export_in_progress or self.is_closing:
+            messagebox.showwarning("Capture active", "Stop tracking before turning the screen.", parent=self.root)
+            return
+        save_rotation(rotation)
+        self.display_rotation = rotation
+        if not (self.touch_display and can_rotate()):
+            return
+        try:
+            display = rotate_touch_display(self.touch_display, rotation)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            messagebox.showerror("Screen", f"The panel could not be turned: {error}", parent=self.root)
+            return
+        if (display["width"], display["height"]) == (WINDOW["width"], WINDOW["height"]):
+            self.touch_display = display  # upside down keeps the layout; only the place may differ
+            self.follow_touch_display(display)
+            return
+        self.restart_application(keep_mode=True)
+
+    def restart_application(self, keep_mode=False):
+        """Close all current resources and replace this process with a fresh app.
+
+        With keep_mode the relaunch asks neither the mode nor the battery
+        percentage again: the operator only turned the panel.
+        """
         script_path = os.path.abspath(__file__)
         command_arguments = [
             sys.executable,
             script_path,
             *sys.argv[1:],
         ]
-        os.environ[RESTART_SETTINGS_VARIABLE] = json.dumps(self.capture_settings())
+        state = self.capture_settings()
+        if keep_mode:
+            state.update(app_mode=self.app_mode, battery_percentage=self.battery_percentage)
+            if self.selected_model is not None:
+                state["model"] = str(self.selected_model.path)
+        os.environ[RESTART_SETTINGS_VARIABLE] = json.dumps(state)
         self.on_close()
         os.execv(sys.executable, command_arguments)
 

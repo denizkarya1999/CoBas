@@ -1,8 +1,16 @@
 """Touch-sized controls and dialogs for the CoBas touch display (designed at 800 x 480, scaled by Style.px)."""
 import math
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
-from Style import COLORS, FONTS, WINDOW, px
+from Style import BASE_WINDOW, COLORS, DESIGNS, FONTS, WINDOW, px
+
+
+def chars_for(width, font='button'):
+    """How many average characters of a font fit in width pixels, for labels that cannot wrap (buttons)."""
+    sample = 'abcdefghijklmnopqrstuvwxyz0123456789 '
+    per_char = tkfont.Font(font=FONTS[font]).measure(sample) / len(sample)
+    return max(8, int(width / per_char))
 
 
 class TouchDialog(tk.Toplevel):
@@ -21,17 +29,37 @@ class TouchDialog(tk.Toplevel):
             pw, ph, left, top = parent.winfo_width(), parent.winfo_height(), parent.winfo_x(), parent.winfo_y()
         else:
             pw, ph, left, top = WINDOW['width'], WINDOW['height'], WINDOW['x'], WINDOW['y']
+        # Sizes are written for the 800 x 480 design. On a portrait panel a dialog
+        # is as wide as the panel and keeps the share of the height it was designed
+        # with: one that covers most of a landscape panel covers most of a portrait one.
+        height = round(height * BASE_WINDOW['height'] / DESIGNS['landscape']['height'])
         width, height = min(px(width), pw), min(px(height), ph)
-        x = left + max(0, (pw - width) // 2)
-        y = top + max(0, (ph - height) // 2)
-        self.geometry(f'{width}x{height}+{x}+{y}')
+        self.parent_box = (pw, ph, left, top)
+        self.size = (width, height)
+        self.place_dialog()
+        self.text_width = width - 2 * px(12) - px(6)  # what a wrapped label in the body may span
+        self.button_chars = chars_for(self.text_width - 2 * px(12))  # what fits on a full-width button
         self.protocol('WM_DELETE_WINDOW', self.cancel)
         self.bind('<Escape>', lambda event: self.cancel())
         self.body = ttk.Frame(self, style='Panel.TFrame', padding=px(12))
         self.body.pack(fill='both', expand=True)
         ttk.Label(self.body, text=title, style='PanelTitle.TLabel').pack(anchor='w', pady=(0, 8))
 
+    def place_dialog(self):
+        width, height = self.size
+        pw, ph, left, top = self.parent_box
+        self.geometry(f'{width}x{height}+{left + max(0, (pw - width) // 2)}+{top + max(0, (ph - height) // 2)}')
+
+    def fit_height(self):
+        """Grow to the content when it is taller than the height the dialog was given, never past the panel."""
+        self.update_idletasks()
+        needed = min(self.winfo_reqheight(), self.parent_box[1])
+        if needed > self.size[1]:
+            self.size = (self.size[0], needed)
+            self.place_dialog()
+
     def show(self):
+        self.fit_height()
         self.deiconify()
         self.wait_visibility()
         self.grab_set()
@@ -82,7 +110,7 @@ class NumberDialog(TouchDialog):
         for c in range(4):
             keys.columnconfigure(c, weight=1, uniform='key')
         for r, row in enumerate(layout):
-            keys.rowconfigure(r, weight=1, minsize=48)
+            keys.rowconfigure(r, weight=1, minsize=px(48))
             for c, key in enumerate(row):
                 if not key or (r == 3 and c == 1):
                     continue

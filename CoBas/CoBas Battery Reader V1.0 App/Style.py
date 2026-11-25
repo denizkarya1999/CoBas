@@ -2,11 +2,16 @@
 
 The layout was designed at 800 x 480. configure_for_display() rescales every
 font, spacing and preview size to the touch panel that is attached, and px()
-scales any other pixel size written for the 800 x 480 design.
+scales any other pixel size written for the 800 x 480 design. A panel that
+stands upright (portrait) is scaled from the same design turned on its side,
+480 x 800, so fonts and buttons keep the size they have in landscape and the
+layout code stacks what it put side by side (see is_portrait()).
 """
 from tkinter import ttk
 
-BASE_WINDOW = {'width': 800, 'height': 480}
+DESIGNS = {'landscape': {'width': 800, 'height': 480}, 'portrait': {'width': 480, 'height': 800}}
+ORIENTATION = 'landscape'
+BASE_WINDOW = dict(DESIGNS['landscape'])  # the design the current display is scaled from
 WINDOW = {'width': 800, 'height': 480, 'x': 0, 'y': 0}
 PREVIEW = {'width': 740, 'height': 250}
 SCALE = 1.0
@@ -44,12 +49,19 @@ def is_compact():
     return SCALE < 0.75
 
 
+def is_portrait():
+    """True when the display is taller than wide, so panels that sit side by side are stacked instead."""
+    return ORIENTATION == 'portrait'
+
+
 def configure_for_display(width, height, x=0, y=0):
     """Size the layout for a display of width x height placed at x, y; call before building widgets."""
-    global SCALE
+    global SCALE, ORIENTATION
+    ORIENTATION = 'portrait' if height > width else 'landscape'
+    BASE_WINDOW.update(DESIGNS[ORIENTATION])
     SCALE = max(0.5, min(width / BASE_WINDOW['width'], height / BASE_WINDOW['height'], 1.5))
     WINDOW.update(width=width, height=height, x=x, y=y)
-    PREVIEW.update(width=px(740), height=px(250))
+    PREVIEW.update(width=px(BASE_WINDOW['width'] - 60), height=px(250))
     for name, (family, size, *weight) in _BASE_FONTS.items():
         FONTS[name] = (family, -max(9, round(-size * SCALE)), *weight)
     for name, value in _BASE_SPACING.items():

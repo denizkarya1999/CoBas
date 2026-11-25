@@ -13,7 +13,10 @@ correctly (98.4 %) across the 16 models.
 
 ## The Battery Reader app
 
-The app runs on a Raspberry Pi 5 with a touchscreen (today a 3.5-inch 480×320 SPI panel next to an HDMI monitor; the app finds the panel and scales its 800×480 layout to it), a TI IWR6843AOP
+The app runs on a Raspberry Pi 5 with a touchscreen (today a 3.5-inch SPI panel
+of 480×320 pixels standing upright next to an HDMI monitor; the app finds the
+panel, turns it to portrait and lays itself out for 320×480, see
+[the panel's orientation](#the-touch-panels-orientation)), a TI IWR6843AOP
 mmWave radar, a Melexis MLX90642 thermal camera (on the Pi's I2C header,
 through an MCP2221A USB-to-I2C bridge, or on an Arduino Nano ESP32 over USB,
 see [below](#the-thermal-camera-over-usb)), a USB speaker and a USB
@@ -151,6 +154,33 @@ It writes `~/.config/autostart/cobas.desktop`, which the desktop session runs
 at login; `./install-autostart.sh --remove` undoes it. The app keeps covering
 the touch panel if the screen layout changes after it has started, for example
 when an HDMI monitor is detected a little later than the panel at boot.
+
+## The touch panel's orientation
+
+The panel stands upright: the app starts it in portrait (320×480) and stacks
+the two sensor views, the capture controls and the thermal controls instead of
+placing them side by side, with About and Window on the System tab. **Settings
+→ Screen** offers Landscape, Portrait and the two upside-down variants;
+applying one turns the panel and relaunches the app in the same mode (and, in
+Data Collection, for the same battery), laid out for the new shape. The choice
+is kept in `~/.config/cobas/display.json` and the app turns the panel again
+every time it starts, so it survives a reboot. In the app folder,
+`python Display.py` prints the panel and the saved rotation, and
+`python Display.py 0` turns the panel to landscape without starting the app.
+
+How it works, for whoever maintains the Pi:
+
+- The rotation is a compositor transform that the app sets with `wlr-randr` on
+  the panel's output (`SPI-1`); the `piscreen` overlay in
+  `/boot/firmware/config.txt` stays at `rotate=0`. The kanshi profiles in
+  `~/.config/kanshi/config` name no transform for `SPI-1`, so kanshi keeps
+  whatever the app set when it re-applies a profile (at login, and when the
+  HDMI monitor is detected).
+- labwc turns touch input with the output the touchscreen is mapped to
+  (`<touch mapToOutput="SPI-1">` in `~/.config/labwc/rc.xml`), so the touch
+  calibration stays as the udev rule sets it
+  (`/etc/udev/rules.d/99-hosyond-touch-calibration.rules`, fitted in
+  landscape) and needs no change for any rotation.
 
 ## Models
 
